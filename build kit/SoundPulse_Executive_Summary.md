@@ -397,6 +397,21 @@ The end-to-end pipeline from intelligence to music generation:
 │    - Stable Audio: text prompt + duration control    │
 │                                                      │
 │    SoundPulse translates Song DNA → model prompts    │
+│                                                      │
+│    Input Parameter Support by Model:                 │
+│    ┌────────────┬───────┬──────┬────────┬──────────┐│
+│    │ Parameter  │ Suno  │Udio  │MusicGen│ SOUNDRAW ││
+│    ├────────────┼───────┼──────┼────────┼──────────┤│
+│    │ Genre      │style  │prompt│ text   │ param    ││
+│    │ Tempo      │style  │prompt│ text   │ param    ││
+│    │ Mood       │tags   │prompt│ text   │ param    ││
+│    │ Structure  │[Verse]│lyrics│ N/A    │ N/A      ││
+│    │ Vocals     │gender │gender│ N/A    │ N/A      ││
+│    │ Lyrics     │full   │full  │ N/A    │ N/A      ││
+│    │ Instruments│tags   │prompt│ text   │ limited  ││
+│    │ Audio ref  │upload │upload│melody  │ N/A      ││
+│    │ Neg control│tags   │ N/A  │ N/A    │ N/A      ││
+│    └────────────┴───────┴──────┴────────┴──────────┘│
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐
@@ -443,6 +458,58 @@ Suno/Udio Prompt:
 ```
 
 This prompt engineering layer is the bridge between SoundPulse intelligence and music output. The system should be able to generate prompts for any genre at any moment, tailored to what's currently trending.
+
+---
+
+## Music Generation Model Specifications
+
+### Suno (Primary — richest input surface)
+
+| Parameter | Description |
+|---|---|
+| `style` | Genre/mood/instrumentation string (up to 1000 chars) |
+| `prompt` | Lyrics with section meta tags: `[Verse]`, `[Chorus]`, `[Bridge]`, `[Drop]`, `[Build]` |
+| `vocalGender` | `"m"` or `"f"` |
+| `negativeTags` | Elements to exclude |
+| `styleWeight` | How strictly to follow style tags |
+| `instrumental` | Boolean for instrumental-only |
+
+Lyrics support vocal delivery tags (`[Whispered]`, `[Belted]`, `[Falsetto]`) and instrument tags (`[Piano]`, `[808s]`, `[Distorted Guitar]`). No official public API — third-party wrappers via sunoapi.org. Paid plans required for commercial use.
+
+### Udio (Alternative — audio conditioning)
+
+Similar parameter surface to Suno plus `audio_conditioning_path` for reference audio style transfer. No official API — third-party wrappers exist. All plans allow commercial use.
+
+### MusicGen by Meta (Open Source — instrumental only)
+
+| Parameter | Description |
+|---|---|
+| `prompt` | Text descriptions for generation |
+| `melody` | Reference audio tensor (chromagram extracted for melody conditioning) |
+| `guidance_scale` | CFG weighting (recommended: 3.0) |
+| `duration` | Output length in seconds (up to 30s on Replicate) |
+| `temperature` | Randomness control |
+
+Available via `pip install audiocraft`, Replicate API, or HuggingFace. Code is MIT but **model weights are CC-BY-NC** — commercial use requires fine-tuning your own weights.
+
+### SOUNDRAW (Most Structured API — background/sync music)
+
+| Parameter | Description |
+|---|---|
+| `mood` | 24+ categories (Angry, Dreamy, Elegant, Happy, Mysterious, Powerful, etc.) |
+| `genre` | Explicit genre parameter |
+| `tempo` / `tempo_2` | BPM range |
+| `energy_levels` | Energy profile over time |
+| `length` | Duration |
+
+REST API at `soundraw.io/api/v2/musics/compose`. Up to 1000 songs/month. All generated music is royalty-free. The cleanest programmatic API for parameter-driven generation.
+
+### Recommended Pipeline Architecture
+
+1. **Suno** for full songs with vocals (richest control over lyrics, structure, vocal style)
+2. **SOUNDRAW** for programmatic batch generation (explicit parameter API, royalty-free)
+3. **MusicGen** for self-hosted instrumental generation (open source, melody conditioning)
+4. **Stable Audio** for sound design, intros, atmospheric layers (max 47s clips)
 
 ---
 
