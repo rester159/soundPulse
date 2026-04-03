@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
-from api.dependencies import require_admin, require_api_key
+from api.dependencies import require_admin, get_api_key_record
 from api.models.api_key import ApiKey
 from api.models.backtest_result import BacktestResult
 from api.schemas.backtesting import BacktestRunRequest
@@ -68,7 +68,7 @@ async def get_results(
     genre: str | None = Query(None),
     horizon: str = Query("7d"),
     db: AsyncSession = Depends(get_db),
-    _key: ApiKey = Depends(require_api_key),
+    _key: ApiKey = Depends(get_api_key_record),
 ):
     """Get backtest results as a timeline for charting."""
     timeline = await get_backtest_timeline(db, run_id, entity_type, genre, horizon)
@@ -109,7 +109,7 @@ async def get_results(
 @router.get("/api/v1/backtesting/runs")
 async def list_runs(
     db: AsyncSession = Depends(get_db),
-    _key: ApiKey = Depends(require_api_key),
+    _key: ApiKey = Depends(get_api_key_record),
 ):
     """List all backtest runs."""
     result = await db.execute(
@@ -154,7 +154,7 @@ async def list_runs(
 async def genre_breakdown(
     run_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _key: ApiKey = Depends(require_api_key),
+    _key: ApiKey = Depends(get_api_key_record),
 ):
     """Get per-genre accuracy breakdown."""
     genres = await get_genre_breakdown(db, run_id)

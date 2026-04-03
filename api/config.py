@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     apple_music_private_key_path: str = ""
     celery_broker_url: str = ""
     celery_result_backend: str = ""
+    genius_api_key: str = ""
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 @lru_cache
