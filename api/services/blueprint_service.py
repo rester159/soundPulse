@@ -32,71 +32,82 @@ async def get_genre_opportunities(db: AsyncSession) -> list[dict]:
     Rank genres by opportunity score = trending velocity x inverse saturation.
     Returns genres sorted by which ones have the most untapped potential.
     """
-    lookback = date.today() - timedelta(days=30)
+    lookback = date.today() - timedelta(days=60)
 
-    # Get genres with recent trending activity
+    # Get recent snapshots with their signals (which contain genre data)
     result = await db.execute(
         select(
-            Track.genres,
-            func.count(TrendingSnapshot.id).label("snapshot_count"),
-            func.avg(TrendingSnapshot.composite_score).label("avg_composite"),
-            func.avg(TrendingSnapshot.velocity).label("avg_velocity"),
-            func.count(func.distinct(TrendingSnapshot.entity_id)).label("track_count"),
+            TrendingSnapshot.entity_id,
+            TrendingSnapshot.composite_score,
+            TrendingSnapshot.velocity,
+            TrendingSnapshot.signals_json,
         )
-        .join(Track, and_(
-            TrendingSnapshot.entity_id == Track.id,
-            TrendingSnapshot.entity_type == "track",
-        ))
         .where(TrendingSnapshot.snapshot_date >= lookback)
-        .where(Track.genres.isnot(None))
-        .group_by(Track.genres)
-        .having(func.count(func.distinct(TrendingSnapshot.entity_id)) >= 2)
+        .where(TrendingSnapshot.entity_type == "track")
+        .where(TrendingSnapshot.signals_json.isnot(None))
     )
     rows = result.all()
 
-    # Also get audio feature averages per genre from signals
-    genre_data = {}
+    # Extract genres from signals and aggregate
+    genre_data: dict[str, dict] = {}
+    seen_entities: dict[str, set] = {}
+
     for row in rows:
-        genres = row.genres or []
-        for genre_id in genres:
-            if genre_id not in genre_data:
-                genre_data[genre_id] = {
-                    "snapshot_count": 0,
-                    "avg_composite": 0,
-                    "avg_velocity": 0,
-                    "track_count": 0,
-                    "entries": 0,
+        signals = row.signals_json or {}
+        # Genre info comes from Chartmetric as "genres" (string like "pop, indie pop")
+        # or from Spotify as "spotify_genres" (list)
+        genre_str = signals.get("genres") or signals.get("track_genre") or ""
+        genre_list = signals.get("spotify_genres") or []
+
+        if isinstance(genre_str, str) and genre_str:
+            genre_list = genre_list + [g.strip() for g in genre_str.split(",") if g.strip()]
+
+        if not genre_list:
+            continue
+
+        for genre_tag in genre_list:
+            genre_tag = genre_tag.strip().lower()
+            if not genre_tag or len(genre_tag) < 2:
+                continue
+
+            if genre_tag not in genre_data:
+                genre_data[genre_tag] = {
+                    "total_composite": 0,
+                    "total_velocity": 0,
+                    "count": 0,
                 }
-            gd = genre_data[genre_id]
-            gd["snapshot_count"] += row.snapshot_count or 0
-            gd["avg_composite"] += (row.avg_composite or 0) * (row.track_count or 1)
-            gd["avg_velocity"] += (row.avg_velocity or 0) * (row.track_count or 1)
-            gd["track_count"] += row.track_count or 0
-            gd["entries"] += 1
+                seen_entities[genre_tag] = set()
+
+            gd = genre_data[genre_tag]
+            gd["total_composite"] += row.composite_score or 0
+            gd["total_velocity"] += row.velocity or 0
+            gd["count"] += 1
+            seen_entities[genre_tag].add(str(row.entity_id))
 
     # Compute opportunity scores
     opportunities = []
-    for genre_id, gd in genre_data.items():
-        if gd["track_count"] < 2:
+    for genre_tag, gd in genre_data.items():
+        track_count = len(seen_entities.get(genre_tag, set()))
+        if track_count < 2:
             continue
 
-        avg_composite = gd["avg_composite"] / gd["track_count"] if gd["track_count"] > 0 else 0
-        avg_velocity = gd["avg_velocity"] / gd["track_count"] if gd["track_count"] > 0 else 0
+        avg_composite = gd["total_composite"] / gd["count"] if gd["count"] > 0 else 0
+        avg_velocity = gd["total_velocity"] / gd["count"] if gd["count"] > 0 else 0
 
-        # Opportunity = momentum (high velocity) + quality (high composite) - saturation (too many tracks = crowded)
+        # Opportunity = momentum (high velocity) + quality (high composite) - saturation (too many = crowded)
         momentum = max(0, avg_velocity) / 10  # normalize
         quality = avg_composite / 100
-        saturation = min(1.0, gd["track_count"] / 50)  # >50 tracks = fully saturated
+        saturation = min(1.0, track_count / 50)  # >50 tracks = fully saturated
 
         opportunity = (0.4 * momentum + 0.4 * quality + 0.2 * (1 - saturation))
-        confidence = min(1.0, gd["track_count"] / 10)  # more tracks = more confidence
+        confidence = min(1.0, track_count / 10)
 
         opportunities.append({
-            "genre": genre_id,
-            "genre_name": genre_id.replace(".", " > ").replace("-", " ").title(),
-            "opportunity_score": round(opportunity, 3),
+            "genre": genre_tag,
+            "genre_name": genre_tag.replace(".", " > ").replace("-", " ").title(),
+            "opportunity_score": round(max(0, opportunity), 3),
             "confidence": round(confidence, 2),
-            "track_count": gd["track_count"],
+            "track_count": track_count,
             "avg_composite": round(avg_composite, 1),
             "avg_velocity": round(avg_velocity, 2),
             "momentum": "rising" if avg_velocity > 0.5 else "stable" if avg_velocity > -0.5 else "declining",
@@ -117,27 +128,34 @@ async def generate_blueprint(
     """
     lookback = date.today() - timedelta(days=30)
 
-    # Get tracks in this genre with recent data
+    # Get tracks in this genre by searching signals for the genre tag
     result = await db.execute(
         select(
-            Track.id,
-            Track.title,
-            Track.audio_features,
-            Track.genres,
+            TrendingSnapshot.entity_id,
             TrendingSnapshot.composite_score,
             TrendingSnapshot.velocity,
             TrendingSnapshot.signals_json,
         )
-        .join(Track, and_(
-            TrendingSnapshot.entity_id == Track.id,
-            TrendingSnapshot.entity_type == "track",
-        ))
         .where(TrendingSnapshot.snapshot_date >= lookback)
-        .where(Track.genres.any(genre))
+        .where(TrendingSnapshot.entity_type == "track")
+        .where(TrendingSnapshot.signals_json.isnot(None))
         .order_by(TrendingSnapshot.composite_score.desc())
-        .limit(50)
+        .limit(200)
     )
-    tracks = result.all()
+    all_snapshots = result.all()
+
+    # Filter to those matching the genre
+    tracks = []
+    for row in all_snapshots:
+        signals = row.signals_json or {}
+        genre_str = signals.get("genres") or signals.get("track_genre") or ""
+        genre_list = signals.get("spotify_genres") or []
+        if isinstance(genre_str, str):
+            genre_list = genre_list + [g.strip().lower() for g in genre_str.split(",")]
+        if genre.lower() in [g.lower() for g in genre_list]:
+            tracks.append(row)
+        if len(tracks) >= 50:
+            break
 
     if not tracks:
         return {
@@ -175,8 +193,10 @@ def _aggregate_song_dna(tracks: list, genre: str) -> dict:
     genres_from_signals = []
 
     for track in tracks:
-        # From audio_features (stored on Track model)
-        af = track.audio_features or {}
+        signals = track.signals_json or {}
+
+        # Audio features may be in signals (from spotify_audio enricher)
+        af = signals.get("audio_features") or {}
         if af.get("tempo"):
             tempos.append(af["tempo"])
         if af.get("energy") is not None:
@@ -192,17 +212,22 @@ def _aggregate_song_dna(tracks: list, genre: str) -> dict:
         if af.get("acousticness") is not None:
             acousticness_vals.append(af["acousticness"])
 
-        # From signals (lyrics themes, genre hints)
-        signals = track.signals_json or {}
+        # Spotify popularity as a proxy for energy/quality if no audio features
+        if signals.get("spotify_popularity") is not None and not af:
+            energies.append(min(1.0, signals["spotify_popularity"] / 100))
+
+        # Lyrics themes
         if signals.get("primary_theme"):
             theme = signals["primary_theme"]
             themes_count[theme] = themes_count.get(theme, 0) + 1
         if signals.get("themes"):
             for t in signals["themes"]:
                 themes_count[t] = themes_count.get(t, 0) + 1
-        if signals.get("genres"):
-            if isinstance(signals["genres"], str):
-                genres_from_signals.append(signals["genres"])
+
+        # Genre tags from signals
+        genre_str = signals.get("genres") or signals.get("track_genre") or ""
+        if isinstance(genre_str, str) and genre_str:
+            genres_from_signals.append(genre_str)
 
     # Compute averages
     avg_tempo = round(sum(tempos) / len(tempos)) if tempos else None
