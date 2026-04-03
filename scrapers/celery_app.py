@@ -64,5 +64,18 @@ app.config_from_object({
             "task": "scrapers.tasks.health_check",
             "schedule": crontab(minute="*/15"),
         },
+        # --- Model training & prediction loop ---
+        "train-model-daily": {
+            "task": "scrapers.tasks.train_model",
+            "schedule": crontab(minute=0, hour=3),  # 3am UTC daily
+        },
+        "generate-predictions-6h": {
+            "task": "scrapers.tasks.generate_predictions",
+            "schedule": crontab(minute=45, hour="*/6"),  # After scrape cycles
+        },
+        "backtest-daily": {
+            "task": "scrapers.tasks.run_backtest",
+            "schedule": crontab(minute=30, hour=4),  # 4:30am UTC daily, after training
+        },
     },
 })

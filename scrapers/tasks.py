@@ -103,6 +103,92 @@ def run_scraper(self, scraper_id: str):
         raise
 
 
+@app.task(name="scrapers.tasks.train_model")
+def train_model():
+    """Daily model training: retrain on all historical data, evaluate, save."""
+    logger.info("Starting model training...")
+    try:
+        import subprocess
+        import sys
+        result = subprocess.run(
+            [sys.executable, "scripts/train_model.py"],
+            capture_output=True, text=True, timeout=1800,  # 30 min max
+        )
+        logger.info("Training stdout: %s", result.stdout[-500:] if result.stdout else "")
+        if result.returncode != 0:
+            logger.error("Training failed: %s", result.stderr[-500:] if result.stderr else "")
+        return {"status": "success" if result.returncode == 0 else "error", "output": result.stdout[-200:]}
+    except Exception as e:
+        logger.exception("Model training failed")
+        return {"status": "error", "error": str(e)}
+
+
+@app.task(name="scrapers.tasks.run_backtest")
+def run_backtest_task():
+    """Daily backtesting: evaluate current model against recent predictions."""
+    logger.info("Starting daily backtest evaluation...")
+    try:
+        from api.database import async_session_factory
+        from api.services.backtest_service import run_backtest
+
+        async def _run():
+            async with async_session_factory() as db:
+                run_id = await run_backtest(db, months=3, horizon="7d")
+                return run_id
+
+        loop = asyncio.new_event_loop()
+        run_id = loop.run_until_complete(_run())
+        loop.close()
+        logger.info("Backtest completed: run_id=%s", run_id)
+        return {"status": "success", "run_id": run_id}
+    except Exception as e:
+        logger.exception("Backtest failed")
+        return {"status": "error", "error": str(e)}
+
+
+@app.task(name="scrapers.tasks.generate_predictions")
+def generate_predictions():
+    """Generate predictions for all active entities. Runs after each scrape cycle."""
+    logger.info("Generating predictions for active entities...")
+    try:
+        import httpx
+        api_url, admin_key = _get_api_config()
+
+        with httpx.Client(timeout=30) as client:
+            # Get top trending entities
+            resp = client.get(
+                f"{api_url}/api/v1/trending",
+                params={"entity_type": "track", "limit": 50},
+                headers={"X-API-Key": admin_key},
+            )
+            if resp.status_code != 200:
+                return {"status": "error", "message": f"Failed to get trending: {resp.status_code}"}
+
+            entities = resp.json().get("data", [])
+            predicted = 0
+
+            for entity in entities:
+                entity_id = entity.get("entity", {}).get("id")
+                if not entity_id:
+                    continue
+                try:
+                    pred_resp = client.get(
+                        f"{api_url}/api/v1/predictions/{entity_id}",
+                        params={"entity_type": "track"},
+                        headers={"X-API-Key": admin_key},
+                    )
+                    if pred_resp.status_code == 200:
+                        predicted += 1
+                except Exception:
+                    pass
+
+        logger.info("Generated predictions for %d entities", predicted)
+        return {"status": "success", "predicted": predicted}
+    except Exception as e:
+        logger.exception("Prediction generation failed")
+        return {"status": "error", "error": str(e)}
+
+
 @app.task(name="scrapers.tasks.health_check")
 def health_check():
     """Run health check on all scrapers."""
