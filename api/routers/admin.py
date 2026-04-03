@@ -958,6 +958,48 @@ async def start_backfill(
 
 
 # ---------------------------------------------------------------------------
+# Model config endpoint
+# ---------------------------------------------------------------------------
+
+_MODEL_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "model.json"
+
+
+@router.get("/api/v1/admin/model-config")
+async def get_model_config(_admin: ApiKey = Depends(require_admin)):
+    """Return the current model configuration."""
+    try:
+        with open(_MODEL_CONFIG_PATH) as f:
+            return json.load(f)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.put("/api/v1/admin/model-config")
+async def put_model_config(
+    body: dict,
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Update model configuration (partial update — merges with existing)."""
+    try:
+        with open(_MODEL_CONFIG_PATH) as f:
+            config = json.load(f)
+    except Exception:
+        config = {}
+
+    # Deep merge
+    for key, value in body.items():
+        if isinstance(value, dict) and isinstance(config.get(key), dict):
+            config[key].update(value)
+        else:
+            config[key] = value
+
+    with open(_MODEL_CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+
+    return {"detail": "Model config updated", "config": config}
+
+
+# ---------------------------------------------------------------------------
 # Health endpoint
 # ---------------------------------------------------------------------------
 

@@ -1,0 +1,75 @@
+{
+  "training": {
+    "schedule_cron_hour": 3,
+    "schedule_cron_minute": 0,
+    "min_training_samples": 500,
+    "min_history_days": 30,
+    "test_split_ratio": 0.2,
+    "retrain_on_accuracy_drop_pct": 5,
+    "max_training_time_seconds": 1800
+  },
+  "prediction": {
+    "schedule_interval_hours": 6,
+    "top_n_entities": 50,
+    "horizons": ["7d", "30d"],
+    "confidence_threshold": 0.3,
+    "cache_ttl_seconds": 3600
+  },
+  "backtesting": {
+    "schedule_cron_hour": 4,
+    "schedule_cron_minute": 30,
+    "evaluation_months": 3,
+    "default_horizon": "7d",
+    "top_n_threshold": 50
+  },
+  "ensemble": {
+    "models": ["lightgbm"],
+    "phase3_models": ["lightgbm", "lstm", "xgboost"],
+    "meta_learner": "ridge",
+    "calibration": "isotonic",
+    "cold_start_max_confidence": 0.5,
+    "min_days_for_full_confidence": 14
+  },
+  "lightgbm": {
+    "n_estimators": 300,
+    "learning_rate": 0.05,
+    "num_leaves": 63,
+    "max_depth": -1,
+    "early_stopping_rounds": 30,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8
+  },
+  "lstm": {
+    "hidden_size": 64,
+    "num_layers": 2,
+    "lookback_days": 14,
+    "batch_size": 64,
+    "epochs": 50,
+    "learning_rate": 0.001,
+    "patience": 10
+  },
+  "xgboost": {
+    "n_estimators": 300,
+    "max_depth": 6,
+    "learning_rate": 0.05,
+    "early_stopping_rounds": 30,
+    "top_interaction_features": 10
+  },
+  "features": {
+    "platforms": ["spotify", "chartmetric", "shazam", "apple_music", "tiktok", "radio", "kworb"],
+    "per_platform_features": ["score_7d_avg", "velocity_7d", "acceleration", "score_vs_30d_avg", "rank_change_7d"],
+    "cross_platform_features": ["platform_count", "score_variance", "velocity_alignment", "score_entropy"],
+    "temporal_features": ["day_of_week", "days_since_release", "is_weekend", "season"],
+    "song_dna_features": ["tempo", "energy", "valence", "danceability", "key", "mode", "acousticness", "chorus_ratio", "vocabulary_richness", "primary_theme"]
+  },
+  "targets": {
+    "breakout_top_n": 50,
+    "breakout_horizons_days": [7, 14, 30, 90],
+    "us_market_targets": [
+      {"name": "spotify_top_50_us", "horizon_days": 7, "top_n": 50},
+      {"name": "shazam_top_200_us", "horizon_days": 7, "top_n": 200},
+      {"name": "billboard_hot_100", "horizon_days": 14, "top_n": 100},
+      {"name": "cross_platform_breakout", "horizon_days": 14, "min_platforms": 3}
+    ]
+  }
+}
