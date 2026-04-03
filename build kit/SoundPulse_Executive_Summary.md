@@ -1,372 +1,35 @@
 # SoundPulse
-## Music Intelligence API
+## The AI Brain of a Virtual Record Label
 
 **Product Requirements Document** — April 2026
 
-*SoundPulse is a unified REST API that aggregates music trending data from major platforms, normalizes it into a single intelligence layer, and predicts which artists and genres are about to break out — before they do.*
+*SoundPulse analyzes what makes music succeed, generates blueprints for new songs that will succeed, and feeds those blueprints directly to AI music generation models. It turns fragmented music signals into manufactured hits.*
 
 ---
 
-## The Problem
+## The Vision
 
-Music trend data is fragmented across platforms that don't talk to each other. A track can be going viral on TikTok, climbing Shazam charts, and gaining Spotify playlist traction simultaneously — but no single source connects these signals. Labels, distributors, sync licensors, and playlist curators are forced to manually cross-reference multiple dashboards, each with different metrics, update frequencies, and data formats.
+SoundPulse is not a trend tracker. It is the intelligence engine behind a virtual record label — a system that:
 
-The result: by the time a trend is visible in any single platform's data, the window to act on it has often already closed.
-
----
-
-## What SoundPulse Does
-
-SoundPulse operates as a real-time intelligence layer on top of the fragmented music data ecosystem. It performs three core functions:
-
-| Function | Description |
-|---|---|
-| **Aggregate** | Collects trending data from multiple platforms on a scheduled cycle. Deduplicates entities across platforms using ISRC codes, fuzzy name matching, and manual disambiguation queues. |
-| **Normalize** | Converts incompatible platform metrics (Spotify streams, TikTok video counts, Shazam lookups) into a unified 0–100 composite score with a weighted formula that reflects each platform's predictive value. |
-| **Predict** | A prediction engine forecasts which artists, tracks, and genres will trend at 7-day, 30-day, and 90-day horizons — with calibrated confidence scores and explainable signals. |
-
----
-
-## Data Strategy — Chartmetric as the Backbone
-
-Chartmetric is the primary data source for SoundPulse. Rather than building and maintaining individual scrapers for every platform — each with different APIs, auth methods, rate limits, and data formats — we use Chartmetric as a unified data backbone that already aggregates cross-platform signals from Spotify, Apple Music, TikTok, YouTube, Shazam, and more.
-
-**Why this works:**
-- Chartmetric already solves entity resolution across platforms (artist/track IDs are unified)
-- Provides cross-platform metrics in a single API: Spotify streams, TikTok video counts, Apple Music chart positions, Shazam lookups, playlist tracking, social follower counts
-- Proprietary artist scoring (CM Score) gives us a baseline to compare our own composite scores against
-- $150/month gets us 1,000 req/day — enough for a 4–6 hour collection cycle across top trending entities
-
-**What Chartmetric doesn't give us** (and where direct API access adds value):
-- Real-time Spotify chart snapshots with higher granularity than Chartmetric's update frequency
-- Shazam city-level data (Chartmetric covers country-level)
-- MusicBrainz metadata for ISRC validation and genre enrichment
-- Full control over data freshness — Chartmetric's data can lag by 12–24 hours on some metrics
-
-**The architecture:** Chartmetric is the foundation layer. Direct platform APIs (Spotify, Shazam) are enrichment layers that fill gaps, add granularity, and provide independent signals for cross-validation.
-
----
-
-## Phased Rollout
-
-SoundPulse ships in three phases. Each phase is a usable product on its own — not a stub waiting for the next release.
-
-### Phase 1 — MVP (Weeks 1–8)
-**Goal:** Prove the aggregation and scoring model works using Chartmetric as the primary data backbone, enriched with direct Spotify and Shazam data.
-
-- **Data sources:** Chartmetric (primary — cross-platform artist/track data, TikTok signals, playlist tracking), Spotify (direct — charts, search, audio features), Shazam (via RapidAPI — discovery signals), MusicBrainz (metadata enrichment, ISRC validation)
-- **Endpoints:** `/trending`, `/search`, `/genres` (flat list, ~50 top-level genres)
-- **Scoring:** Weighted composite using Chartmetric cross-platform data + direct Spotify/Shazam signals. Initial weights: Chartmetric aggregate 40%, Spotify direct 30%, Shazam 20%, cross-platform velocity 10%
-- **Entity resolution:** Chartmetric handles most cross-platform matching natively. For entities not in Chartmetric: ISRC-based matching with RapidFuzz fallback. Unresolved entities flagged for manual review
-- **Dashboard:** Read-only React dashboard showing top trending artists/tracks with sparklines
-- **Infrastructure:** Docker Compose (PostgreSQL, Redis, FastAPI, Celery)
-
-**Exit criteria:** API returns accurate, deduplicated trending data refreshed every 6 hours. Manual spot-checks confirm composite scores correlate with real-world breakout patterns over a 4-week observation period.
-
-### Phase 2 — Direct Platform Enrichment + Prediction (Weeks 9–20)
-**Goal:** Layer in direct platform APIs for higher-resolution signals, introduce the prediction engine once we have enough historical data from Phase 1.
-
-- **New direct sources:** Apple Music (requires Developer Program enrollment, ~2 week approval), Radio airplay (evaluate: RadioWave API or MediaBase — requires pricing/access negotiation)
-- **TikTok:** Chartmetric already provides TikTok video counts and sound usage data. Evaluate TikTok Research API for deeper signals (creator tier adoption rates) — approval timeline is 2–4 months, so start the application in Phase 1
-- **Prediction engine:** Single-model baseline (LightGBM on tabular features) trained on 8+ weeks of historical data from Phase 1. Binary classification: "will this track/artist appear in the top 100 trending within N days?"
-- **Endpoints:** `/predictions` (7-day horizon only), expanded `/genres` with hierarchy
-- **Platform weights:** Refined based on correlation analysis of Phase 1 data. Chartmetric signals decomposed into per-platform components where possible
-
-**Exit criteria:** Prediction model achieves >60% precision at 50% recall on 7-day breakout predictions, measured against a held-out test set. This must beat the naive baseline of "tracks currently trending will keep trending."
-
-### Phase 3 — Full Intelligence Layer (Weeks 21–32)
-**Goal:** Multi-model ensemble, full genre taxonomy, maximum platform coverage.
-
-- **Prediction engine:** Three-model ensemble (LightGBM, LSTM with attention, XGBoost) with Ridge meta-learner. Isotonic regression for confidence calibration. Predictions at 7-day, 30-day, and 90-day horizons
-- **Self-learning loop:** Daily comparison of predictions vs. outcomes. Automatic retraining triggered when accuracy degrades beyond defined thresholds
-- **Genre taxonomy:** 850+ genres organized hierarchically under 12 root categories, with bidirectional mappings to Spotify, Apple Music, MusicBrainz, and Chartmetric genre systems
-- **API tiers:** Free (100 req/hr), Pro (1,000 req/hr), Admin (unlimited + write access)
-
-**Exit criteria:** Ensemble model outperforms Phase 2 single model by >10% precision. Confidence calibration verified: an 80% confidence prediction contains the actual value ~80% of the time across a 30-day evaluation window.
-
----
-
-## Data Source Feasibility Matrix
-
-| Platform | Role | Access Method | Cost | Rate Limits | What You Actually Get | Risk |
-|---|---|---|---|---|---|---|
-| **Chartmetric** | **Primary backbone** | Enterprise REST API | $350/month (free trial available) | Free trial: 1,000 req/day. Paid entry: 2 req/sec (~170k/day). Paid premium: 25 req/sec (~2.1M/day) | Cross-platform artist scores, Spotify/Apple Music/TikTok/YouTube metrics, playlist tracking, social follower counts, proprietary CM Score. **This is our single biggest data lever** — it solves most of the aggregation problem out of the box | Low — purpose-built for this use case |
-| **Spotify** | Enrichment | Web API (public) | Free | ~180 req/min with client credentials | Top 200 charts (daily/weekly), search, artist metadata, track audio features. Higher-frequency chart snapshots than Chartmetric provides. **No** save rates, playlist addition events, or stream velocity per track | Low — stable API, well-documented |
-| **Shazam** | Enrichment | RapidAPI | $10/month (Basic) | 500 req/month (Basic), 10k (Pro at $50/mo) | Top charts by country/city, track recognition counts. City-level granularity that Chartmetric lacks. Key for Shazam-to-Spotify ratio (leading breakout indicator) | Low — reliable third-party wrapper |
-| **Apple Music** | Enrichment (Phase 2) | MusicKit / Apple Music API | $99/year (Developer Program) | Generous but requires JWT auth | Catalog search, charts, playlist data. No listen counts or save rates. Supplements Chartmetric's Apple Music data with direct chart access | Medium — onboarding takes 1-2 weeks |
-| **TikTok** | Via Chartmetric (Phase 1), Direct (Phase 2+) | Chartmetric API / TikTok Research API | Included in Chartmetric / Free if approved | Chartmetric: included in daily quota. Direct: query-based | Chartmetric provides TikTok video counts and sound usage. Direct API adds deeper signals like creator tier adoption — **but** approval takes 2-4 months and is restricted to academic/research use | **Medium** — Chartmetric covers the basics; direct access is a nice-to-have for Phase 2+ |
-| **Radio** | Enrichment (Phase 2+) | TBD (RadioWave, MediaBase, or Nielsen BDS) | $200–$2,000+/month | Varies | Airplay spins, station adds, audience reach | **High** — expensive, enterprise-only, data delivery may be batch (weekly), not real-time |
-| **MusicBrainz** | Metadata | Open API | Free | 1 req/sec | ISRC codes, artist/release metadata, genre tags. Essential for entity resolution and genre enrichment | Low — open source, community-maintained |
-
----
-
-## Entity Resolution
-
-Chartmetric significantly reduces the entity resolution burden — it maintains its own unified artist and track IDs across platforms, so the cross-platform matching problem is largely pre-solved for entities in their database.
-
-**What Chartmetric handles:** Matching artists/tracks across Spotify, Apple Music, TikTok, YouTube, Shazam, and social platforms. Their internal IDs serve as the canonical reference for any entity they track.
-
-**What we still need to solve:**
-- Matching Chartmetric entities to our internal IDs and to MusicBrainz metadata
-- Handling entities that appear in Spotify/Shazam charts but aren't yet tracked by Chartmetric (brand-new artists, regional releases)
-- Reconciling direct Spotify/Shazam data with Chartmetric's version of the same metrics (timestamps may differ, values may lag)
-
-**Our approach for non-Chartmetric entities:**
-1. **ISRC match** — exact join when both sides have valid ISRCs
-2. **Fuzzy name match** — RapidFuzz (token_sort_ratio > 85) on normalized artist+title strings, with featuring artist extraction and reordering
-3. **Disambiguation queue** — unresolved or low-confidence matches flagged for manual review via admin endpoint
-4. **Learned blocklist** — known false positives (e.g., covers, remixes that share titles) stored and excluded from auto-matching
-
-**Phase 2+:** Evaluate embedding-based matching (artist/track name embeddings via sentence transformers) for cases where fuzzy string matching fails on transliterated names (e.g., K-pop, Arabic, Japanese artists).
-
----
-
-## The Core Insight — Platform Weighting
-
-Not all platforms are equal as leading indicators. SoundPulse's scoring formula reflects this, but weights are **not hardcoded assumptions** — they are derived from correlation analysis once sufficient historical data exists.
-
-Because Chartmetric is our data backbone, we decompose its cross-platform data into per-platform signals where possible. The weighting applies to the **signal type**, not the API source — a Spotify stream count sourced via Chartmetric is weighted the same as one from the Spotify API directly.
-
-**Initial hypothesis (to be validated in Phase 2):**
-
-| Signal | Hypothesized Weight | Signal Type | Source | Why It Matters |
-|---|---|---|---|---|
-| **TikTok metrics** | 25% | Leading | Chartmetric (Phase 1), Direct API (Phase 2+ if approved) | Viral sounds on TikTok precede streaming spikes by 1–3 weeks. Sound adoption velocity is a strong breakout signal |
-| **Spotify metrics** | 25% | Concurrent | Chartmetric + Spotify API direct | Largest streaming platform globally. Chart position and velocity (rate of change in ranking) are the most reliable momentum indicators |
-| **Shazam metrics** | 15% | Leading | Shazam via RapidAPI | Discovery intent signal. A high Shazam-to-Spotify ratio (people identifying a song but not yet streaming it) is a strong leading indicator of imminent breakout |
-| **Apple Music metrics** | 15% | Concurrent | Chartmetric (Phase 1), Direct API (Phase 2+) | Premium audience behavior. Particularly strong signal in the US and among older demographics |
-| **Social / cross-platform velocity** | 10% | Composite | Chartmetric (social follower growth, playlist adds) | Cross-platform momentum that doesn't fit neatly into one platform — e.g., simultaneous growth across Instagram, YouTube, and Spotify |
-| **Radio** | 10% | Lagging | Phase 2+ (TBD source) | Validates mainstream crossover. A track hitting radio after digital traction confirms sustained momentum |
-
-**Validation plan:** After 8 weeks of data collection, run Granger causality tests between platform-specific signals and actual breakout events (defined as: entering the Spotify Global Top 200 for the first time). Adjust weights based on observed predictive power. Re-evaluate quarterly.
-
----
-
-## Prediction Engine
-
-### Phase 2: Single Model Baseline
-
-Before building an ensemble, we validate that prediction is feasible at all.
-
-- **Model:** LightGBM on tabular features
-- **Features:** Platform scores, score velocity (7-day rate of change), cross-platform ratios (e.g., Shazam lookups / Spotify streams), genre, days since first appearance
-- **Target:** Binary — will this entity enter the top 100 trending within 7 days?
-- **Training data:** Requires 8+ weeks of historical snapshots from Phase 1. Each snapshot becomes a labeled example (did this entity actually break out within 7 days of the snapshot?)
-- **Baseline to beat:** Naive persistence ("currently trending tracks stay trending") — typically ~45% precision
-
-### Phase 3: Three-Model Ensemble
-
-Once the single model proves the concept:
-
-- **LightGBM** — tabular features (platform scores, velocities, cross-platform ratios)
-- **LSTM with attention** — sequential patterns in time series data (7-day score histories)
-- **XGBoost** — hand-crafted interaction features between platforms (e.g., TikTok velocity * Shazam ratio)
-- **Meta-learner:** Ridge regression combines the three models' outputs
-- **Calibration:** Isotonic regression so that confidence scores are meaningful (80% confidence = ~80% actual hit rate)
-- **Self-learning:** Daily comparison of predictions vs. actual outcomes. Automatic retraining when rolling 7-day precision drops >5% below the 30-day moving average
-
-### Cold Start Strategy
-
-The prediction engine cannot launch on day one. Here's how we handle the gap:
-
-1. **Weeks 1–4:** No predictions. Collect data, build entity resolution, validate scoring
-2. **Weeks 5–8:** Accumulate historical snapshots. Begin labeling ground truth (which entities actually broke out?)
-3. **Weeks 9–12:** Train and evaluate Phase 2 single model. Ship `/predictions` endpoint with clear "beta" labeling and wide confidence intervals
-4. **Weeks 13+:** Iterate on features, evaluate additional platforms, begin ensemble development if single model shows promise
-
----
-
-## API Endpoints
-
-| Method | Endpoint | Phase | Description |
-|---|---|---|---|
-| `GET` | `/trending` | 1 | Current trending artists/tracks with composite scores, per-platform breakdowns, velocity, and 7-day sparkline. Filterable by genre, platform, time range |
-| `GET` | `/search` | 1 | Full-text search across all artists and tracks with latest trending data attached |
-| `GET` | `/genres` | 1 | Genre taxonomy (flat list in Phase 1, hierarchical tree in Phase 2+). Includes cross-platform mappings |
-| `GET` | `/genres/{id}` | 2 | Deep detail on a single genre: platform mappings, audio profile, related genres, trending stats |
-| `GET` | `/predictions` | 2 | Breakout predictions with confidence scores, confidence intervals, and top 3 explanatory signals. 7-day horizon in Phase 2; 30-day and 90-day in Phase 3 |
-| `GET` | `/health` | 1 | Service health check with data freshness timestamps per platform |
-
-Authentication is via API key in the `X-API-Key` header. Tiered rate limiting ships in Phase 3; Phase 1-2 use a single admin key.
-
----
-
-## Upstream API Quota Management
-
-On the free trial, Chartmetric limits to 1,000 req/day — tight but workable for initial development. Paid entry tier (2 req/sec, ~170k/day) removes this as a constraint entirely. Pricing is contact-sales, not published.
-
-| Platform | Quota | Collection Strategy |
-|---|---|---|
-| **Chartmetric** (primary) | Free trial: 1,000 req/day. Paid entry: 2 req/sec (~170k/day) | **Free trial phase:** Budget ~40 req/hour. Prioritize top trending artists/tracks, cache aggressively. **Paid phase:** Quota is a non-issue — collect broadly across all tracked entities on a 4–6 hour cycle |
-| **Spotify** (enrichment) | ~180 req/min (client credentials) | Batch chart pulls every 6 hours. Cache search results for 24 hours. Used to cross-validate Chartmetric data and get higher-frequency chart snapshots |
-| **Shazam (RapidAPI)** | 500 req/month (Basic) | Pull top charts for 5 key markets only. Upgrade to Pro ($50/mo) if more granularity needed. Primary value is the Shazam-to-Spotify ratio signal |
-| **Apple Music** (Phase 2) | Generous (no published hard limit) | Standard 6-hour cycle. Monitor for 429 responses |
-| **MusicBrainz** | 1 req/sec | Metadata lookups are bursty during entity resolution. Implement token bucket rate limiter |
-
-**Fallback cascade:** If an API returns errors or hits rate limits:
-1. Retry with exponential backoff (max 3 retries)
-2. If an enrichment source fails, Chartmetric data covers the gap (it tracks the same platforms)
-3. If Chartmetric itself fails, use cached data (mark staleness in API response metadata)
-4. Never serve stale data without flagging it — consumers must know the freshness of what they're getting
-
----
-
-## Success Metrics
-
-SoundPulse must be measured against concrete benchmarks, not vibes.
-
-### Phase 1 Metrics
-| Metric | Target | How Measured |
-|---|---|---|
-| Data freshness | <6 hours stale | Timestamp diff between last scrape and current time |
-| Entity match rate | >85% of tracks matched across Chartmetric + Spotify + Shazam | % of entities with confirmed cross-platform match (Chartmetric IDs provide the baseline) |
-| False match rate | <5% | Manual audit of 100 random matches weekly |
-| API uptime | >99% | Health check monitoring |
-| Composite score correlation | Positive correlation with actual chart movement | Spearman rank correlation between SoundPulse score and Spotify chart position changes over 7-day windows |
-
-### Phase 2 Metrics
-| Metric | Target | How Measured |
-|---|---|---|
-| 7-day breakout precision | >60% at 50% recall | Precision-recall on held-out test set, evaluated weekly |
-| Baseline improvement | >15% precision over naive persistence | Side-by-side comparison |
-| Prediction coverage | >80% of actual breakouts were in our candidate set | Recall on breakout events |
-
-### Phase 3 Metrics
-| Metric | Target | How Measured |
-|---|---|---|
-| Ensemble lift over single model | >10% precision improvement | A/B evaluation on same time period |
-| Confidence calibration | Mean absolute calibration error <0.05 | Reliability diagram across confidence buckets |
-| 30-day prediction precision | >50% at 40% recall | Weekly evaluation |
-| Genre trend detection | Correctly identifies 3 of top 5 emerging genres per quarter | Quarterly manual evaluation against industry reports |
-
----
-
-## Who This Is For
-
-- Record labels and A&R teams identifying emerging artists before competitors
-- Playlist curators sourcing tracks with validated cross-platform momentum
-- Sync licensing companies matching trending sounds to advertising briefs
-- Music distributors advising independent artists on release timing
-- Investment analysts tracking genre-level shifts in the music market
-- Media companies building data-driven editorial around music trends
-
----
-
-## Technical Architecture
-
-- **API:** Python (FastAPI), async throughout
-- **Database:** PostgreSQL (via SQLAlchemy async + Alembic migrations)
-- **Cache / Rate Limiting:** Redis
-- **Task Queue:** Celery with Redis broker (scraper orchestration on 4–6 hour cycles)
-- **ML:** LightGBM, scikit-learn (Phase 2). PyTorch LSTM, XGBoost added in Phase 3
-- **Entity Resolution:** RapidFuzz + ISRC matching, with manual disambiguation queue
-- **Frontend:** React + Vite testing dashboard (not a production UI — internal tool for validating data quality)
-- **Deployment:** Docker Compose (local development), with path to container orchestration for production
-
----
-
-## Operating Costs
-
-### Phase 1 (MVP)
-| Item | Monthly Cost |
-|---|---|
-| Chartmetric API (paid entry tier) | $350 |
-| Shazam via RapidAPI (Basic) | $10 |
-| Spotify API | Free |
-| MusicBrainz API | Free |
-| **Compute (Docker on a VPS)** | **$20–$50** |
-| **Total** | **~$380–$410/month** |
-
-### Phase 2 (Expanded)
-| Item | Monthly Cost |
-|---|---|
-| Phase 1 costs | $380–$410 |
-| Apple Developer Program | $8 (amortized) |
-| Shazam upgrade to Pro | +$40 |
-| Radio data (TBD) | $200–$2,000 |
-| Increased compute (ML training) | +$30–$100 |
-| **Total** | **~$660–$2,560/month** |
-
-Note: Chartmetric at $350/month is the most cost-effective decision in the stack — it replaces the need to build and maintain individual scrapers for TikTok, Apple Music, YouTube, and social platforms. The free trial (1,000 req/day) is sufficient for development and validation. These are infrastructure and API costs only. Engineering time is the dominant cost and is not included here.
-
----
-
----
-
-## The Bigger Vision — Virtual Record Label Intelligence
-
-SoundPulse is not just a trend tracker. It is the intelligence brain of a virtual record label. The system's ultimate purpose is to:
-
-1. **Analyze** what sonic, cultural, and release characteristics are driving success in any given micro-genre at any given moment
-2. **Generate blueprints** — specific, reproducible descriptions of what a new song/artist should sound like to succeed
-3. **Feed those blueprints to AI music generation models** (Suno, Udio, MusicGen) to produce the actual music
-4. **Predict and optimize** the release strategy (timing, platform sequencing, promotion approach)
+1. **Analyzes** what sonic, cultural, and release characteristics are driving success in any given micro-genre at any given moment
+2. **Generates blueprints** — specific, reproducible descriptions of what a new song should sound like, what it should be about, and how it should be structured
+3. **Feeds those blueprints to AI music generation models** (Suno, Udio, MusicGen) to produce the actual music
+4. **Predicts and optimizes** the release strategy — when to drop, which platforms first, what playlists to target
 
 The output of SoundPulse is not a dashboard. It is the input to a music factory.
 
 ---
 
-## Song DNA — The Complete Feature Set
-
-To replicate what makes successful music successful, we need to decompose songs into their full "DNA profile." This goes far beyond tempo and mood.
-
-### Sonic Features (from Spotify Audio Analysis)
-
-| Feature Category | Specific Features | Source |
-|---|---|---|
-| **Tempo & Rhythm** | BPM, time signature, beat regularity, rhythmic complexity | Spotify Audio Analysis (beats, bars, tatums) |
-| **Energy & Dynamics** | Overall energy, loudness contour, dynamic range, fade-in/fade-out | Spotify Audio Features + Analysis (segments) |
-| **Mood & Tonality** | Key, mode (major/minor), valence (happy/sad), danceability | Spotify Audio Features |
-| **Production Style** | Acousticness, instrumentalness, liveness, speechiness | Spotify Audio Features |
-| **Timbre Profile** | 12-dimensional timbre vectors per segment — captures instrument texture, brightness, attack | Spotify Audio Analysis (segments.timbre) |
-| **Song Structure** | Section types (intro/verse/chorus/bridge/outro), section durations, chorus ratio, intro length | Spotify Audio Analysis (sections) + Genius (section headers) |
-| **Pitch Content** | 12-dimensional pitch vectors per segment — captures harmonic content, chord progressions | Spotify Audio Analysis (segments.pitches) |
-
-### Lyrical Features (from Genius)
-
-| Feature | What It Captures |
-|---|---|
-| **Primary themes** | Love, heartbreak, party, flex, introspection, social commentary, nostalgia, empowerment |
-| **Vocabulary richness** | Unique words / total words — higher = more literary, lower = more repetitive/catchy |
-| **Chorus repetition ratio** | How much of the song is chorus — higher = more commercially formulaic |
-| **Song structure** | Verse count, chorus count, bridge presence, section ordering |
-| **Word count & density** | Sparse lyrics (electronic, ambient) vs dense lyrics (rap, folk) |
-| **Language** | English vs non-English — critical for market targeting |
-
-### Arrangement & Production (Requires Deeper Analysis — Future Phase)
-
-| Feature | Why It Matters | How to Get It |
-|---|---|---|
-| **Vocal style** | Male/female, pitch range, autotune presence, harmonies, ad-libs | Audio ML models (vocal separation + classification) |
-| **Instrument palette** | 808s vs live drums, analog vs digital synths, guitar types | Timbre vector clustering from Spotify Analysis |
-| **Build patterns** | Sparse verse → dense chorus, gradual builds, drops | Section-level energy/loudness analysis |
-| **Hook placement** | Where the catchiest part is — critical for TikTok virality (first 15 seconds) | Segment analysis + stream skip patterns (if available) |
-| **Featured artists** | Collaboration patterns that drive cross-audience growth | Chartmetric artist data |
-| **Sonic similarity** | "This sounds like Artist X meets Artist Y" | Embedding-based similarity from timbre/pitch vectors |
-
-### Social & Cultural Context (from Chartmetric)
-
-| Feature | Source |
-|---|---|
-| **Artist social growth velocity** | Chartmetric `/stat/` endpoints (Spotify, Instagram, TikTok, YouTube, Shazam) |
-| **Geographic audience distribution** | Chartmetric `/where-people-listen` |
-| **Playlist ecosystem** | Which playlists drive growth in this genre |
-| **Cross-platform cascade timing** | How long from TikTok viral → Shazam spike → Spotify streams |
-| **Collaboration network** | Which artists collab with whom, and what the audience overlap is |
-
----
-
-## Music Generation Pipeline
-
-The end-to-end pipeline from intelligence to music generation:
+## The Pipeline
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │ 1. ANALYZE — What's working now?                     │
 │    - Trending analysis per micro-genre               │
 │    - Song DNA decomposition of top performers        │
-│    - Social growth trajectory patterns               │
+│    - Artist social growth trajectory patterns        │
 │    - Cross-platform cascade timing                   │
+│    - Genre-level momentum and saturation detection   │
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐
@@ -376,29 +39,14 @@ The end-to-end pipeline from intelligence to music generation:
 │    - Arrangement template (structure, build pattern)  │
 │    - Lyrical themes + vocabulary style               │
 │    - Vocal style recommendation                      │
+│    - Production style (instruments, textures)        │
 │    - Reference tracks ("sounds like X meets Y")      │
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐
 │ 3. GENERATE — Feed the blueprint to AI music models  │
 │                                                      │
-│    Music generation models accept:                   │
-│    ┌──────────────────────────────────────────────┐  │
-│    │ Text prompt: genre, mood, instruments, style │  │
-│    │ Lyrics: verse/chorus structure               │  │
-│    │ Style tags: tempo, energy, vocal type        │  │
-│    │ Reference audio: "make it sound like this"   │  │
-│    └──────────────────────────────────────────────┘  │
-│                                                      │
-│    Target models:                                    │
-│    - Suno: text prompt + lyrics + style tags         │
-│    - Udio: text prompt + lyrics + reference audio    │
-│    - MusicGen (Meta): text conditioning + audio ref  │
-│    - Stable Audio: text prompt + duration control    │
-│                                                      │
-│    SoundPulse translates Song DNA → model prompts    │
-│                                                      │
-│    Input Parameter Support by Model:                 │
+│    Model input mapping:                              │
 │    ┌────────────┬───────┬──────┬────────┬──────────┐│
 │    │ Parameter  │ Suno  │Udio  │MusicGen│ SOUNDRAW ││
 │    ├────────────┼───────┼──────┼────────┼──────────┤│
@@ -420,79 +68,127 @@ The end-to-end pipeline from intelligence to music generation:
 │    - Platform sequencing (TikTok teaser → full drop) │
 │    - Playlist targeting strategy                     │
 │    - Predicted 30/60/90 day growth trajectory        │
+│    - A/B test multiple generated versions            │
 └─────────────────────────────────────────────────────┘
 ```
 
-### Translating Song DNA to Generation Prompts
-
-The key technical challenge is mapping our analytical features (numeric vectors, percentages, timbre matrices) into natural language prompts that music generation models understand.
-
-**Example translation:**
+### Example: End-to-End
 
 ```
-Song DNA Analysis:
-  genre: "melodic trap"
-  bpm: 145
-  key: C# minor
-  energy: 0.72
-  valence: 0.28 (melancholic)
-  danceability: 0.65
-  acousticness: 0.05
-  chorus_ratio: 0.35
-  themes: ["introspection", "heartbreak"]
-  vocab_richness: 0.42 (repetitive/catchy)
-  timbre_cluster: "dark_808_autotune"
+SoundPulse detects: "Melodic trap in C# minor at 140-150 BPM is accelerating.
+  Top performers share: sparse verse → dense chorus build, autotuned vocals,
+  808 sub-bass, introspective/heartbreak themes, short intros (<15 sec).
+  TikTok adoption rate for this profile: 3.2x average.
+  Shazam-to-Spotify conversion: 18 days median."
 
-Suno/Udio Prompt:
-  "Melodic trap, 145 BPM, C# minor, dark and melancholic mood.
-   808 bass, hi-hats, atmospheric pads, autotuned male vocals.
-   Sparse verse building into dense emotional chorus.
-   Introspective lyrics about heartbreak and self-reflection.
-   Similar to Juice WRLD meets Post Malone."
+Blueprint generated:
+  Genre: melodic trap
+  BPM: 145, Key: C# minor
+  Energy: 0.72, Valence: 0.28 (melancholic)
+  Structure: [Intro 8s] [Verse] [Pre-Chorus] [Chorus] [Verse] [Chorus] [Bridge] [Chorus] [Outro]
+  Themes: introspection, heartbreak
+  Vocal: male, autotuned, emotional delivery
+  Production: 808 bass, hi-hats, atmospheric pads, reverb-heavy
+  Reference: "Juice WRLD meets Post Malone"
 
+Suno prompt generated:
+  Style: "Melodic trap, 145 BPM, C# minor, dark melancholic mood,
+         808 bass, hi-hats, atmospheric pads, autotuned male vocals"
   [Verse 1]
-  {Generated lyrics matching theme + vocabulary style}
-
+  {lyrics: introspective, simple vocabulary, heartbreak theme}
   [Chorus]
-  {Generated hook — catchy, repetitive, emotionally resonant}
-```
+  {lyrics: catchy hook, repetitive, emotionally resonant}
 
-This prompt engineering layer is the bridge between SoundPulse intelligence and music output. The system should be able to generate prompts for any genre at any moment, tailored to what's currently trending.
+Release strategy:
+  Drop: Friday 12am EST (optimal for Spotify algorithmic playlists)
+  TikTok: 15-second chorus clip posted 3 days before full release
+  Target playlists: Sad Bops, Chill Vibes, Late Night Feels
+  Predicted trajectory: 50K streams week 1, 200K by day 30
+```
 
 ---
 
-## Music Generation Model Specifications
+## Song DNA — What We Need to Capture
 
-### Suno (Primary — richest input surface)
+To replicate what makes successful music successful, we decompose every song into a full "DNA profile." This is not just tempo and mood — it includes arrangements, lyrics, themes, production choices, and cultural context. These are also the features that feed the prediction model.
+
+### Sonic Features (from Spotify Audio Analysis)
+
+| Feature Category | Specific Features | Source |
+|---|---|---|
+| **Tempo & Rhythm** | BPM, time signature, beat regularity, rhythmic complexity | Spotify Audio Analysis (beats, bars, tatums) |
+| **Energy & Dynamics** | Overall energy, loudness contour, dynamic range, fade-in/fade-out | Spotify Audio Features + Analysis (segments) |
+| **Mood & Tonality** | Key, mode (major/minor), valence (happy/sad), danceability | Spotify Audio Features |
+| **Production Style** | Acousticness, instrumentalness, liveness, speechiness | Spotify Audio Features |
+| **Timbre Profile** | 12-dimensional timbre vectors per segment — captures instrument texture, brightness, attack | Spotify Audio Analysis (segments.timbre) |
+| **Song Structure** | Section types (intro/verse/chorus/bridge/outro), durations, chorus ratio, intro length | Spotify Audio Analysis (sections) + Genius (section headers) |
+| **Pitch Content** | 12-dimensional pitch vectors per segment — captures harmonic content, chord progressions | Spotify Audio Analysis (segments.pitches) |
+
+### Lyrical Features (from Genius)
+
+| Feature | What It Captures |
+|---|---|
+| **Primary themes** | Love, heartbreak, party, flex, introspection, social commentary, nostalgia, empowerment |
+| **Vocabulary richness** | Unique words / total words — higher = literary, lower = repetitive/catchy |
+| **Chorus repetition ratio** | How much of the song is chorus — higher = more commercially formulaic |
+| **Song structure** | Verse count, chorus count, bridge presence, section ordering |
+| **Word count & density** | Sparse lyrics (electronic, ambient) vs dense lyrics (rap, folk) |
+| **Language** | English vs non-English — critical for market targeting |
+
+### Arrangement & Production (Future Phase — Deeper Analysis)
+
+| Feature | Why It Matters | How to Get It |
+|---|---|---|
+| **Vocal style** | Male/female, pitch range, autotune, harmonies, ad-libs | Audio ML models (vocal separation + classification) |
+| **Instrument palette** | 808s vs live drums, analog vs digital synths, guitar types | Timbre vector clustering from Spotify Analysis |
+| **Build patterns** | Sparse verse → dense chorus, gradual builds, drops | Section-level energy/loudness analysis |
+| **Hook placement** | Where the catchiest part is — critical for TikTok (first 15 seconds) | Segment analysis + stream skip patterns |
+| **Featured artists** | Collaboration patterns that drive cross-audience growth | Chartmetric artist data |
+| **Sonic similarity** | "Sounds like Artist X meets Artist Y" | Embedding-based similarity from timbre/pitch vectors |
+
+### Social & Cultural Context (from Chartmetric)
+
+| Feature | Source |
+|---|---|
+| **Artist social growth velocity** | Chartmetric `/stat/` endpoints (Spotify, Instagram, TikTok, YouTube, Shazam) |
+| **Geographic audience distribution** | Chartmetric `/where-people-listen` |
+| **Playlist ecosystem** | Which playlists drive growth in this genre |
+| **Cross-platform cascade timing** | How long from TikTok viral → Shazam spike → Spotify streams |
+| **Collaboration network** | Which artists collab with whom, and what the audience overlap is |
+
+---
+
+## Music Generation Models
+
+### Suno (Primary — richest input surface for full songs with vocals)
 
 | Parameter | Description |
 |---|---|
 | `style` | Genre/mood/instrumentation string (up to 1000 chars) |
-| `prompt` | Lyrics with section meta tags: `[Verse]`, `[Chorus]`, `[Bridge]`, `[Drop]`, `[Build]` |
+| `prompt` | Lyrics with meta tags: `[Verse]`, `[Chorus]`, `[Bridge]`, `[Drop]`, `[Build]` |
 | `vocalGender` | `"m"` or `"f"` |
 | `negativeTags` | Elements to exclude |
 | `styleWeight` | How strictly to follow style tags |
 | `instrumental` | Boolean for instrumental-only |
 
-Lyrics support vocal delivery tags (`[Whispered]`, `[Belted]`, `[Falsetto]`) and instrument tags (`[Piano]`, `[808s]`, `[Distorted Guitar]`). No official public API — third-party wrappers via sunoapi.org. Paid plans required for commercial use.
+Also supports vocal delivery tags (`[Whispered]`, `[Belted]`, `[Falsetto]`) and instrument tags (`[Piano]`, `[808s]`, `[Distorted Guitar]`). No official public API — third-party wrappers via sunoapi.org. Paid plans required for commercial use.
 
-### Udio (Alternative — audio conditioning)
+### Udio (Alternative — audio conditioning for style transfer)
 
-Similar parameter surface to Suno plus `audio_conditioning_path` for reference audio style transfer. No official API — third-party wrappers exist. All plans allow commercial use.
+Similar parameter surface to Suno plus `audio_conditioning_path` for reference audio. No official API — third-party wrappers exist. All plans allow commercial use.
 
 ### MusicGen by Meta (Open Source — instrumental only)
 
 | Parameter | Description |
 |---|---|
 | `prompt` | Text descriptions for generation |
-| `melody` | Reference audio tensor (chromagram extracted for melody conditioning) |
+| `melody` | Reference audio tensor (chromagram for melody conditioning) |
 | `guidance_scale` | CFG weighting (recommended: 3.0) |
-| `duration` | Output length in seconds (up to 30s on Replicate) |
-| `temperature` | Randomness control |
+| `duration` | Output length in seconds |
 
 Available via `pip install audiocraft`, Replicate API, or HuggingFace. Code is MIT but **model weights are CC-BY-NC** — commercial use requires fine-tuning your own weights.
 
-### SOUNDRAW (Most Structured API — background/sync music)
+### SOUNDRAW (Most Structured API — batch generation)
 
 | Parameter | Description |
 |---|---|
@@ -502,9 +198,9 @@ Available via `pip install audiocraft`, Replicate API, or HuggingFace. Code is M
 | `energy_levels` | Energy profile over time |
 | `length` | Duration |
 
-REST API at `soundraw.io/api/v2/musics/compose`. Up to 1000 songs/month. All generated music is royalty-free. The cleanest programmatic API for parameter-driven generation.
+REST API at `soundraw.io/api/v2/musics/compose`. Up to 1000 songs/month. All output is royalty-free. Cleanest programmatic API for parameter-driven generation.
 
-### Recommended Pipeline Architecture
+### Pipeline Recommendation
 
 1. **Suno** for full songs with vocals (richest control over lyrics, structure, vocal style)
 2. **SOUNDRAW** for programmatic batch generation (explicit parameter API, royalty-free)
@@ -513,33 +209,299 @@ REST API at `soundraw.io/api/v2/musics/compose`. Up to 1000 songs/month. All gen
 
 ---
 
-## Data Collection Architecture (Updated)
+## The Prediction Model
 
-SoundPulse now collects data across 4 layers:
+The prediction engine serves two purposes: (1) predict which existing tracks/artists will break out, and (2) predict whether a generated blueprint will succeed before we produce it.
 
-### Layer 1: Chart Data (What's trending)
+### What the Model Learns
+
+| Model Type | Question It Answers | Training Data |
+|---|---|---|
+| **Breakout predictor** | "Will this track enter the top 50 within 7/30/90 days?" | Historical snapshots: features at time T → did it chart at T+N? |
+| **Genre-timing model** | "In genre X, what sonic profile is trending upward right now?" | Per-genre feature distributions over time, weighted by success |
+| **Growth trajectory model** | "Given day-1 to day-7 signals, what's the 30/60/90 day path?" | Social growth curves from Chartmetric artist stats |
+| **Cross-platform cascade model** | "TikTok viral → Shazam → Spotify: what's the timing?" | Platform-specific snapshot sequences for breakout entities |
+| **Blueprint scorer** | "Given this Song DNA profile, what's the predicted success probability?" | Song DNA features of historical hits vs non-hits, per genre |
+
+### Feature Engineering (~70 features)
+
+**Per-platform momentum** (7 platforms x 5 features = 35): score 7-day average, velocity, acceleration, score vs 30-day average, rank change
+
+**Cross-platform** (10): platform count, variance, ratios (Shazam/Spotify, TikTok/Spotify), velocity alignment, score entropy
+
+**Temporal** (8): day-of-week, days since release, weekend flag, season
+
+**Genre** (7): genre momentum, new entry rate, trending count, rarity, saturation
+
+**Entity history** (10): age, peak composite, days since peak, previous breakout count, streak length, volatility
+
+**Song DNA** (from audio analysis + lyrics): tempo, energy, valence, danceability, key, mode, chorus ratio, vocabulary richness, primary theme, section count
+
+### Architecture
+
+**Phase 2 — Single Model Baseline:**
+- LightGBM on tabular features
+- Target: binary breakout prediction (top-50 within 7 days)
+- Training: 8+ weeks of historical daily snapshots
+
+**Phase 3 — Three-Model Ensemble:**
+- **LightGBM** — tabular features (platform scores, velocities, cross-platform ratios)
+- **LSTM with attention** — sequential patterns in 14-day time series
+- **XGBoost** — hand-crafted interaction features (e.g., TikTok velocity x Shazam ratio)
+- **Ridge meta-learner** combines the three models
+- **Isotonic regression** calibrates confidence scores (80% confidence = ~80% actual)
+- **Self-learning loop** — daily comparison of predictions vs outcomes, automatic retraining when accuracy degrades
+
+### Cold Start Strategy
+
+1. **Weeks 1–4:** No predictions. Collect data, build entity resolution, validate scoring
+2. **Weeks 5–8:** Accumulate historical snapshots. Label ground truth (what actually broke out?)
+3. **Weeks 9–12:** Train and evaluate Phase 2 model. Ship `/predictions` with "beta" labeling
+4. **Weeks 13+:** Iterate on features, begin ensemble development
+
+**Shortcut:** Chartmetric provides historical chart data going back years. We backfill 2 years of daily snapshots (730 days x 4 chart types = ~255K labeled examples) to skip the waiting period entirely.
+
+### Model Validation
+
+Backtesting system evaluates the model against historical data:
+- For each monthly evaluation period: use data before that date to predict, compare against what actually happened
+- Metrics tracked: MAE, RMSE, precision, recall, F1, AUC-ROC
+- Filterable by micro-genre and individual artist
+- As the model trains on more data, prediction error should decrease over time
+- Frontend page visualizes predicted vs actual rates, accuracy trends, and per-genre breakdown
+
+---
+
+## Data Collection
+
+SoundPulse collects data across 4 layers, each feeding different parts of the pipeline:
+
+### Layer 1: Chart Data — What's trending
+
 | Scraper | Source | Frequency | Data |
 |---|---|---|---|
-| `chartmetric` | Chartmetric Charts API | Every 4h | Spotify, Shazam chart rankings |
-| `spotify` | Spotify Web API | Every 6h | Search-based trending, chart positions |
-| `kworb` | Kworb.net | Daily | Spotify daily streaming charts |
-| `radio` | Billboard.com | Daily | Radio airplay, Hot 100, Country Airplay |
+| `chartmetric` | Chartmetric Charts API | Every 4h | Spotify regional/viral/plays charts, Shazam top charts (US market) |
+| `spotify` | Spotify Web API | Every 6h | Search-based trending across 12 genre categories, chart positions |
+| `kworb` | Kworb.net | Daily | Spotify daily streaming charts with stream counts |
+| `radio` | Billboard.com | Daily | Radio airplay, Hot 100, Country Airplay, Artist 100 |
 
-### Layer 2: Social Growth (How artists are growing)
+### Layer 2: Social Growth — How artists are growing
+
 | Scraper | Source | Frequency | Data |
 |---|---|---|---|
-| `chartmetric_artists` | Chartmetric Artist Stats | Every 12h | Spotify followers/listeners, Instagram, TikTok, YouTube, Shazam, geographic audience |
+| `chartmetric_artists` | Chartmetric Artist Stats | Every 12h | Spotify followers/monthly listeners, Instagram followers, TikTok followers/video creates, YouTube subscribers/views, Shazam lookups, geographic audience distribution |
 
-### Layer 3: Sonic DNA (What the music sounds like)
+### Layer 3: Sonic DNA — What the music sounds like
+
 | Scraper | Source | Frequency | Data |
 |---|---|---|---|
-| `spotify_audio` | Spotify Audio Features + Analysis | Daily | Tempo, energy, key, mood, timbre vectors, song structure sections, pitch content |
-| `genius_lyrics` | Genius API + scraping | Daily | Lyrics text, themes, vocabulary richness, section structure, chorus ratio |
+| `spotify_audio` | Spotify Audio Features + Analysis | Daily | Tempo, energy, key, mood, danceability, timbre vectors (12-dim), pitch vectors (12-dim), song structure sections, beat/bar/tatum timing |
+| `genius_lyrics` | Genius API + page scraping | Daily | Lyrics text, thematic classification (10 theme categories), vocabulary richness, song structure (verse/chorus/bridge counts), chorus repetition ratio |
 
 ### Layer 4: Metadata Enrichment
+
 | Scraper | Source | Frequency | Data |
 |---|---|---|---|
-| `musicbrainz` | MusicBrainz API | Every 12h | ISRC codes, genre tags, release metadata |
+| `musicbrainz` | MusicBrainz API | Every 12h | ISRC codes, genre tags, artist/release metadata for entity resolution |
+
+### Data Strategy — Chartmetric as the Backbone
+
+Chartmetric ($350/month, paid entry tier: 2 req/sec = ~170K req/day) is the primary data source. Rather than building individual scrapers for TikTok, Apple Music, YouTube, and social platforms, Chartmetric aggregates them all. Direct Spotify, Shazam, and Genius APIs are enrichment layers that add granularity Chartmetric doesn't provide (audio analysis, city-level Shazam data, lyrics).
+
+**What Chartmetric covers:** Spotify, Apple Music, TikTok, YouTube, Shazam, Instagram, Twitter metrics. Cross-platform entity resolution (unified artist/track IDs). Proprietary CM Score.
+
+**What we add on top:** Deep audio analysis (timbre, structure, pitch), lyrics + themes, higher-frequency chart snapshots, Shazam city-level data.
+
+---
+
+## Entity Resolution
+
+Chartmetric handles most cross-platform matching natively (unified artist/track IDs). For entities not in Chartmetric:
+
+1. **ISRC match** — exact join when both sides have valid ISRCs
+2. **Fuzzy name match** — RapidFuzz (token_sort_ratio > 85) on normalized artist+title strings
+3. **Disambiguation queue** — unresolved matches flagged for manual review
+4. **Learned blocklist** — known false positives excluded from auto-matching
+
+**Phase 2+:** Embedding-based matching for transliterated names (K-pop, Arabic, Japanese artists).
+
+---
+
+## Genre Intelligence
+
+850+ music genres organized hierarchically under 12 root categories (Pop, Rock, Electronic, Hip-Hop, R&B, Latin, Country, Jazz, Classical, African, Asian, Caribbean). Each genre maps bidirectionally to Spotify, Apple Music, MusicBrainz, and Chartmetric genre systems.
+
+This enables:
+- Genre-level trend analysis (Amapiano accelerating, Melodic Trap saturating, Brazilian Phonk emerging)
+- Per-genre prediction models (what works in Electronic is different from what works in Country)
+- Micro-genre targeting for music generation (not just "pop" but "bedroom pop" or "dark pop")
+
+---
+
+## Platform Weighting
+
+Weights apply to signal types, not API sources. A Spotify metric from Chartmetric is weighted the same as from the Spotify API directly.
+
+| Signal | Weight | Type | Why |
+|---|---|---|---|
+| **TikTok metrics** | 25% | Leading | Viral sounds precede streaming spikes by 1–3 weeks |
+| **Spotify metrics** | 25% | Concurrent | Largest streaming platform. Chart velocity is the most reliable momentum indicator |
+| **Shazam metrics** | 15% | Leading | Discovery intent. High Shazam-to-Spotify ratio = imminent breakout |
+| **Apple Music metrics** | 15% | Concurrent | Premium audience, strong US signal |
+| **Social velocity** | 10% | Composite | Cross-platform momentum (Instagram + YouTube + Spotify simultaneous growth) |
+| **Radio** | 10% | Lagging | Validates mainstream crossover |
+
+Weights are validated via Granger causality tests after 8 weeks of data collection. Re-evaluated quarterly.
+
+---
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/trending` | Current trending artists/tracks with composite scores, platform breakdowns, velocity, sparklines |
+| `GET` | `/search` | Full-text search across all entities with trending data attached |
+| `GET` | `/predictions` | Breakout predictions with confidence scores and explanatory signals |
+| `GET` | `/genres` | Genre taxonomy (hierarchical tree or flat list) |
+| `GET` | `/genres/{id}` | Single genre detail with platform mappings and trending stats |
+| `GET` | `/backtesting/results` | Model validation: predicted vs actual accuracy over time |
+| `POST` | `/backtesting/run` | Trigger a new backtesting evaluation |
+| `GET` | `/health` | Service health with per-platform data freshness |
+
+Authentication via `X-API-Key` header. Three tiers: Free (100 req/hr), Pro (1,000 req/hr), Admin (unlimited + write access).
+
+---
+
+## Technical Architecture
+
+| Component | Technology | Role |
+|---|---|---|
+| **API** | Python (FastAPI), async | REST API serving trending, predictions, genres, backtesting |
+| **Database** | PostgreSQL (Neon, serverless) | Persistent storage: entities, snapshots, predictions, backtest results |
+| **Cache** | Redis (Railway) | Rate limiting, response caching (15min–24h TTL by endpoint) |
+| **Task Queue** | Celery + Redis broker | Scraper orchestration on scheduled cycles |
+| **ML** | LightGBM, scikit-learn (Phase 2); PyTorch LSTM, XGBoost (Phase 3) | Prediction models |
+| **Entity Resolution** | RapidFuzz + ISRC matching + Chartmetric IDs | Cross-platform deduplication |
+| **Frontend** | React + Vite + Recharts + Tailwind | Dashboard, Explore, Model Validation, API Playground |
+| **Deployment** | Railway (compute) + Neon (database) | Production hosting |
+| **Local Dev** | Docker Compose | PostgreSQL, Redis, FastAPI, Celery in containers |
+
+---
+
+## Phased Rollout
+
+### Phase 1 — Data Foundation (Weeks 1–8)
+**Goal:** Prove aggregation works. Build the data pipeline.
+
+- Chartmetric as primary backbone + Spotify/Shazam enrichment
+- Chart data scraping every 4–6 hours
+- Entity resolution via Chartmetric IDs + ISRC + fuzzy matching
+- Composite scoring with initial platform weights
+- React dashboard for data validation
+- Historical backfill: 2 years of daily chart data from Chartmetric
+
+**Exit criteria:** API returns accurate, deduplicated trending data. Composite scores correlate with real-world breakout patterns.
+
+### Phase 2 — Prediction + Song DNA (Weeks 9–20)
+**Goal:** Train the prediction model. Add sonic and lyrical analysis.
+
+- LightGBM breakout predictor trained on backfilled historical data
+- Spotify Audio Analysis enrichment (timbre, structure, features)
+- Genius lyrics enrichment (themes, vocabulary, structure)
+- Chartmetric artist social stats (growth trajectories)
+- Model Validation backtesting system
+- Apple Music direct API, Radio airplay data
+
+**Exit criteria:** Prediction model >60% precision at 50% recall on 7-day breakout. Song DNA profiles available for top trending tracks.
+
+### Phase 3 — Blueprint Generation + Music Gen Integration (Weeks 21–32)
+**Goal:** Generate actionable blueprints. Connect to music generation models.
+
+- Three-model ensemble (LightGBM + LSTM + XGBoost) with Ridge meta-learner
+- Blueprint generation API: input a genre, get a complete song specification
+- Prompt translation layer: Song DNA → Suno/Udio/SOUNDRAW prompts
+- Genre-timing model: what sonic characteristics are trending per micro-genre right now
+- Cross-platform cascade model: predict the TikTok → Shazam → Spotify timing
+- Full 850+ genre taxonomy with real-time per-genre trend scoring
+
+**Exit criteria:** System generates prompts that produce songs with characteristics matching current genre trends. Blueprint scorer predicts success with >50% precision.
+
+---
+
+## Success Metrics
+
+### Phase 1
+| Metric | Target |
+|---|---|
+| Data freshness | <6 hours stale |
+| Entity match rate | >85% cross-platform |
+| API uptime | >99% |
+| Composite score correlation with chart movement | Positive Spearman rank correlation |
+
+### Phase 2
+| Metric | Target |
+|---|---|
+| 7-day breakout precision | >60% at 50% recall |
+| Song DNA coverage | Audio features for >90% of top 200 tracks |
+| Lyrics coverage | Themes extracted for >70% of top 200 tracks |
+| Baseline improvement | >15% precision over naive persistence |
+
+### Phase 3
+| Metric | Target |
+|---|---|
+| Ensemble lift over single model | >10% precision improvement |
+| Confidence calibration error | <0.05 mean absolute |
+| Blueprint quality | Generated prompts produce songs matching target genre profile >80% of the time |
+| Genre trend detection | Correctly identifies 3 of top 5 emerging genres per quarter |
+
+---
+
+## Operating Costs
+
+### Phase 1
+| Item | Monthly Cost |
+|---|---|
+| Chartmetric API (paid entry) | $350 |
+| Shazam via RapidAPI | $10 |
+| Spotify / MusicBrainz APIs | Free |
+| Railway compute (API + Redis) | $20–$50 |
+| Neon database | Free tier |
+| **Total** | **~$380–$410/month** |
+
+### Phase 2
+| Item | Additional Cost |
+|---|---|
+| Apple Developer Program | $8/month amortized |
+| Shazam upgrade to Pro | +$40 |
+| Genius API | Free |
+| Radio data (TBD) | $200–$2,000 |
+| Increased compute for ML | +$30–$100 |
+| **Total** | **~$660–$2,560/month** |
+
+### Phase 3
+| Item | Additional Cost |
+|---|---|
+| Suno API (third-party wrapper) | ~$50–$100 |
+| SOUNDRAW API | ~$20–$50 |
+| GPU compute for ensemble training | +$50–$200 |
+| **Total** | **~$780–$2,910/month** |
+
+These are infrastructure and API costs only. Chartmetric at $350/month is the most cost-effective decision in the stack — it replaces building and maintaining individual scrapers for 6+ platforms.
+
+---
+
+## Data Source Feasibility Matrix
+
+| Platform | Role | Cost | Rate Limits | What You Get | Risk |
+|---|---|---|---|---|---|
+| **Chartmetric** | Primary backbone | $350/mo | 2 req/sec (~170k/day) | Cross-platform metrics, social stats, entity resolution, CM Score | Low |
+| **Spotify** | Enrichment | Free | ~180 req/min | Charts, search, audio features, audio analysis | Low |
+| **Shazam** | Enrichment | $10–$50/mo | 500–10k req/mo | Discovery signals, city-level data | Low |
+| **Genius** | Lyrics | Free | ~100 req/mo + scraping | Song lyrics, section structure | Low |
+| **Apple Music** | Phase 2 | $99/yr | Generous | Charts, catalog data | Medium |
+| **TikTok** | Via Chartmetric | Included | Included | Video counts, sound usage | Medium |
+| **Radio** | Phase 2+ | $200–$2k/mo | Varies | Airplay spins, station adds | High |
+| **MusicBrainz** | Metadata | Free | 1 req/sec | ISRCs, genre tags, release data | Low |
 
 ---
 
