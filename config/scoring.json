@@ -1,0 +1,11 @@
+{
+  "platform_weights": {
+    "chartmetric": 0.40,
+    "spotify": 0.30,
+    "shazam": 0.20,
+    "apple_music": 0.05,
+    "kworb": 0.05,
+    "tiktok": 0.00,
+    "radio": 0.00
+  }
+}

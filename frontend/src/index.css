@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=DM+Sans:wght@400;500;600;700&display=swap');
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: #09090b;
+  color: #e4e4e7;
+}
+
+.font-mono { font-family: 'JetBrains Mono', monospace; }
+
+/* Skeleton loading animation */
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+.skeleton { animation: pulse 1.5s ease-in-out infinite; }

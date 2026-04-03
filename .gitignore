@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Environment
+.env
+.env.railway
+.env.local
+
+# Node
+frontend/node_modules/
+
+# IDE
+.claude/
+.vscode/
+.idea/
+
+# Build
+*.egg-info/
+dist/
+build/
+
+# Data
+*.db
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Images
+billboard_predictions.png
