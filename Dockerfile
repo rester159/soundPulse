@@ -9,8 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir .
 
-# v2: blueprint + song lab + backtesting + deep scrapers
 COPY . .
+# Ensure latest code is included (bust cache: 2026-04-03-v2)
+RUN echo "build-version: 2026-04-03-v2" > /app/.build-version
 
 EXPOSE 8000
 
