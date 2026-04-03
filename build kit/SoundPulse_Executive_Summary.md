@@ -725,33 +725,145 @@ This separation means:
 - **Brand coherence** → every song from one artist sounds like THEM, even though the songs differ
 - **A/B testing** → try the same Song DNA with different Artist DNAs to see which persona fits best
 
+### Two Prediction Models: Artist Success + Song Success
+
+The system predicts success at two levels independently, then combines them:
+
+**Artist Success Predictor** — "What kind of artist will resonate in this genre right now?"
+- Trained on: real artist profiles from Chartmetric (demographics, genre, visual aesthetic, backstory patterns, social growth trajectories)
+- Inputs: proposed artist profile (genre, aesthetic, persona type, target demographic)
+- Output: predicted 90-day follower growth rate, audience engagement probability
+- Use case: BEFORE creating a new artist, predict whether this persona type will gain traction
+
+**Song Success Predictor** — "Will this specific song succeed?"
+- Trained on: Song DNA features + chart outcomes (existing model)
+- Inputs: blueprint features (tempo, key, mood, themes, structure)
+- Output: predicted streaming trajectory, breakout probability
+- Use case: BEFORE generating a song, predict whether this blueprint is worth producing
+
+**Combined Decision:**
+```
+Artist "VOIDBOY" (melodic trap persona) = 72% artist success probability
+Song blueprint (C# minor, 145bpm, heartbreak) = 68% song success probability
+Combined score = f(artist_prob, song_prob, genre_timing) = 0.71
+
+→ GREEN LIGHT: Generate this song for this artist
+→ Expected ROI: positive within 30 days
+```
+
+This prevents wasting generation/distribution resources on low-probability combinations.
+
+---
+
+## Comprehensive Artist Profile
+
+An AI artist is a complete fictional character — not just a voice. The profile feeds into music generation (vocal style), image generation (visual identity), social content (persona), and marketing (narrative). Every field must be internally consistent.
+
+### Identity & Demographics
+
+| Field | Description | Example | Feeds Into |
+|---|---|---|---|
+| **Stage name** | Artist name | "VOIDBOY" | All platforms, credits, PRO registration |
+| **Legal name** | Fictional full name for publishing | "Marcus Chen" | PRO, publishing admin, distribution metadata |
+| **Age** | Apparent age | 24 | Visual generation, persona narrative |
+| **Gender** | Gender presentation | Male | Voice generation, image generation |
+| **Ethnicity / heritage** | Cultural background | Korean-American | Visual generation, narrative, genre authenticity |
+| **Provenance** | Where they're "from" | "Atlanta, raised in Seoul" | Backstory, accent, genre credibility |
+| **Relationship status** | Part of persona narrative | "Famously private" | Social content, lyric themes |
+| **Languages** | Languages they sing/speak in | English, some Korean phrases | Lyrics, market targeting |
+
+### Visual Identity
+
+| Field | Description | Example | Image Model Input |
+|---|---|---|---|
+| **Face** | Consistent facial features | "Sharp jawline, dark eyes, messy black hair" | Midjourney/DALL-E character reference |
+| **Body type** | Physical build | "Lean, tall" | Full-body shots |
+| **Fashion style** | Clothing aesthetic | "Streetwear, oversized hoodies, silver chains, dark palette" | Outfit generation for photos |
+| **Tattoos / piercings** | Distinctive marks | "Sleeve tattoo left arm, septum piercing" | Consistent across all images |
+| **Color palette** | Brand colors | "#1a1a2e, #7b2ff7, #c4b5fd" | Cover art, social posts, merch |
+| **Art direction style** | Photography/visual mood | "Moody, neon-lit, urban, night photography" | Cover art, promo photos, visualizers |
+| **Reference images** | Seed images for consistency | Generated base portrait + style ref | Midjourney --cref / DALL-E |
+
+### Voice & Musical Identity
+
+| Field | Description | Example |
+|---|---|---|
+| **Voice timbre** | Tonal quality | "Warm, slightly raspy male tenor" |
+| **Vocal range** | Pitch range | "E2 to A4, falsetto to D5" |
+| **Delivery style** | How they sing | "Melodic flow, whispered verses, belted choruses" |
+| **Accent** | Pronunciation character | "Slight Atlanta drawl with Korean-American inflection" |
+| **Autotune level** | Processing preference | "Medium pitch correction, not robotic" |
+| **Ad-libs** | Signature vocal additions | "yeah", "uh", whispered doubles |
+| **Suno persona ID** | Persistent voice model | Auto-generated on first song |
+
+### Genre & Influences
+
+| Field | Description | Example |
+|---|---|---|
+| **Primary genre** | Main genre | "Melodic trap" |
+| **Adjacent genres** | Crossover territory | "Emo rap, cloud rap, alt-R&B" |
+| **Influences** | Artists they "sound like" | "Juice WRLD, Post Malone, The Weeknd" |
+| **Anti-influences** | What they explicitly DON'T sound like | "Not mumble rap, not pop-country" |
+| **Production preferences** | Recurring sonic choices | "808s, spacey reverb, minor keys, sparse verses" |
+| **Lyrical themes** | Recurring subject matter | "Heartbreak, isolation, late-night drive energy, self-destruction" |
+| **Lyrical vocabulary** | Complexity level | "Simple, repetitive hooks, emotionally direct" |
+
+### Persona & Narrative
+
+| Field | Description | Example |
+|---|---|---|
+| **Backstory** | Origin story for press/social | "Grew up between two cultures, music was the only constant" |
+| **Personality traits** | How they behave online | "Introspective, mysterious, rarely posts personal life" |
+| **Social voice** | How they write captions | "Lowercase, short, cryptic. No emojis." |
+| **Interview style** | How they'd answer questions | "Thoughtful, avoids direct answers, philosophical" |
+| **Controversy stance** | Do they court drama? | "Avoids controversy, lets music speak" |
+| **Fan nickname** | What fans call themselves | "The Void" |
+| **Lore / narrative arcs** | Ongoing story threads | "Each album is a chapter in a breakup story" |
+
+### Image Generation Pipeline
+
+The visual identity feeds directly into AI image models for consistent outputs:
+
+```
+Artist Profile: VOIDBOY
+  ├── Face reference (Midjourney --cref base portrait)
+  ├── Fashion: "streetwear, oversized black hoodie, silver chains"
+  ├── Color palette: #1a1a2e, #7b2ff7
+  ├── Art direction: "moody, neon-lit, urban, night photography"
+  │
+  ├── → Cover Art Generator
+  │     Input: song mood + artist visual + color palette
+  │     Output: album/single cover (3000x3000 for DSPs)
+  │
+  ├── → Social Content Generator
+  │     Input: artist face + fashion + setting
+  │     Output: Instagram posts, TikTok thumbnails, stories
+  │
+  ├── → Promo Photo Generator
+  │     Input: full artist visual profile
+  │     Output: press photos, Spotify artist image, YouTube banner
+  │
+  └── → Video/Visualizer Generator
+        Input: song audio + visual style + lyrics
+        Output: lyric videos, audio visualizers, TikTok clips
+```
+
+**Image model options:**
+- **Midjourney** — best quality, `--cref` for character consistency, no public API (Discord bot or unofficial wrappers)
+- **DALL-E 3** (OpenAI API) — official REST API, good quality, character consistency via detailed prompts
+- **Stable Diffusion + IP-Adapter** — open source, self-hosted, best for face consistency across images
+- **Flux** — emerging option, high quality, API available via fal.ai/Replicate
+
 ### Data Model for AI Artists
 
-Each AI artist in the database tracks:
+Each AI artist in the database stores the complete profile above, organized as:
 
-**Identity:**
-- Name, visual identity (AI-generated profile images, cover art style, color palette)
-- Bio / persona narrative
-- Social accounts (TikTok, Instagram, YouTube handles)
-
-**Artist DNA (frozen at creation, evolves slowly):**
-- Voice profile (timbre descriptor, autotune level, delivery style, accent)
-- Genre home (primary + adjacent genres)
-- Production signature (recurring sonic elements)
-- Lyrical voice (themes, vocabulary level, perspective, language)
-- Suno/Udio persona ID (if the model supports persistent voice)
-
-**Catalog:**
-- Release history (songs, dates, Song DNA for each)
-- Performance metrics per song (streams, saves, playlist adds, TikTok usage)
-- Audience metrics (followers, growth rate, geographic distribution)
-- Revenue attribution (royalties per song, per platform)
-
-**Management:**
-- Brand coherence score (feature variance across catalog — lower = more consistent)
-- Release cadence (average days between releases)
-- Growth trajectory (is audience expanding, stagnating, declining?)
-- Portfolio role (growth artist, cash cow, experimental, retired)
+**Identity:** name, legal name, demographics, provenance, narrative
+**Artist DNA:** voice profile, genre home, production signature, lyrical voice, influences
+**Visual DNA:** face description, fashion, color palette, art direction, reference image IDs
+**Social:** platform handles, posting style, social voice, engagement patterns
+**Catalog:** release history, Song DNA per track, performance metrics, revenue
+**Management:** brand coherence score, growth trajectory, portfolio role, release cadence
 
 ---
 
