@@ -861,9 +861,42 @@ Song distributed → Revelator (rights management) → TuneRegistry (ASCAP/BMI r
 
 ASCAP/BMI accept AI-assisted works with "meaningful human creative contribution." Fully AI works NOT eligible. SoundPulse model: human selects genre, approves blueprint. Legal gray area — needs counsel.
 
-### No PRO Has a Public API
+### PRO Registration Automation (Researched April 2026)
 
-Registration via TuneRegistry dashboard (automate with browser automation) or Songtrust. Revelator API handles rights management side.
+**Winner: TuneRegistry** — $35-95/month flat fee, 0% commission, CSV bulk import.
+
+| Organization | TuneRegistry Handles? | Direct Alternative | Automation Path |
+|---|---|---|---|
+| **ASCAP** | ✅ Daily delivery | No API, no bulk import | Use TuneRegistry |
+| **BMI** | ✅ Daily delivery | No API, no bulk import | Use TuneRegistry |
+| **SESAC** | ✅ Daily delivery | No API | Use TuneRegistry |
+| **HFA** | ✅ Bi-monthly delivery | No API | Use TuneRegistry |
+| **Music Reports** | ✅ Weekly delivery | No API | Use TuneRegistry |
+| **SoundExchange** | ✅ DDEX feed | Has API (request at techsupport@soundexchange.com) + CSV bulk upload | TuneRegistry OR direct API |
+| **The MLC** | ✅ Supported | Spreadsheet bulk upload (300 row max) + CWR files | TuneRegistry OR direct bulk |
+
+**Automation pipeline:**
+1. Song is distributed → ISRC assigned by distributor
+2. SoundPulse generates CSV matching TuneRegistry's bulk import template: title, writer names + IPI numbers, publisher (SoundPulse Records), ownership splits (100%), ISRC
+3. CSV uploaded to TuneRegistry (browser automation via Playwright, or manual monthly batch)
+4. TuneRegistry delivers to all 7+ organizations automatically
+
+**Required per song:** Title, writer legal name, writer IPI number (obtained on ASCAP/BMI membership), publisher name, publisher IPI, ownership split %, ISRC
+
+**Setup requirements:**
+- Register as publisher with ASCAP or BMI (one-time, ~$50 fee)
+- Obtain IPI number for the publishing entity
+- TuneRegistry Business account ($95/month — handles unlimited works)
+
+**Timeline to first royalty:** 9-18 months from performance date (industry standard, unavoidable)
+
+**Songtrust:** NOT recommended. 15-20% commission on collected royalties, no API, no bulk import. TuneRegistry at flat fee is far more cost-effective at scale.
+
+**Implementation order:**
+1. TuneRegistry Business + CSV export pipeline from SoundPulse DB
+2. SoundExchange direct (request their API for recordings)
+3. MLC membership + bulk upload for mechanical royalties
+4. Ensure all writer/publisher entities have IPI numbers
 
 ---
 
