@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
-import { BarChart3, Search, Terminal, FlaskConical, Settings, X, AudioLines } from 'lucide-react'
+import { BarChart3, Search, Terminal, FlaskConical, Music, Settings, X, AudioLines } from 'lucide-react'
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: BarChart3 },
   { to: '/explore', label: 'Explore', icon: Search },
+  { to: '/song-lab', label: 'Song Lab', icon: Music },
   { to: '/model-validation', label: 'Model Validation', icon: FlaskConical },
   { to: '/api-tester', label: 'API Tester', icon: Terminal },
 ]

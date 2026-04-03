@@ -189,3 +189,18 @@ export function useRunBacktest() {
     mutationFn: ({ body }) => makeRequest('POST', '/backtesting/run', {}, body),
   })
 }
+
+// Blueprint / Song Lab hooks
+export function useGenreOpportunities() {
+  return useQuery({
+    queryKey: ['blueprint', 'genres'],
+    queryFn: () => makeRequest('GET', '/blueprint/genres'),
+    staleTime: 300_000,
+  })
+}
+
+export function useGenerateBlueprint() {
+  return useMutation({
+    mutationFn: ({ body }) => makeRequest('POST', '/blueprint/generate', {}, body),
+  })
+}
