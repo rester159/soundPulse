@@ -922,6 +922,42 @@ async def run_scraper_now(
 
 
 # ---------------------------------------------------------------------------
+# Backfill endpoint
+# ---------------------------------------------------------------------------
+
+
+class BackfillRequest(BaseModel):
+    days: int = 730
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+@router.post("/api/v1/admin/backfill", status_code=202)
+async def start_backfill(
+    request: BackfillRequest,
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Start a deep historical backfill from Chartmetric in the background."""
+    import subprocess
+    import sys
+
+    cmd = [sys.executable, "scripts/backfill_deep.py", "--days", str(request.days)]
+    if request.start_date:
+        cmd.extend(["--start", request.start_date])
+    if request.end_date:
+        cmd.extend(["--end", request.end_date])
+
+    # Run as background subprocess so it doesn't block the API
+    subprocess.Popen(cmd, stdout=open("/tmp/backfill.log", "w"), stderr=subprocess.STDOUT)
+
+    return {
+        "detail": f"Backfill started: {request.days} days",
+        "log_file": "/tmp/backfill.log",
+        "command": " ".join(cmd),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Health endpoint
 # ---------------------------------------------------------------------------
 
