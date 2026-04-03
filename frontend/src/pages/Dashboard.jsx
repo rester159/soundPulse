@@ -20,7 +20,7 @@ export default function Dashboard() {
     data: trendingResult,
     isLoading: trendingLoading,
     dataUpdatedAt: trendingUpdatedAt,
-  } = useTrending({ entity_type: entityType, limit: 20 })
+  } = useTrending({ entity_type: entityType, limit: 20, time_range: '30d' })
 
   const { data: predictionsResult, isLoading: predictionsLoading } =
     usePredictions({ limit: 5 })
