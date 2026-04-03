@@ -110,6 +110,31 @@ async def _run_scraper_job(scraper_id: str):
                 credentials={},
                 api_base_url=api_url, admin_key=admin_key,
             )
+        elif scraper_id == "chartmetric_artists":
+            from scrapers.chartmetric_artists import ChartmetricArtistsScraper
+            scraper = ChartmetricArtistsScraper(
+                credentials={
+                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
+                },
+                api_base_url=api_url, admin_key=admin_key,
+            )
+        elif scraper_id == "spotify_audio":
+            from scrapers.spotify_audio import SpotifyAudioScraper
+            scraper = SpotifyAudioScraper(
+                credentials={
+                    "client_id": os.environ.get("SPOTIFY_CLIENT_ID", ""),
+                    "client_secret": os.environ.get("SPOTIFY_CLIENT_SECRET", ""),
+                },
+                api_base_url=api_url, admin_key=admin_key,
+            )
+        elif scraper_id == "genius_lyrics":
+            from scrapers.genius_lyrics import GeniusLyricsScraper
+            scraper = GeniusLyricsScraper(
+                credentials={
+                    "api_key": os.environ.get("GENIUS_API_KEY", ""),
+                },
+                api_base_url=api_url, admin_key=admin_key,
+            )
         else:
             logger.warning("Unknown scraper: %s", scraper_id)
             return
@@ -154,6 +179,10 @@ async def init_scheduler(database_url: str):
         "musicbrainz": {"interval_hours": 12, "enabled": False},
         "radio": {"interval_hours": 24, "enabled": False},
         "kworb": {"interval_hours": 24, "enabled": False},
+        "chartmetric_artists": {"interval_hours": 12, "enabled": True},
+        "spotify_audio": {"interval_hours": 24, "enabled": True},
+        "genius_lyrics": {"interval_hours": 24, "enabled": False},
+        "spotify_audio": {"interval_hours": 24, "enabled": True},
     }
 
     # Seed default configs for scrapers that don't exist in DB yet

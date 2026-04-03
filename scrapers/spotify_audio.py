@@ -1,0 +1,416 @@
+"""
+Spotify Audio Analysis enrichment scraper for SoundPulse.
+
+Enriches existing tracks that have a spotify_id but are missing audio_features
+by fetching data from Spotify's Audio Features and Audio Analysis endpoints.
+
+- GET /v1/audio-features?ids={ids}  (batch of up to 100)
+- GET /v1/audio-analysis/{track_id} (per-track detailed analysis)
+
+Uses the same Client Credentials auth flow as the main Spotify scraper.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+import time
+from datetime import date
+from typing import Any
+
+from scrapers.base import AuthenticationError, BaseScraper, RawDataPoint
+
+logger = logging.getLogger(__name__)
+
+# How many top tracks (by raw_score) get full audio analysis
+TOP_TRACKS_FOR_ANALYSIS = 50
+
+# Audio feature keys returned by /v1/audio-features
+AUDIO_FEATURE_KEYS = [
+    "tempo", "energy", "danceability", "valence", "acousticness",
+    "instrumentalness", "liveness", "speechiness", "loudness",
+    "key", "mode", "duration_ms", "time_signature",
+]
+
+
+class SpotifyAudioScraper(BaseScraper):
+    """Enrich existing tracks with Spotify audio features and analysis."""
+
+    PLATFORM = "spotify_audio"
+
+    SPOTIFY_API_BASE = "https://api.spotify.com"
+    SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+
+    def __init__(self, credentials: dict, api_base_url: str, admin_key: str):
+        super().__init__(credentials, api_base_url, admin_key)
+        self.access_token: str = ""
+        self.token_expires_at: float = 0.0
+        self._semaphore = asyncio.Semaphore(2)
+
+    # ------------------------------------------------------------------
+    # Authentication (same Client Credentials flow as spotify.py)
+    # ------------------------------------------------------------------
+
+    async def authenticate(self) -> None:
+        """Obtain an access token via Client Credentials flow."""
+        client_id = self.credentials.get("client_id", "")
+        client_secret = self.credentials.get("client_secret", "")
+
+        if not client_id or not client_secret:
+            raise AuthenticationError("client_id and client_secret are required")
+
+        encoded = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+
+        try:
+            resp = await self.client.post(
+                self.SPOTIFY_TOKEN_URL,
+                data={"grant_type": "client_credentials"},
+                headers={
+                    "Authorization": f"Basic {encoded}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            raise AuthenticationError(f"Spotify auth failed: {e}") from e
+
+        body = resp.json()
+        self.access_token = body["access_token"]
+        self.token_expires_at = time.time() + body.get("expires_in", 3600)
+        logger.info(
+            "[spotify_audio] Authenticated, token expires in %ds",
+            body.get("expires_in", 3600),
+        )
+
+    # ------------------------------------------------------------------
+    # Throttled request helpers
+    # ------------------------------------------------------------------
+
+    async def _throttled_get(self, url: str, params: dict | None = None, delay: float = 1.0) -> Any:
+        """GET with concurrency limit and configurable inter-request delay."""
+        async with self._semaphore:
+            await asyncio.sleep(delay)
+            resp = await self._rate_limited_request(
+                "GET",
+                url,
+                headers={"Authorization": f"Bearer {self.access_token}"},
+                params=params,
+            )
+            return resp.json()
+
+    # ------------------------------------------------------------------
+    # Query SoundPulse API for tracks needing enrichment
+    # ------------------------------------------------------------------
+
+    async def _fetch_tracks_needing_enrichment(self) -> list[dict[str, Any]]:
+        """
+        Query the SoundPulse API to find tracks with spotify_id that are
+        missing audio_features in their signals.
+
+        Fetches recent trending data and filters for tracks without audio data.
+        """
+        tracks: list[dict[str, Any]] = []
+        page = 1
+        max_pages = 20
+
+        while page <= max_pages:
+            try:
+                resp = await self.client.get(
+                    f"{self.api_base_url}/api/v1/trending",
+                    params={
+                        "platform": "spotify",
+                        "entity_type": "track",
+                        "page": page,
+                        "per_page": 100,
+                    },
+                    headers={"X-API-Key": self.admin_key},
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "[spotify_audio] Failed to fetch tracks page %d: HTTP %d",
+                        page, resp.status_code,
+                    )
+                    break
+
+                data = resp.json()
+                items = data.get("items", data) if isinstance(data, dict) else data
+                if not items:
+                    break
+
+                for item in items:
+                    entity_id = item.get("entity_identifier", {})
+                    spotify_id = entity_id.get("spotify_id", "")
+                    signals = item.get("signals", {})
+                    audio_feats = signals.get("audio_features", {})
+
+                    # Track has a spotify_id but no audio features yet
+                    if spotify_id and not audio_feats:
+                        tracks.append({
+                            "spotify_id": spotify_id,
+                            "title": entity_id.get("title", ""),
+                            "artist_name": entity_id.get("artist_name", ""),
+                            "raw_score": item.get("raw_score", 0),
+                        })
+
+                # If we got fewer items than requested, we've reached the end
+                if len(items) < 100:
+                    break
+                page += 1
+
+            except Exception as e:
+                logger.warning("[spotify_audio] Error fetching tracks page %d: %s", page, e)
+                break
+
+        logger.info(
+            "[spotify_audio] Found %d tracks needing audio enrichment",
+            len(tracks),
+        )
+        return tracks
+
+    # ------------------------------------------------------------------
+    # Batch fetch audio features (up to 100 per request)
+    # ------------------------------------------------------------------
+
+    async def _batch_fetch_audio_features(
+        self, track_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Fetch audio features for tracks in batches of 100. 1 req/sec."""
+        features_map: dict[str, dict[str, Any]] = {}
+
+        for i in range(0, len(track_ids), 100):
+            batch = track_ids[i : i + 100]
+            ids_param = ",".join(batch)
+            url = f"{self.SPOTIFY_API_BASE}/v1/audio-features?ids={ids_param}"
+
+            try:
+                data = await self._throttled_get(url, delay=1.0)
+                for feat in data.get("audio_features", []):
+                    if feat is not None and feat.get("id"):
+                        features_map[feat["id"]] = {
+                            k: feat.get(k) for k in AUDIO_FEATURE_KEYS
+                        }
+            except Exception as e:
+                logger.warning(
+                    "[spotify_audio] Failed to fetch audio features batch %d-%d: %s",
+                    i, i + len(batch), e,
+                )
+
+        logger.info(
+            "[spotify_audio] Fetched audio features for %d/%d tracks",
+            len(features_map), len(track_ids),
+        )
+        return features_map
+
+    # ------------------------------------------------------------------
+    # Fetch full audio analysis for a single track
+    # ------------------------------------------------------------------
+
+    async def _fetch_audio_analysis(self, track_id: str) -> dict[str, Any] | None:
+        """
+        Fetch detailed audio analysis for a single track.
+        Returns condensed sections/segments data, or None on failure.
+        Uses a slower rate (2s delay) since this is a heavier endpoint.
+        """
+        url = f"{self.SPOTIFY_API_BASE}/v1/audio-analysis/{track_id}"
+
+        try:
+            data = await self._throttled_get(url, delay=2.0)
+        except Exception as e:
+            logger.warning(
+                "[spotify_audio] Failed to fetch audio analysis for %s: %s",
+                track_id, e,
+            )
+            return None
+
+        # Condense the analysis to the most useful parts
+        analysis: dict[str, Any] = {}
+
+        # Sections: verse/chorus/bridge structure with tempo/key/loudness changes
+        raw_sections = data.get("sections", [])
+        analysis["sections"] = [
+            {
+                "start": s.get("start"),
+                "duration": s.get("duration"),
+                "loudness": s.get("loudness"),
+                "tempo": s.get("tempo"),
+                "tempo_confidence": s.get("tempo_confidence"),
+                "key": s.get("key"),
+                "key_confidence": s.get("key_confidence"),
+                "mode": s.get("mode"),
+                "mode_confidence": s.get("mode_confidence"),
+                "time_signature": s.get("time_signature"),
+                "time_signature_confidence": s.get("time_signature_confidence"),
+            }
+            for s in raw_sections
+        ]
+
+        # Segments: condense to summary stats rather than storing thousands of
+        # individual segments. We keep the first 3 and last 3 for intro/outro
+        # analysis, plus aggregate timbre and pitch statistics.
+        raw_segments = data.get("segments", [])
+        if raw_segments:
+            analysis["segment_count"] = len(raw_segments)
+
+            # Average timbre vector across all segments (12 dimensions)
+            timbre_sums = [0.0] * 12
+            pitch_sums = [0.0] * 12
+            loudness_sum = 0.0
+            for seg in raw_segments:
+                timbre = seg.get("timbre", [0.0] * 12)
+                pitches = seg.get("pitches", [0.0] * 12)
+                for j in range(min(12, len(timbre))):
+                    timbre_sums[j] += timbre[j]
+                for j in range(min(12, len(pitches))):
+                    pitch_sums[j] += pitches[j]
+                loudness_sum += seg.get("loudness_max", 0.0)
+
+            n = len(raw_segments)
+            analysis["avg_timbre"] = [round(t / n, 3) for t in timbre_sums]
+            analysis["avg_pitches"] = [round(p / n, 3) for p in pitch_sums]
+            analysis["avg_segment_loudness"] = round(loudness_sum / n, 3)
+
+            # Intro segments (first 3) and outro segments (last 3)
+            def _condense_segment(seg: dict) -> dict:
+                return {
+                    "start": seg.get("start"),
+                    "duration": seg.get("duration"),
+                    "loudness_max": seg.get("loudness_max"),
+                    "timbre": seg.get("timbre", []),
+                    "pitches": seg.get("pitches", []),
+                }
+
+            analysis["intro_segments"] = [
+                _condense_segment(s) for s in raw_segments[:3]
+            ]
+            analysis["outro_segments"] = [
+                _condense_segment(s) for s in raw_segments[-3:]
+            ]
+
+        # Beat/bar/tatum counts (useful metadata without storing every timestamp)
+        analysis["beat_count"] = len(data.get("beats", []))
+        analysis["bar_count"] = len(data.get("bars", []))
+        analysis["tatum_count"] = len(data.get("tatums", []))
+
+        # Track-level analysis metadata
+        track_info = data.get("track", {})
+        if track_info:
+            analysis["analysis_sample_rate"] = track_info.get("analysis_sample_rate")
+            analysis["end_of_fade_in"] = track_info.get("end_of_fade_in")
+            analysis["start_of_fade_out"] = track_info.get("start_of_fade_out")
+            analysis["duration"] = track_info.get("duration")
+
+        return analysis
+
+    # ------------------------------------------------------------------
+    # collect_trending — main enrichment pipeline
+    # ------------------------------------------------------------------
+
+    async def collect_trending(self) -> list[RawDataPoint]:
+        """
+        Enrichment pipeline:
+        1. Query SoundPulse for tracks missing audio features
+        2. Batch fetch audio features from Spotify
+        3. For top tracks, fetch full audio analysis
+        4. Return data points to be POSTed back to SoundPulse
+        """
+        today = date.today()
+
+        # Step 1: Find tracks needing enrichment
+        tracks = await self._fetch_tracks_needing_enrichment()
+        if not tracks:
+            logger.info("[spotify_audio] No tracks need enrichment")
+            return []
+
+        # Deduplicate by spotify_id
+        seen: set[str] = set()
+        unique_tracks: list[dict[str, Any]] = []
+        for t in tracks:
+            sid = t["spotify_id"]
+            if sid not in seen:
+                seen.add(sid)
+                unique_tracks.append(t)
+
+        all_spotify_ids = [t["spotify_id"] for t in unique_tracks]
+        logger.info(
+            "[spotify_audio] Enriching %d unique tracks", len(all_spotify_ids)
+        )
+
+        # Step 2: Batch fetch audio features
+        features_map = await self._batch_fetch_audio_features(all_spotify_ids)
+
+        # Step 3: For top tracks by raw_score, also fetch full audio analysis
+        sorted_tracks = sorted(unique_tracks, key=lambda t: t["raw_score"], reverse=True)
+        top_track_ids = [
+            t["spotify_id"] for t in sorted_tracks[:TOP_TRACKS_FOR_ANALYSIS]
+        ]
+        analysis_map: dict[str, dict[str, Any]] = {}
+
+        logger.info(
+            "[spotify_audio] Fetching full audio analysis for top %d tracks",
+            len(top_track_ids),
+        )
+        for track_id in top_track_ids:
+            analysis = await self._fetch_audio_analysis(track_id)
+            if analysis:
+                analysis_map[track_id] = analysis
+
+        logger.info(
+            "[spotify_audio] Fetched audio analysis for %d/%d top tracks",
+            len(analysis_map), len(top_track_ids),
+        )
+
+        # Step 4: Build data points
+        data_points: list[RawDataPoint] = []
+
+        for track in unique_tracks:
+            spotify_id = track["spotify_id"]
+            features = features_map.get(spotify_id)
+            if not features:
+                # No audio features available for this track, skip
+                continue
+
+            signals: dict[str, Any] = {
+                "audio_features": features,
+                "enrichment_source": "spotify_audio",
+            }
+
+            # Attach full analysis if available
+            analysis = analysis_map.get(spotify_id)
+            if analysis:
+                signals["audio_analysis"] = analysis
+
+            data_points.append(
+                RawDataPoint(
+                    platform="spotify",
+                    entity_type="track",
+                    entity_identifier={
+                        "spotify_id": spotify_id,
+                        "title": track.get("title", ""),
+                        "artist_name": track.get("artist_name", ""),
+                    },
+                    raw_score=track.get("raw_score", 0),
+                    signals=signals,
+                    snapshot_date=today,
+                )
+            )
+
+        logger.info(
+            "[spotify_audio] Built %d enrichment data points (%d with full analysis)",
+            len(data_points), len(analysis_map),
+        )
+        return data_points
+
+    # ------------------------------------------------------------------
+    # collect_entity_details
+    # ------------------------------------------------------------------
+
+    async def collect_entity_details(self, entity_id: str) -> dict:
+        """Fetch audio features and analysis for a single track."""
+        features_map = await self._batch_fetch_audio_features([entity_id])
+        analysis = await self._fetch_audio_analysis(entity_id)
+
+        return {
+            "audio_features": features_map.get(entity_id, {}),
+            "audio_analysis": analysis or {},
+        }
