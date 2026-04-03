@@ -1,22 +1,27 @@
 # SoundPulse
-## The AI Brain of a Virtual Record Label
+## A Fully Autonomous Virtual Record Label
 
 **Product Requirements Document** — April 2026
 
-*SoundPulse analyzes what makes music succeed, generates blueprints for new songs that will succeed, and feeds those blueprints directly to AI music generation models. It turns fragmented music signals into manufactured hits.*
+*SoundPulse is a virtual record label with zero employees. It analyzes what makes music succeed, generates songs that will succeed, distributes them to every platform, and collects the royalties. No humans in the loop.*
 
 ---
 
 ## The Vision
 
-SoundPulse is not a trend tracker. It is the intelligence engine behind a virtual record label — a system that:
+SoundPulse is not a tool for record labels. It IS a record label — one that runs entirely on software.
 
-1. **Analyzes** what sonic, cultural, and release characteristics are driving success in any given micro-genre at any given moment
-2. **Generates blueprints** — specific, reproducible descriptions of what a new song should sound like, what it should be about, and how it should be structured
-3. **Feeds those blueprints to AI music generation models** (Suno, Udio, MusicGen) to produce the actual music
-4. **Predicts and optimizes** the release strategy — when to drop, which platforms first, what playlists to target
+The complete pipeline, end to end, with no human intervention:
 
-The output of SoundPulse is not a dashboard. It is the input to a music factory.
+1. **Analyze** — What sonic, cultural, and release characteristics are driving success in any given micro-genre right now?
+2. **Blueprint** — Generate a specific, reproducible specification for a song that will succeed: genre, tempo, key, mood, arrangement, lyrics, vocal style, production style
+3. **Generate** — Feed the blueprint to AI music generation models (Suno, Udio) to produce the actual master recording
+4. **Distribute** — Upload the finished track to every streaming platform (Spotify, Apple Music, TikTok, YouTube, Amazon, Deezer, Tidal) via distribution API
+5. **Register** — Register the song with PROs (ASCAP, BMI) and publishing administrators for royalty collection
+6. **Optimize** — Monitor performance, A/B test release strategies, adjust future blueprints based on what's working
+7. **Collect** — Royalties flow back automatically from streams, sync placements, and radio play
+
+The output of SoundPulse is not a dashboard. It is revenue.
 
 ---
 
@@ -63,13 +68,32 @@ The output of SoundPulse is not a dashboard. It is the input to a music factory.
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐
-│ 4. OPTIMIZE — When and how to release?               │
-│    - Optimal release day/time for this genre         │
-│    - Platform sequencing (TikTok teaser → full drop) │
-│    - Playlist targeting strategy                     │
+│ 4. DISTRIBUTE — Push to every platform               │
+│    - Upload master + metadata via distribution API   │
+│    - Spotify, Apple Music, TikTok, YouTube, Amazon,  │
+│      Deezer, Tidal, 150+ platforms                   │
+│    - Set release date, cover art, credits            │
+│    - Platform: DistroKid/Ditto/LANDR API             │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
+│ 5. REGISTER — Royalty collection setup               │
+│    - Register with PROs (ASCAP/BMI) via Songtrust   │
+│    - Publishing administration                       │
+│    - ISRC + UPC code assignment                      │
+│    - Sync licensing marketplace listing              │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
+│ 6. OPTIMIZE — Monitor and iterate                    │
+│    - Track performance across all platforms          │
+│    - A/B test release strategies                     │
+│    - Adjust future blueprints based on results       │
 │    - Predicted 30/60/90 day growth trajectory        │
-│    - A/B test multiple generated versions            │
-└─────────────────────────────────────────────────────┘
+│    - Reinvest revenue into next generation cycle     │
+└────────────────────┬────────────────────────────────┘
+                     │
+                     └──── LOOP BACK TO STEP 1 ────────┘
 ```
 
 ### Example: End-to-End
