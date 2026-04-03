@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir .
 
+# v2: blueprint + song lab + backtesting + deep scrapers
 COPY . .
 
 EXPOSE 8000
