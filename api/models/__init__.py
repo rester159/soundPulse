@@ -6,5 +6,6 @@ from api.models.prediction import Prediction
 from api.models.feedback import Feedback
 from api.models.api_key import ApiKey
 from api.models.scraper_config import ScraperConfig
+from api.models.backtest_result import BacktestResult
 
-__all__ = ["Artist", "Track", "Genre", "TrendingSnapshot", "Prediction", "Feedback", "ApiKey", "ScraperConfig"]
+__all__ = ["Artist", "Track", "Genre", "TrendingSnapshot", "Prediction", "Feedback", "ApiKey", "ScraperConfig", "BacktestResult"]

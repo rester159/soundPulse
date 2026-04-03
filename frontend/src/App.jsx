@@ -4,6 +4,7 @@ import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import Explore from './pages/Explore'
 import ApiPlayground from './pages/ApiPlayground'
+import ModelValidation from './pages/ModelValidation'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,6 +24,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/explore" element={<Explore />} />
             <Route path="/api-tester" element={<ApiPlayground />} />
+            <Route path="/model-validation" element={<ModelValidation />} />
           </Route>
         </Routes>
       </BrowserRouter>

@@ -69,6 +69,7 @@ CACHE_TTL: dict[str, int] = {
     "search": 300,              # 5 minutes
     "genres": 86400,            # 24 hours
     "predictions": 3600,        # 1 hour
+    "backtesting": 21600,       # 6 hours
 }
 
 ROOT_CATEGORIES = [

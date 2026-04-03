@@ -159,3 +159,33 @@ export function useApiRequest() {
       makeRequest(method, path, params, body),
   })
 }
+
+// Backtesting hooks
+export function useBacktestResults(params = {}) {
+  return useQuery({
+    queryKey: ['backtesting', 'results', params],
+    queryFn: () => makeRequest('GET', '/backtesting/results', params),
+    staleTime: 300_000,
+  })
+}
+
+export function useBacktestRuns() {
+  return useQuery({
+    queryKey: ['backtesting', 'runs'],
+    queryFn: () => makeRequest('GET', '/backtesting/runs'),
+  })
+}
+
+export function useBacktestGenres(params = {}) {
+  return useQuery({
+    queryKey: ['backtesting', 'genres', params],
+    queryFn: () => makeRequest('GET', '/backtesting/genres', params),
+    staleTime: 300_000,
+  })
+}
+
+export function useRunBacktest() {
+  return useMutation({
+    mutationFn: ({ body }) => makeRequest('POST', '/backtesting/run', {}, body),
+  })
+}
