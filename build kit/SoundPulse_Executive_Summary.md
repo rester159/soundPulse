@@ -291,4 +291,189 @@ Note: Chartmetric at $350/month is the most cost-effective decision in the stack
 
 ---
 
-*SoundPulse turns fragmented music signals into actionable intelligence — one validated phase at a time.*
+---
+
+## The Bigger Vision — Virtual Record Label Intelligence
+
+SoundPulse is not just a trend tracker. It is the intelligence brain of a virtual record label. The system's ultimate purpose is to:
+
+1. **Analyze** what sonic, cultural, and release characteristics are driving success in any given micro-genre at any given moment
+2. **Generate blueprints** — specific, reproducible descriptions of what a new song/artist should sound like to succeed
+3. **Feed those blueprints to AI music generation models** (Suno, Udio, MusicGen) to produce the actual music
+4. **Predict and optimize** the release strategy (timing, platform sequencing, promotion approach)
+
+The output of SoundPulse is not a dashboard. It is the input to a music factory.
+
+---
+
+## Song DNA — The Complete Feature Set
+
+To replicate what makes successful music successful, we need to decompose songs into their full "DNA profile." This goes far beyond tempo and mood.
+
+### Sonic Features (from Spotify Audio Analysis)
+
+| Feature Category | Specific Features | Source |
+|---|---|---|
+| **Tempo & Rhythm** | BPM, time signature, beat regularity, rhythmic complexity | Spotify Audio Analysis (beats, bars, tatums) |
+| **Energy & Dynamics** | Overall energy, loudness contour, dynamic range, fade-in/fade-out | Spotify Audio Features + Analysis (segments) |
+| **Mood & Tonality** | Key, mode (major/minor), valence (happy/sad), danceability | Spotify Audio Features |
+| **Production Style** | Acousticness, instrumentalness, liveness, speechiness | Spotify Audio Features |
+| **Timbre Profile** | 12-dimensional timbre vectors per segment — captures instrument texture, brightness, attack | Spotify Audio Analysis (segments.timbre) |
+| **Song Structure** | Section types (intro/verse/chorus/bridge/outro), section durations, chorus ratio, intro length | Spotify Audio Analysis (sections) + Genius (section headers) |
+| **Pitch Content** | 12-dimensional pitch vectors per segment — captures harmonic content, chord progressions | Spotify Audio Analysis (segments.pitches) |
+
+### Lyrical Features (from Genius)
+
+| Feature | What It Captures |
+|---|---|
+| **Primary themes** | Love, heartbreak, party, flex, introspection, social commentary, nostalgia, empowerment |
+| **Vocabulary richness** | Unique words / total words — higher = more literary, lower = more repetitive/catchy |
+| **Chorus repetition ratio** | How much of the song is chorus — higher = more commercially formulaic |
+| **Song structure** | Verse count, chorus count, bridge presence, section ordering |
+| **Word count & density** | Sparse lyrics (electronic, ambient) vs dense lyrics (rap, folk) |
+| **Language** | English vs non-English — critical for market targeting |
+
+### Arrangement & Production (Requires Deeper Analysis — Future Phase)
+
+| Feature | Why It Matters | How to Get It |
+|---|---|---|
+| **Vocal style** | Male/female, pitch range, autotune presence, harmonies, ad-libs | Audio ML models (vocal separation + classification) |
+| **Instrument palette** | 808s vs live drums, analog vs digital synths, guitar types | Timbre vector clustering from Spotify Analysis |
+| **Build patterns** | Sparse verse → dense chorus, gradual builds, drops | Section-level energy/loudness analysis |
+| **Hook placement** | Where the catchiest part is — critical for TikTok virality (first 15 seconds) | Segment analysis + stream skip patterns (if available) |
+| **Featured artists** | Collaboration patterns that drive cross-audience growth | Chartmetric artist data |
+| **Sonic similarity** | "This sounds like Artist X meets Artist Y" | Embedding-based similarity from timbre/pitch vectors |
+
+### Social & Cultural Context (from Chartmetric)
+
+| Feature | Source |
+|---|---|
+| **Artist social growth velocity** | Chartmetric `/stat/` endpoints (Spotify, Instagram, TikTok, YouTube, Shazam) |
+| **Geographic audience distribution** | Chartmetric `/where-people-listen` |
+| **Playlist ecosystem** | Which playlists drive growth in this genre |
+| **Cross-platform cascade timing** | How long from TikTok viral → Shazam spike → Spotify streams |
+| **Collaboration network** | Which artists collab with whom, and what the audience overlap is |
+
+---
+
+## Music Generation Pipeline
+
+The end-to-end pipeline from intelligence to music generation:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ 1. ANALYZE — What's working now?                     │
+│    - Trending analysis per micro-genre               │
+│    - Song DNA decomposition of top performers        │
+│    - Social growth trajectory patterns               │
+│    - Cross-platform cascade timing                   │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
+│ 2. BLUEPRINT — What should the next song look like?  │
+│    - Target genre + sub-genre                        │
+│    - Optimal sonic profile (BPM, key, energy, mood)  │
+│    - Arrangement template (structure, build pattern)  │
+│    - Lyrical themes + vocabulary style               │
+│    - Vocal style recommendation                      │
+│    - Reference tracks ("sounds like X meets Y")      │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
+│ 3. GENERATE — Feed the blueprint to AI music models  │
+│                                                      │
+│    Music generation models accept:                   │
+│    ┌──────────────────────────────────────────────┐  │
+│    │ Text prompt: genre, mood, instruments, style │  │
+│    │ Lyrics: verse/chorus structure               │  │
+│    │ Style tags: tempo, energy, vocal type        │  │
+│    │ Reference audio: "make it sound like this"   │  │
+│    └──────────────────────────────────────────────┘  │
+│                                                      │
+│    Target models:                                    │
+│    - Suno: text prompt + lyrics + style tags         │
+│    - Udio: text prompt + lyrics + reference audio    │
+│    - MusicGen (Meta): text conditioning + audio ref  │
+│    - Stable Audio: text prompt + duration control    │
+│                                                      │
+│    SoundPulse translates Song DNA → model prompts    │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
+│ 4. OPTIMIZE — When and how to release?               │
+│    - Optimal release day/time for this genre         │
+│    - Platform sequencing (TikTok teaser → full drop) │
+│    - Playlist targeting strategy                     │
+│    - Predicted 30/60/90 day growth trajectory        │
+└─────────────────────────────────────────────────────┘
+```
+
+### Translating Song DNA to Generation Prompts
+
+The key technical challenge is mapping our analytical features (numeric vectors, percentages, timbre matrices) into natural language prompts that music generation models understand.
+
+**Example translation:**
+
+```
+Song DNA Analysis:
+  genre: "melodic trap"
+  bpm: 145
+  key: C# minor
+  energy: 0.72
+  valence: 0.28 (melancholic)
+  danceability: 0.65
+  acousticness: 0.05
+  chorus_ratio: 0.35
+  themes: ["introspection", "heartbreak"]
+  vocab_richness: 0.42 (repetitive/catchy)
+  timbre_cluster: "dark_808_autotune"
+
+Suno/Udio Prompt:
+  "Melodic trap, 145 BPM, C# minor, dark and melancholic mood.
+   808 bass, hi-hats, atmospheric pads, autotuned male vocals.
+   Sparse verse building into dense emotional chorus.
+   Introspective lyrics about heartbreak and self-reflection.
+   Similar to Juice WRLD meets Post Malone."
+
+  [Verse 1]
+  {Generated lyrics matching theme + vocabulary style}
+
+  [Chorus]
+  {Generated hook — catchy, repetitive, emotionally resonant}
+```
+
+This prompt engineering layer is the bridge between SoundPulse intelligence and music output. The system should be able to generate prompts for any genre at any moment, tailored to what's currently trending.
+
+---
+
+## Data Collection Architecture (Updated)
+
+SoundPulse now collects data across 4 layers:
+
+### Layer 1: Chart Data (What's trending)
+| Scraper | Source | Frequency | Data |
+|---|---|---|---|
+| `chartmetric` | Chartmetric Charts API | Every 4h | Spotify, Shazam chart rankings |
+| `spotify` | Spotify Web API | Every 6h | Search-based trending, chart positions |
+| `kworb` | Kworb.net | Daily | Spotify daily streaming charts |
+| `radio` | Billboard.com | Daily | Radio airplay, Hot 100, Country Airplay |
+
+### Layer 2: Social Growth (How artists are growing)
+| Scraper | Source | Frequency | Data |
+|---|---|---|---|
+| `chartmetric_artists` | Chartmetric Artist Stats | Every 12h | Spotify followers/listeners, Instagram, TikTok, YouTube, Shazam, geographic audience |
+
+### Layer 3: Sonic DNA (What the music sounds like)
+| Scraper | Source | Frequency | Data |
+|---|---|---|---|
+| `spotify_audio` | Spotify Audio Features + Analysis | Daily | Tempo, energy, key, mood, timbre vectors, song structure sections, pitch content |
+| `genius_lyrics` | Genius API + scraping | Daily | Lyrics text, themes, vocabulary richness, section structure, chorus ratio |
+
+### Layer 4: Metadata Enrichment
+| Scraper | Source | Frequency | Data |
+|---|---|---|---|
+| `musicbrainz` | MusicBrainz API | Every 12h | ISRC codes, genre tags, release metadata |
+
+---
+
+*SoundPulse turns fragmented music signals into actionable intelligence — and actionable intelligence into music.*
