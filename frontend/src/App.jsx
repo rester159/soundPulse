@@ -6,6 +6,7 @@ import Explore from './pages/Explore'
 import ApiPlayground from './pages/ApiPlayground'
 import ModelValidation from './pages/ModelValidation'
 import SongLab from './pages/SongLab'
+import Assistant from './pages/Assistant'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -27,6 +28,7 @@ function App() {
             <Route path="/api-tester" element={<ApiPlayground />} />
             <Route path="/model-validation" element={<ModelValidation />} />
             <Route path="/song-lab" element={<SongLab />} />
+            <Route path="/assistant" element={<Assistant />} />
           </Route>
         </Routes>
       </BrowserRouter>

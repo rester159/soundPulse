@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 
 from api.middleware.rate_limiter import RateLimitMiddleware
 from api.config import get_settings
-from api.routers import admin, backtesting, blueprint, genres, predictions, search, trending
+from api.routers import admin, assistant, backtesting, blueprint, genres, predictions, search, trending
 
 
 @asynccontextmanager
@@ -47,6 +47,7 @@ app.include_router(predictions.router)
 app.include_router(admin.router)
 app.include_router(backtesting.router)
 app.include_router(blueprint.router)
+app.include_router(assistant.router)
 
 
 @app.get("/")

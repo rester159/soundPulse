@@ -204,3 +204,10 @@ export function useGenerateBlueprint() {
     mutationFn: ({ body }) => makeRequest('POST', '/blueprint/generate', {}, body),
   })
 }
+
+// Assistant hook
+export function useAssistantChat() {
+  return useMutation({
+    mutationFn: ({ body }) => makeRequest('POST', '/assistant/chat', {}, body),
+  })
+}
