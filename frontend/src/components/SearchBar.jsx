@@ -144,9 +144,9 @@ export default function SearchBar({ onSelect, placeholder = 'Search tracks, arti
                     <div className="text-sm text-zinc-100 truncate">
                       {entity.name || entity.title || 'Unknown'}
                     </div>
-                    {entity.artist && (
+                    {entity.artist?.name && (
                       <div className="text-xs text-zinc-500 truncate">
-                        {entity.artist}
+                        {entity.artist.name}
                       </div>
                     )}
                   </div>

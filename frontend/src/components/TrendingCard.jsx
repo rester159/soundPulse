@@ -47,8 +47,8 @@ export default function TrendingCard({ item, rank, onClick }) {
         <div className="text-sm font-medium text-zinc-100 truncate">
           {entity.name || entity.title || 'Unknown'}
         </div>
-        {entity.artist && (
-          <div className="text-xs text-zinc-500 truncate">{entity.artist}</div>
+        {entity.artist?.name && (
+          <div className="text-xs text-zinc-500 truncate">{entity.artist.name}</div>
         )}
       </div>
 
