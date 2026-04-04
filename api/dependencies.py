@@ -15,10 +15,20 @@ settings = get_settings()
 _redis_pool: aioredis.Redis | None = None
 
 
-async def get_redis() -> aioredis.Redis:
+async def get_redis() -> aioredis.Redis | None:
     global _redis_pool
     if _redis_pool is None:
-        _redis_pool = aioredis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            _redis_pool = aioredis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=3,
+            )
+            # Test the connection
+            await _redis_pool.ping()
+        except Exception:
+            _redis_pool = None
     return _redis_pool
 
 
