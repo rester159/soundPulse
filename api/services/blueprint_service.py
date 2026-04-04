@@ -32,7 +32,13 @@ async def get_genre_opportunities(db: AsyncSession) -> list[dict]:
     Rank genres by opportunity score = trending velocity x inverse saturation.
     Returns genres sorted by which ones have the most untapped potential.
     """
-    lookback = date.today() - timedelta(days=60)
+    # Anchor to the most recent data in the DB so historical backfill always shows
+    latest_row = await db.execute(
+        select(func.max(TrendingSnapshot.snapshot_date))
+        .where(TrendingSnapshot.entity_type == "track")
+    )
+    latest_date = latest_row.scalar() or date.today()
+    lookback = latest_date - timedelta(days=60)
 
     # Get recent snapshots with their signals (which contain genre data)
     result = await db.execute(
@@ -126,7 +132,13 @@ async def generate_blueprint(
     Generate a Song DNA blueprint for the given genre based on what's
     currently trending, then translate it to a model-specific prompt.
     """
-    lookback = date.today() - timedelta(days=30)
+    # Anchor to most recent data so historical backfill always shows
+    latest_row = await db.execute(
+        select(func.max(TrendingSnapshot.snapshot_date))
+        .where(TrendingSnapshot.entity_type == "track")
+    )
+    latest_date = latest_row.scalar() or date.today()
+    lookback = latest_date - timedelta(days=60)
 
     # Get tracks in this genre by searching signals for the genre tag
     result = await db.execute(

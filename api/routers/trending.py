@@ -201,23 +201,21 @@ async def get_trending(
     if cached:
         return cached
 
-    # Determine date range
-    today = date.today()
-    if time_range == "today":
-        start_date = today - timedelta(days=1)  # include yesterday if today has no data
-    elif time_range == "7d":
-        start_date = today - timedelta(days=7)
-    else:
-        start_date = today - timedelta(days=30)
+    # Anchor the time window to the most recent snapshot date in the DB,
+    # not today(). This ensures historical backfill data always shows up
+    # even if months/years have passed since it was ingested.
+    latest_row = await db.execute(
+        select(func.max(TrendingSnapshot.snapshot_date))
+        .where(TrendingSnapshot.entity_type == entity_type)
+    )
+    latest_date = latest_row.scalar() or date.today()
 
-    # Determine date range — use a wide window if data is sparse
-    today = date.today()
     if time_range == "today":
-        start_date = today - timedelta(days=3)  # include recent days if today has no data
+        start_date = latest_date - timedelta(days=3)
     elif time_range == "7d":
-        start_date = today - timedelta(days=7)
+        start_date = latest_date - timedelta(days=7)
     else:
-        start_date = today - timedelta(days=60)  # wider window for 30d to ensure data
+        start_date = latest_date - timedelta(days=60)
 
     # Use ORM but with a SINGLE query — no N+1
     # Step 1: Get aggregated snapshot data per entity (one query)

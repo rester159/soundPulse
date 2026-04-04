@@ -26,9 +26,12 @@ export default function Dashboard() {
     root: true,
   })
 
+  // API shape: makeRequest wraps response → { data: <api-body>, status, ... }
+  // API body shape: { data: [...], meta: {...} }  or { data: { genres: [...], ... } }
   const trendingItems = trendingResult?.data?.data || []
   const predictions = predictionsResult?.data?.data || []
-  const genres = genresResult?.data?.data || []
+  // Genres endpoint returns { data: { genres: [...tree], total_genres: N } }
+  const genres = genresResult?.data?.data?.genres || []
   const updatedAt = trendingUpdatedAt ? new Date(trendingUpdatedAt).toISOString() : null
 
   return (
