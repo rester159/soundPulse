@@ -219,105 +219,110 @@ async def get_trending(
     else:
         start_date = today - timedelta(days=60)  # wider window for 30d to ensure data
 
-    # Single raw SQL query — no ORM, no N+1, one round trip to Neon
-    sort_col = {
-        "composite_score": "max_composite",
-        "velocity": "avg_velocity",
-        "platform_rank": "best_rank",
-    }.get(sort, "max_composite")
+    # Use ORM but with a SINGLE query — no N+1
+    # Step 1: Get aggregated snapshot data per entity (one query)
+    agg_query = (
+        select(
+            TrendingSnapshot.entity_id,
+            func.max(TrendingSnapshot.composite_score).label("max_composite"),
+            func.avg(TrendingSnapshot.velocity).label("avg_velocity"),
+            func.min(TrendingSnapshot.platform_rank).label("best_rank"),
+            func.count(func.distinct(TrendingSnapshot.platform)).label("platform_count"),
+        )
+        .where(
+            TrendingSnapshot.entity_type == entity_type,
+            TrendingSnapshot.snapshot_date >= start_date,
+        )
+        .group_by(TrendingSnapshot.entity_id)
+        .having(func.count(func.distinct(TrendingSnapshot.platform)) >= min_platforms)
+    )
 
-    if entity_type == "track":
-        entity_sql = text(f"""
-            SELECT
-                ts.entity_id,
-                MAX(ts.composite_score) as max_composite,
-                AVG(ts.velocity) as avg_velocity,
-                MIN(ts.platform_rank) as best_rank,
-                COUNT(DISTINCT ts.platform) as platform_count,
-                t.title as entity_name,
-                t.spotify_id,
-                t.isrc,
-                t.artist_id::text as artist_id,
-                a.name as artist_name
-            FROM trending_snapshots ts
-            LEFT JOIN tracks t ON t.id = ts.entity_id
-            LEFT JOIN artists a ON a.id = t.artist_id
-            WHERE ts.entity_type = 'track'
-              AND ts.snapshot_date >= :start_date
-            GROUP BY ts.entity_id, t.title, t.spotify_id, t.isrc, t.artist_id, a.name
-            HAVING COUNT(DISTINCT ts.platform) >= :min_platforms
-            ORDER BY {sort_col} DESC NULLS LAST
-            LIMIT :limit OFFSET :offset
-        """)
+    if sort == "velocity":
+        agg_query = agg_query.order_by(func.avg(TrendingSnapshot.velocity).desc().nullslast())
+    elif sort == "platform_rank":
+        agg_query = agg_query.order_by(func.min(TrendingSnapshot.platform_rank).asc().nullslast())
     else:
-        entity_sql = text(f"""
-            SELECT
-                ts.entity_id,
-                MAX(ts.composite_score) as max_composite,
-                AVG(ts.velocity) as avg_velocity,
-                MIN(ts.platform_rank) as best_rank,
-                COUNT(DISTINCT ts.platform) as platform_count,
-                a.name as entity_name,
-                a.spotify_id,
-                NULL as isrc,
-                NULL as artist_id,
-                NULL as artist_name
-            FROM trending_snapshots ts
-            LEFT JOIN artists a ON a.id = ts.entity_id
-            WHERE ts.entity_type = 'artist'
-              AND ts.snapshot_date >= :start_date
-            GROUP BY ts.entity_id, a.name, a.spotify_id
-            HAVING COUNT(DISTINCT ts.platform) >= :min_platforms
-            ORDER BY {sort_col} DESC NULLS LAST
-            LIMIT :limit OFFSET :offset
-        """)
+        agg_query = agg_query.order_by(func.max(TrendingSnapshot.composite_score).desc().nullslast())
 
-    result = await db.execute(entity_sql, {
-        "start_date": start_date,
-        "min_platforms": min_platforms,
-        "limit": limit,
-        "offset": offset,
-    })
-    rows = result.fetchall()
+    agg_query = agg_query.limit(limit).offset(offset)
 
-    # Get total count (separate fast query)
-    count_result = await db.execute(text("""
-        SELECT COUNT(DISTINCT entity_id) as cnt
-        FROM trending_snapshots
-        WHERE entity_type = :entity_type AND snapshot_date >= :start_date
-    """), {"entity_type": entity_type, "start_date": start_date})
-    total = count_result.scalar() or 0
+    result = await db.execute(agg_query)
+    agg_rows = result.all()
 
-    items = []
-    for row in rows:
-        entity_info = {
-            "id": str(row.entity_id),
-            "type": entity_type,
-            "name": row.entity_name or "Unknown",
-            "image_url": None,
-            "genres": [],
-            "isrc": row.isrc,
-            "platform_ids": {},
-        }
-        if entity_type == "track" and row.artist_id:
-            entity_info["artist"] = {
-                "id": row.artist_id,
-                "name": row.artist_name or "",
+    if not agg_rows:
+        items = []
+        total = 0
+    else:
+        entity_ids = [str(row.entity_id) for row in agg_rows]
+
+        # Step 2: Batch fetch entity info (one query, not N)
+        entity_map = {}
+        if entity_type == "track":
+            track_result = await db.execute(
+                select(Track.id, Track.title, Track.spotify_id, Track.isrc, Track.artist_id)
+                .where(Track.id.in_(entity_ids))
+            )
+            for t in track_result.all():
+                entity_map[str(t.id)] = {"name": t.title, "spotify_id": t.spotify_id, "isrc": t.isrc, "artist_id": str(t.artist_id) if t.artist_id else None}
+
+            # Batch fetch artist names
+            artist_ids = [v["artist_id"] for v in entity_map.values() if v.get("artist_id")]
+            artist_name_map = {}
+            if artist_ids:
+                artist_result = await db.execute(
+                    select(Artist.id, Artist.name).where(Artist.id.in_(artist_ids))
+                )
+                artist_name_map = {str(a.id): a.name for a in artist_result.all()}
+        else:
+            artist_result = await db.execute(
+                select(Artist.id, Artist.name, Artist.spotify_id, Artist.image_url)
+                .where(Artist.id.in_(entity_ids))
+            )
+            for a in artist_result.all():
+                entity_map[str(a.id)] = {"name": a.name, "spotify_id": a.spotify_id, "image_url": a.image_url}
+            artist_name_map = {}
+
+        # Count total
+        count_q = (
+            select(func.count(func.distinct(TrendingSnapshot.entity_id)))
+            .where(TrendingSnapshot.entity_type == entity_type, TrendingSnapshot.snapshot_date >= start_date)
+        )
+        total = (await db.execute(count_q)).scalar() or 0
+
+        # Build response items
+        items = []
+        for row in agg_rows:
+            eid = str(row.entity_id)
+            info = entity_map.get(eid, {})
+
+            entity_info = {
+                "id": eid,
+                "type": entity_type,
+                "name": info.get("name", "Unknown"),
+                "image_url": info.get("image_url"),
+                "genres": [],
+                "isrc": info.get("isrc"),
+                "platform_ids": {},
             }
-        if row.spotify_id:
-            entity_info["platform_ids"]["spotify"] = row.spotify_id
+            if entity_type == "track":
+                entity_info["artist"] = {
+                    "id": info.get("artist_id", ""),
+                    "name": artist_name_map.get(info.get("artist_id", ""), ""),
+                }
+            if info.get("spotify_id"):
+                entity_info["platform_ids"]["spotify"] = info["spotify_id"]
 
-        scores = {
-            "composite_score": float(row.max_composite) if row.max_composite else 0,
-            "composite_score_previous": None,
-            "position_change": None,
-            "velocity": float(row.avg_velocity) if row.avg_velocity else 0,
-            "acceleration": None,
-            "platforms": {},
-            "platform_count": int(row.platform_count) if row.platform_count else 0,
-        }
+            scores = {
+                "composite_score": float(row.max_composite) if row.max_composite else 0,
+                "composite_score_previous": None,
+                "position_change": None,
+                "velocity": float(row.avg_velocity) if row.avg_velocity else 0,
+                "acceleration": None,
+                "platforms": {},
+                "platform_count": int(row.platform_count),
+            }
 
-        items.append({"entity": entity_info, "scores": scores, "sparkline_7d": []})
+            items.append({"entity": entity_info, "scores": scores, "sparkline_7d": []})
 
     ttl_key = f"trending_{time_range}"
     response = {
