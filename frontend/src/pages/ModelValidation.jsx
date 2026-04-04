@@ -31,9 +31,9 @@ export default function ModelValidation() {
   const { data: genreData } = useBacktestGenres(params)
   const runBacktest = useRunBacktest()
 
-  const timeline = results?.data?.timeline || []
-  const summary = results?.data?.summary || {}
-  const genres = genreData?.data || []
+  const timeline = results?.data?.data?.timeline || []
+  const summary = results?.data?.data?.summary || {}
+  const genres = genreData?.data?.data || []
 
   const handleRunBacktest = () => {
     runBacktest.mutate({
