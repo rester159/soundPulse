@@ -204,146 +204,108 @@ async def get_trending(
     # Determine date range
     today = date.today()
     if time_range == "today":
-        start_date = today
+        start_date = today - timedelta(days=1)  # include yesterday if today has no data
     elif time_range == "7d":
         start_date = today - timedelta(days=7)
     else:
         start_date = today - timedelta(days=30)
 
-    # Build query — get latest snapshot per entity per platform
-    subq = (
-        select(
-            TrendingSnapshot.entity_id,
-            TrendingSnapshot.platform,
-            func.max(TrendingSnapshot.snapshot_date).label("latest_date"),
+    # Single raw SQL query — replaces the N+1 ORM query that times out on Neon
+    # This does everything in one round trip: latest snapshots, entity info, sorting, pagination
+    sort_col = {
+        "composite_score": "max_composite",
+        "velocity": "avg_velocity",
+        "platform_rank": "best_rank",
+    }.get(sort, "max_composite")
+
+    platform_filter = f"AND ts.platform = '{platform}'" if platform else ""
+
+    sql = text(f"""
+        WITH ranked AS (
+            SELECT
+                ts.entity_id,
+                ts.entity_type,
+                MAX(ts.composite_score) as max_composite,
+                AVG(ts.velocity) as avg_velocity,
+                MIN(ts.platform_rank) as best_rank,
+                COUNT(DISTINCT ts.platform) as platform_count,
+                MAX(ts.snapshot_date) as latest_date,
+                jsonb_object_agg(
+                    ts.platform,
+                    jsonb_build_object(
+                        'normalized_score', ts.normalized_score,
+                        'raw_score', ts.platform_score,
+                        'rank', ts.platform_rank,
+                        'signals', ts.signals_json
+                    )
+                ) as platforms_data
+            FROM trending_snapshots ts
+            WHERE ts.entity_type = :entity_type
+              AND ts.snapshot_date >= :start_date
+              {platform_filter}
+            GROUP BY ts.entity_id, ts.entity_type
+            HAVING COUNT(DISTINCT ts.platform) >= :min_platforms
         )
-        .where(
-            TrendingSnapshot.entity_type == entity_type,
-            TrendingSnapshot.snapshot_date >= start_date,
-        )
-        .group_by(TrendingSnapshot.entity_id, TrendingSnapshot.platform)
-        .subquery()
-    )
+        SELECT
+            r.entity_id,
+            r.max_composite,
+            r.avg_velocity,
+            r.best_rank,
+            r.platform_count,
+            r.platforms_data,
+            CASE WHEN :entity_type = 'track' THEN t.title ELSE a.name END as entity_name,
+            CASE WHEN :entity_type = 'track' THEN t.spotify_id ELSE a.spotify_id END as spotify_id,
+            CASE WHEN :entity_type = 'track' THEN t.isrc ELSE NULL END as isrc,
+            CASE WHEN :entity_type = 'track' THEN t.artist_id::text ELSE NULL END as artist_id,
+            CASE WHEN :entity_type = 'track' THEN
+                (SELECT a2.name FROM artists a2 WHERE a2.id = t.artist_id)
+            ELSE NULL END as artist_name,
+            (SELECT COUNT(*) FROM ranked) as total_count
+        FROM ranked r
+        LEFT JOIN tracks t ON r.entity_type = 'track' AND t.id = r.entity_id
+        LEFT JOIN artists a ON r.entity_type = 'artist' AND a.id = r.entity_id
+        ORDER BY {sort_col} DESC NULLS LAST
+        LIMIT :limit OFFSET :offset
+    """)
 
-    # Get the actual snapshot rows
-    snap_query = (
-        select(TrendingSnapshot)
-        .join(
-            subq,
-            and_(
-                TrendingSnapshot.entity_id == subq.c.entity_id,
-                TrendingSnapshot.platform == subq.c.platform,
-                TrendingSnapshot.snapshot_date == subq.c.latest_date,
-            ),
-        )
-        .where(TrendingSnapshot.entity_type == entity_type)
-    )
+    result = await db.execute(sql, {
+        "entity_type": entity_type,
+        "start_date": start_date,
+        "min_platforms": min_platforms,
+        "limit": limit,
+        "offset": offset,
+    })
+    rows = result.fetchall()
 
-    if platform:
-        snap_query = snap_query.where(TrendingSnapshot.platform == platform)
+    total = rows[0].total_count if rows else 0
 
-    result = await db.execute(snap_query)
-    snapshots = result.scalars().all()
-
-    # Group by entity
-    entity_data: dict[str, dict[str, Any]] = {}
-    for snap in snapshots:
-        eid = str(snap.entity_id)
-        if eid not in entity_data:
-            entity_data[eid] = {"snapshots": {}, "composite": snap.composite_score or 0.0}
-        entity_data[eid]["snapshots"][snap.platform] = snap
-        if snap.composite_score is not None:
-            entity_data[eid]["composite"] = max(entity_data[eid]["composite"], snap.composite_score)
-
-    # Filter by min_platforms
-    entity_data = {eid: d for eid, d in entity_data.items() if len(d["snapshots"]) >= min_platforms}
-
-    # Filter by genre
-    if genre:
-        filtered = {}
-        for eid, d in entity_data.items():
-            if entity_type == "track":
-                r = await db.execute(select(Track).where(Track.id == eid))
-                entity_obj = r.scalar_one_or_none()
-                if entity_obj and any(g.startswith(genre) for g in (entity_obj.genres or [])):
-                    filtered[eid] = d
-            else:
-                r = await db.execute(select(Artist).where(Artist.id == eid))
-                entity_obj = r.scalar_one_or_none()
-                if entity_obj and any(g.startswith(genre) for g in (entity_obj.genres or [])):
-                    filtered[eid] = d
-        entity_data = filtered
-
-    # Sort
-    def sort_key(item):
-        eid, d = item
-        if sort == "composite_score":
-            return d["composite"]
-        elif sort == "velocity":
-            snaps = list(d["snapshots"].values())
-            return snaps[0].velocity or 0.0 if snaps else 0.0
-        else:  # platform_rank
-            snaps = list(d["snapshots"].values())
-            return -(snaps[0].platform_rank or 999) if snaps else -999
-
-    sorted_entities = sorted(entity_data.items(), key=sort_key, reverse=True)
-    total = len(sorted_entities)
-    page = sorted_entities[offset : offset + limit]
-
-    # Build response
     items = []
-    for eid, d in page:
+    for row in rows:
+        entity_info = {
+            "id": str(row.entity_id),
+            "type": entity_type,
+            "name": row.entity_name or "Unknown",
+            "image_url": None,
+            "genres": [],
+            "isrc": row.isrc,
+            "platform_ids": {},
+        }
         if entity_type == "track":
-            r = await db.execute(select(Track).where(Track.id == eid))
-            entity_obj = r.scalar_one_or_none()
-            if not entity_obj:
-                continue
-            entity_info = {
-                "id": str(entity_obj.id),
-                "type": "track",
-                "name": entity_obj.title,
-                "artist": {"id": str(entity_obj.artist_id), "name": entity_obj.artist.name if entity_obj.artist else ""},
-                "image_url": None,
-                "genres": entity_obj.genres or [],
-                "isrc": entity_obj.isrc,
-                "platform_ids": {},
+            entity_info["artist"] = {
+                "id": row.artist_id or "",
+                "name": row.artist_name or "",
             }
-            if entity_obj.spotify_id:
-                entity_info["platform_ids"]["spotify"] = entity_obj.spotify_id
-        else:
-            r = await db.execute(select(Artist).where(Artist.id == eid))
-            entity_obj = r.scalar_one_or_none()
-            if not entity_obj:
-                continue
-            entity_info = {
-                "id": str(entity_obj.id),
-                "type": "artist",
-                "name": entity_obj.name,
-                "image_url": entity_obj.image_url,
-                "genres": entity_obj.genres or [],
-                "platform_ids": {},
-            }
-            if entity_obj.spotify_id:
-                entity_info["platform_ids"]["spotify"] = entity_obj.spotify_id
-
-        platforms_data = {}
-        for p, snap in d["snapshots"].items():
-            platforms_data[p] = {
-                "normalized_score": snap.normalized_score,
-                "raw_score": snap.platform_score,
-                "rank": snap.platform_rank,
-                "signals": snap.signals_json or {},
-                "last_updated": snap.updated_at.isoformat() if snap.updated_at else None,
-            }
+        if row.spotify_id:
+            entity_info["platform_ids"]["spotify"] = row.spotify_id
 
         scores = {
-            "composite_score": d["composite"],
+            "composite_score": float(row.max_composite) if row.max_composite else 0,
             "composite_score_previous": None,
             "position_change": None,
-            "velocity": list(d["snapshots"].values())[0].velocity if d["snapshots"] else None,
+            "velocity": float(row.avg_velocity) if row.avg_velocity else 0,
             "acceleration": None,
-            "platforms": platforms_data,
-            "platform_count": len(d["snapshots"]),
+            "platforms": row.platforms_data or {},
+            "platform_count": row.platform_count,
         }
 
         items.append({"entity": entity_info, "scores": scores, "sparkline_7d": []})
