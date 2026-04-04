@@ -27,9 +27,9 @@ export default function SongLab() {
   const { data: genreData, isLoading: genresLoading } = useGenreOpportunities()
   const generateBlueprint = useGenerateBlueprint()
 
-  const genres = genreData?.data || []
-  const blueprint = generateBlueprint.data?.data?.blueprint
-  const prompt = generateBlueprint.data?.data?.prompt
+  const genres = genreData?.data?.data || []
+  const blueprint = generateBlueprint.data?.data?.data?.blueprint
+  const prompt = generateBlueprint.data?.data?.data?.prompt
 
   const handleGenreSelect = (genre) => {
     setSelectedGenre(genre)

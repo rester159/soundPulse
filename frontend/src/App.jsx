@@ -1,3 +1,4 @@
+import { Component } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import Layout from './components/Layout'
@@ -17,18 +18,40 @@ const queryClient = new QueryClient({
   },
 })
 
+class ErrorBoundary extends Component {
+  state = { error: null }
+  static getDerivedStateFromError(error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <div className="text-rose-400 text-sm font-medium mb-2">Something went wrong on this page</div>
+          <div className="text-zinc-500 text-xs mb-4 max-w-sm">{this.state.error?.message}</div>
+          <button
+            onClick={() => this.setState({ error: null })}
+            className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm rounded-lg transition-colors"
+          >
+            Try again
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <Routes>
           <Route element={<Layout />}>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/explore" element={<Explore />} />
-            <Route path="/api-tester" element={<ApiPlayground />} />
-            <Route path="/model-validation" element={<ModelValidation />} />
-            <Route path="/song-lab" element={<SongLab />} />
-            <Route path="/assistant" element={<Assistant />} />
+            <Route path="/" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
+            <Route path="/explore" element={<ErrorBoundary><Explore /></ErrorBoundary>} />
+            <Route path="/api-tester" element={<ErrorBoundary><ApiPlayground /></ErrorBoundary>} />
+            <Route path="/model-validation" element={<ErrorBoundary><ModelValidation /></ErrorBoundary>} />
+            <Route path="/song-lab" element={<ErrorBoundary><SongLab /></ErrorBoundary>} />
+            <Route path="/assistant" element={<ErrorBoundary><Assistant /></ErrorBoundary>} />
           </Route>
         </Routes>
       </BrowserRouter>

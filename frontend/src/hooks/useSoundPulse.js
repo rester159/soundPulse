@@ -6,7 +6,11 @@ export function getApiKey() {
 }
 
 export function getBaseUrl() {
-  return localStorage.getItem('soundpulse_base_url') || '/api/v1'
+  return (
+    localStorage.getItem('soundpulse_base_url') ||
+    import.meta.env.VITE_API_BASE_URL ||
+    '/api/v1'
+  )
 }
 
 function createClient() {
