@@ -54,9 +54,9 @@ function getNestedValue(item, key) {
     case 'name':
       return (entity.name || entity.title || '').toLowerCase()
     case 'composite':
-      return scores.composite ?? entity.composite_score ?? 0
+      return scores.composite_score ?? scores.composite ?? entity.composite_score ?? 0
     case 'velocity':
-      return entity.velocity ?? scores.velocity ?? 0
+      return scores.velocity ?? entity.velocity ?? 0
     default:
       return 0
   }
@@ -149,12 +149,15 @@ export default function TrendingTable({
             : sorted.map((item, index) => {
                 const entity = item.entity || item
                 const scores = item.scores || {}
-                const compositeScore =
-                  scores.composite ?? entity.composite_score ?? 0
-                const velocity = entity.velocity ?? scores.velocity ?? 0
-                const platforms = Object.keys(scores).filter(
-                  (k) => k !== 'composite' && k !== 'velocity'
-                )
+                const compositeScore = scores.composite_score ?? scores.composite ?? entity.composite_score ?? 0
+                const velocity = scores.velocity ?? entity.velocity ?? 0
+                // platforms: use the platforms map if available, otherwise fill from platform_count
+                const platformMap = scores.platforms || {}
+                const platformKeys = Object.keys(platformMap).length > 0
+                  ? Object.keys(platformMap)
+                  : scores.platform_count > 0
+                    ? Array(Math.min(scores.platform_count, 4)).fill('chartmetric')
+                    : []
                 const sparkline = item.sparkline_7d || []
 
                 return (
@@ -173,9 +176,9 @@ export default function TrendingTable({
                       <div className="text-sm font-medium text-zinc-100 truncate max-w-[200px]">
                         {entity.name || entity.title || 'Unknown'}
                       </div>
-                      {entity.artist && (
+                      {entity.artist?.name && (
                         <div className="text-xs text-zinc-500 truncate">
-                          {entity.artist}
+                          {entity.artist.name}
                         </div>
                       )}
                     </td>
@@ -210,9 +213,9 @@ export default function TrendingTable({
                     {/* Platforms */}
                     <td className="px-3 py-3">
                       <div className="flex gap-1 flex-wrap">
-                        {platforms.slice(0, 4).map((platform) => (
+                        {platformKeys.slice(0, 4).map((platform, pi) => (
                           <span
-                            key={platform}
+                            key={`${platform}-${pi}`}
                             className="text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded"
                             style={{
                               backgroundColor: `${PLATFORM_COLORS[platform] || '#52525b'}20`,
