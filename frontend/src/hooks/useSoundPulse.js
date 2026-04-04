@@ -19,6 +19,8 @@ function createClient() {
   })
 
   client.interceptors.request.use((config) => {
+    // Re-read on every request so Settings changes take effect without a page reload
+    config.baseURL = getBaseUrl()
     const key = getApiKey()
     if (key) {
       config.headers['X-API-Key'] = key
