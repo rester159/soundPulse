@@ -1,8 +1,6 @@
 import { useState } from 'react'
-import { Settings } from 'lucide-react'
 import { useTrending, usePredictions, useGenres } from '../hooks/useSoundPulse'
 import FreshnessIndicator from '../components/FreshnessIndicator'
-import SettingsDrawer from '../components/SettingsDrawer'
 import TrendingTable from '../components/TrendingTable'
 import PredictionCard from '../components/PredictionCard'
 import GenreHeatmap from '../components/GenreHeatmap'
@@ -14,7 +12,6 @@ const ENTITY_TYPES = [
 
 export default function Dashboard() {
   const [entityType, setEntityType] = useState('track')
-  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const {
     data: trendingResult,
@@ -37,19 +34,11 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-semibold text-zinc-100 tracking-tight">
-            Dashboard
-          </h1>
-          <FreshnessIndicator updatedAt={updatedAt} />
-        </div>
-        <button
-          onClick={() => setSettingsOpen(true)}
-          className="p-2 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors duration-150"
-        >
-          <Settings className="w-5 h-5" />
-        </button>
+      <div className="flex items-center gap-3">
+        <h1 className="text-2xl font-semibold text-zinc-100 tracking-tight">
+          Dashboard
+        </h1>
+        <FreshnessIndicator updatedAt={updatedAt} />
       </div>
 
       {/* Main content: two columns */}
@@ -151,11 +140,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Settings Drawer */}
-      <SettingsDrawer
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-      />
     </div>
   )
 }

@@ -47,9 +47,10 @@ export default function SettingsDrawer({ isOpen, onClose }) {
     if (drawerRef.current && !drawerRef.current.contains(e.target)) onClose?.()
   }
 
+  const savedUrl = localStorage.getItem('soundpulse_base_url') || ''
   const isConfigured =
     !!localStorage.getItem('soundpulse_api_key') &&
-    !!localStorage.getItem('soundpulse_base_url')
+    savedUrl.startsWith('http')
 
   if (!isOpen) return null
 
