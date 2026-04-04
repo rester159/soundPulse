@@ -34,9 +34,9 @@ export default function PredictionCard({ prediction, onClick }) {
           <div className="text-sm font-medium text-zinc-100 truncate">
             {entity.name || entity.title || 'Unknown'}
           </div>
-          {entity.artist && (
+          {entity.artist?.name && (
             <div className="text-xs text-zinc-500 truncate mt-0.5">
-              {entity.artist}
+              {entity.artist.name}
             </div>
           )}
         </div>

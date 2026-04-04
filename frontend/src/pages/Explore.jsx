@@ -14,10 +14,9 @@ const ENTITY_TYPES = [
 ]
 
 const TIME_RANGES = [
-  { value: '24h', label: '24h' },
+  { value: 'today', label: '24h' },
   { value: '7d', label: '7d' },
   { value: '30d', label: '30d' },
-  { value: '90d', label: '90d' },
 ]
 
 const PLATFORM_COLORS = {
@@ -42,7 +41,7 @@ const PLATFORM_LABELS = {
 
 export default function Explore() {
   const [entityType, setEntityType] = useState('track')
-  const [timeRange, setTimeRange] = useState('7d')
+  const [timeRange, setTimeRange] = useState('30d')
   const [selectedGenre, setSelectedGenre] = useState(null)
   const [expandedItem, setExpandedItem] = useState(null)
 
@@ -63,7 +62,7 @@ export default function Explore() {
   const { data: genresResult, isLoading: genresLoading } = useGenres({})
 
   const trendingItems = trendingResult?.data?.data || []
-  const genreTree = genresResult?.data?.data || []
+  const genreTree = genresResult?.data?.data?.genres || []
 
   function handleSearchSelect(item) {
     setExpandedItem(item)
@@ -255,8 +254,8 @@ function ExpandedDetail({ item, onClose }) {
           <h3 className="text-lg font-semibold text-zinc-100">
             {entity.name || entity.title || 'Unknown'}
           </h3>
-          {entity.artist && (
-            <p className="text-sm text-zinc-400 mt-0.5">{entity.artist}</p>
+          {entity.artist?.name && (
+            <p className="text-sm text-zinc-400 mt-0.5">{entity.artist.name}</p>
           )}
         </div>
         <button
