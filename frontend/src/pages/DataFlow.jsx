@@ -112,33 +112,49 @@ const NODE_DETAILS = {
       { name: 'id',               desc: 'UUID primary key' },
       { name: 'entity_type',      desc: '"track" or "artist"' },
       { name: 'entity_id',        desc: 'FK → tracks.id or artists.id' },
-      { name: 'snapshot_date',    desc: 'Date of this data point (anchors time window)' },
-      { name: 'platform',         desc: 'chartmetric / spotify / shazam / apple_music / etc.' },
+      { name: 'snapshot_date',    desc: 'Date of this data point (anchors ALL time-window queries)' },
+      { name: 'platform',         desc: 'chartmetric / spotify / shazam / apple_music / radio / etc.' },
       { name: 'platform_rank',    desc: 'Position on source chart (nullable)' },
-      { name: 'platform_score',   desc: 'Raw score from source (popularity, streams, etc.)' },
-      { name: 'normalized_score', desc: '0–100 score scaled uniformly across platforms' },
-      { name: 'velocity',         desc: 'Rate of rank change from previous snapshot' },
-      { name: 'composite_score',  desc: 'Weighted cross-platform score (set at query time)' },
-      { name: 'signals_json',     desc: 'Full source payload: audio_features, genres, chart_type, etc.' },
+      { name: 'platform_score',   desc: 'Raw score from source (popularity, streams, rank-inverted)' },
+      { name: 'normalized_score', desc: '0–100 score scaled uniformly across all platforms' },
+      { name: 'velocity',         desc: 'Rate of rank change from the previous snapshot' },
+      { name: 'composite_score',  desc: 'Weighted cross-platform score (computed at query time)' },
+      { name: '── signals_json ──', desc: 'ALL raw source payload lives here as JSON' },
+      { name: '  .chart_type',      desc: 'regional / viral / plays / shazam / apple_music / tiktok (Chartmetric)' },
+      { name: '  .source_platform', desc: 'Which sub-source within Chartmetric (spotify, shazam, tiktok…)' },
+      { name: '  .cm_track_id',     desc: 'Chartmetric internal track ID' },
+      { name: '  .spotify_popularity', desc: 'Spotify popularity 0–100 (from Chartmetric)' },
+      { name: '  .current_plays',   desc: 'Stream count for the period (from Chartmetric)' },
+      { name: '  .velocity',        desc: 'Rank velocity as reported by Chartmetric' },
+      { name: '  .source_rank',     desc: 'Chart position at source' },
+      { name: '  .storefront',      desc: 'Apple Music market code (e.g. "us")' },
+      { name: '  .shazam_count',    desc: 'Shazam discovery count' },
+      { name: '  .genre_hint',      desc: 'Genre category used in Shazam query' },
+      { name: '  .genres',          desc: 'Genre tags from Chartmetric (sparse — only ~102/2146 tracks)' },
+      { name: '  .audio_features{}',desc: 'Spotify Audio: tempo, energy, danceability, valence, key, mode, etc.' },
+      { name: '  .audio_analysis{}',desc: 'Spotify Audio: sections, segments, beat/bar counts (top 50 only)' },
+      { name: '  .data_quality',    desc: '"live" / "aggregated" / "scraped" — which fallback tier delivered this' },
+      { name: '  .data_source',     desc: 'Exact scraper class that produced this row' },
     ],
-    note: 'Central fact table. Every scrape cycle appends new rows. Date window for queries is anchored to MAX(snapshot_date), not today, because backfill data spans 2024–2025.',
+    note: '★ THIS is the central signal store. Every scrape appends new rows — one per track per platform per date. Velocity, plays, rank, genres, audio features — everything from every source is in signals_json here. trending_snapshots JOIN tracks gives you the full picture.',
   },
   tracks: {
     fields: [
-      { name: 'id',              desc: 'UUID primary key' },
-      { name: 'title',           desc: 'Track name' },
+      { name: '── IDENTITY ONLY ──', desc: 'tracks holds WHO a track is, not how it performs' },
+      { name: 'id',              desc: 'UUID primary key — referenced by trending_snapshots.entity_id' },
+      { name: 'title',           desc: 'Canonical track name (de-duplicated)' },
       { name: 'artist_id',       desc: 'FK → artists.id' },
-      { name: 'isrc',            desc: 'Cross-platform identifier (unique)' },
+      { name: 'isrc',            desc: 'Cross-platform match key (unique)' },
       { name: 'spotify_id',      desc: 'Spotify track ID (unique)' },
       { name: 'apple_music_id',  desc: 'Apple Music track ID (unique)' },
       { name: 'shazam_id',       desc: 'Shazam track ID (unique)' },
       { name: 'chartmetric_id',  desc: 'Chartmetric track ID (unique)' },
-      { name: 'release_date',    desc: 'Official release date' },
-      { name: 'genres[]',        desc: 'Array of genre strings (often sparse — use signals_json instead)' },
-      { name: 'audio_features{}',desc: 'JSON: tempo, energy, danceability, valence, key, mode, etc.' },
-      { name: 'metadata_json{}', desc: 'Catch-all for extra fields from enrichment scrapers' },
+      { name: 'release_date',    desc: 'Official release date (from MusicBrainz enrichment)' },
+      { name: 'genres[]',        desc: '⚠ Sparse array — prefer signals_json→genres in trending_snapshots' },
+      { name: 'audio_features{}',desc: 'Permanent audio DNA from Spotify Audio scraper (tempo, energy, etc.) — only ~6% populated' },
+      { name: 'metadata_json{}', desc: 'Extra fields from MusicBrainz (mbid, country, genre_tags)' },
     ],
-    note: 'Master track registry. De-duplicated by ISRC or (title+artist_name) match. audio_features comes from spotify_audio scraper — currently only ~6% populated.',
+    note: '⚠ tracks is an entity REGISTRY, not a signal store. It answers "what is this track?" — not "how is it performing?". All performance data (velocity, plays, rank, chart_type) lives in trending_snapshots.signals_json. audio_features here is the permanent Song DNA (static), while trending_snapshots holds the dynamic daily signals.',
   },
   predictions: {
     fields: [
@@ -244,10 +260,10 @@ const NODES = [
   { id: 'celery_beat',   col: 'workers', label: 'Celery Beat',   subtitle: 'Cron scheduler' },
   { id: 'celery_worker', col: 'workers', label: 'Celery Worker', subtitle: 'Task executor' },
 
-  { id: 'trending_snapshots', col: 'storage', label: 'trending_snapshots', tableKey: 'trending_snapshots', expandable: true },
-  { id: 'tracks',             col: 'storage', label: 'tracks',             tableKey: 'tracks',             expandable: true },
-  { id: 'predictions',        col: 'storage', label: 'predictions',        tableKey: 'predictions',        expandable: true },
-  { id: 'backtest_results',   col: 'storage', label: 'backtest_results',   tableKey: 'backtest_results',   expandable: true },
+  { id: 'trending_snapshots', col: 'storage', label: 'trending_snapshots ★', tableKey: 'trending_snapshots', expandable: true },
+  { id: 'tracks',             col: 'storage', label: 'tracks (registry)',    tableKey: 'tracks',             expandable: true },
+  { id: 'predictions',        col: 'storage', label: 'predictions',         tableKey: 'predictions',        expandable: true },
+  { id: 'backtest_results',   col: 'storage', label: 'backtest_results',    tableKey: 'backtest_results',   expandable: true },
 
   { id: 'composite_scores', col: 'computed', label: 'Composite Scores',    expandable: true },
   { id: 'genre_opps',       col: 'computed', label: 'Genre Opportunities', expandable: true },
@@ -622,6 +638,31 @@ export default function DataFlow() {
               ))}
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* Architecture callout */}
+      <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
+        <div className="flex gap-3">
+          <div className="text-amber-400 text-lg leading-none mt-0.5">⚠</div>
+          <div>
+            <div className="text-sm font-semibold text-amber-300 mb-1">Two-table pattern — why signals aren't all in <code className="font-mono text-xs">tracks</code></div>
+            <div className="text-xs text-zinc-400 space-y-1">
+              <p>
+                <span className="text-zinc-300 font-medium">trending_snapshots</span> is the signal store.
+                Every scrape appends a new row per track per platform per day. All performance data — velocity, current_plays, rank, chart_type, genres, audio features — lands in <code className="font-mono text-[10px] bg-zinc-800 px-1 rounded">signals_json</code> here.
+                This is a <span className="text-zinc-300">time-series</span> design: you can query "how did this track move on Chartmetric over the last 30 days?" by reading multiple rows.
+              </p>
+              <p>
+                <span className="text-zinc-300 font-medium">tracks</span> is the entity registry.
+                It only stores identity — canonical name, platform IDs (spotify_id, apple_music_id…), and <span className="italic">permanent</span> Song DNA (audio_features from Spotify Audio scraper, which is static once set).
+                It does <span className="underline">not</span> store daily performance signals.
+              </p>
+              <p>
+                The full picture = <code className="font-mono text-[10px] bg-zinc-800 px-1 rounded">trending_snapshots JOIN tracks ON entity_id = tracks.id</code> — you get identity + all historical signals in one query.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
