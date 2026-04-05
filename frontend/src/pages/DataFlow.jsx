@@ -1,7 +1,226 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { GitBranch, RefreshCw, CheckCircle, XCircle, Clock, Database, Cpu, Globe, Monitor, Zap } from 'lucide-react'
+import {
+  GitBranch, RefreshCw, CheckCircle, XCircle, Clock,
+  Database, Cpu, Globe, Monitor, Zap, ChevronDown, ChevronRight,
+} from 'lucide-react'
 import { useDataFlow } from '../hooks/useSoundPulse'
+
+// ── Static field / detail definitions ────────────────────────────────────────
+
+const NODE_DETAILS = {
+  // ── Sources ──────────────────────────────────────────────────────────────
+  chartmetric: {
+    fields: [
+      { name: 'title',              desc: 'Track name' },
+      { name: 'artist_name',        desc: 'Artist name(s)' },
+      { name: 'isrc',               desc: 'International Standard Recording Code' },
+      { name: 'spotify_id',         desc: 'Spotify track ID (for audio enrichment)' },
+      { name: 'chartmetric_id',     desc: 'Chartmetric internal track ID' },
+      { name: 'rank',               desc: 'Chart position' },
+      { name: 'spotify_popularity', desc: 'Spotify popularity score (0–100)' },
+      { name: 'velocity',           desc: 'Rank change speed' },
+      { name: 'current_plays',      desc: 'Stream count for the period' },
+      { name: 'chart_type',         desc: 'regional / viral / plays / shazam / apple_music / tiktok' },
+      { name: 'genres',             desc: 'Genre tags from Chartmetric' },
+    ],
+    note: 'Primary data backbone. Runs every 4h. Covers Spotify (regional, viral, plays), Shazam, Apple Music, and TikTok charts via a single authenticated API.',
+  },
+  spotify: {
+    fields: [
+      { name: 'title',              desc: 'Track name' },
+      { name: 'artist_name',        desc: 'Artist(s)' },
+      { name: 'spotify_id',         desc: 'Spotify track URI fragment' },
+      { name: 'isrc',               desc: 'ISRC for cross-platform matching' },
+      { name: 'rank',               desc: 'Position on the chart (1–200)' },
+      { name: 'spotify_popularity', desc: 'Spotify popularity (0–100)' },
+      { name: 'streams',            desc: 'Stream count (where available)' },
+      { name: 'album_name',         desc: 'Album title' },
+      { name: 'markets',            desc: 'Available market count' },
+    ],
+    note: 'Direct Spotify Web API. Falls back to Chartmetric if Spotify returns 0 records. Runs every 6h.',
+  },
+  spotify_audio: {
+    fields: [
+      { name: 'tempo',              desc: 'BPM (beats per minute)' },
+      { name: 'energy',             desc: '0–1 intensity / loudness measure' },
+      { name: 'danceability',       desc: '0–1 how suitable for dancing' },
+      { name: 'valence',            desc: '0–1 musical positiveness / happiness' },
+      { name: 'acousticness',       desc: '0–1 confidence of acoustic sound' },
+      { name: 'instrumentalness',   desc: '0–1 predicts if no vocals' },
+      { name: 'liveness',           desc: '0–1 presence of live audience' },
+      { name: 'speechiness',        desc: '0–1 presence of spoken words' },
+      { name: 'loudness',           desc: 'Average loudness in dBFS' },
+      { name: 'key',                desc: 'Musical key (0=C, 1=C#, … 11=B)' },
+      { name: 'mode',               desc: '1=major, 0=minor' },
+      { name: 'duration_ms',        desc: 'Track length in milliseconds' },
+      { name: 'time_signature',     desc: 'Beats per bar (typically 4)' },
+      { name: 'audio_analysis',     desc: 'Sections, segments, beat/bar counts (top 50 tracks only)' },
+    ],
+    note: 'Enriches tracks that already have a spotify_id but no audio features. Runs daily at 5am UTC. Critical for blueprints and ML features — currently only ~6% of tracks have this data.',
+  },
+  shazam: {
+    fields: [
+      { name: 'title',         desc: 'Track name' },
+      { name: 'artist_name',   desc: 'Artist name' },
+      { name: 'shazam_id',     desc: 'Shazam track ID' },
+      { name: 'rank',          desc: 'Position in Shazam trending chart' },
+      { name: 'shazam_count',  desc: 'Shazam discovery count' },
+      { name: 'genre_hint',    desc: 'Genre category used in query' },
+    ],
+    note: 'Uses the shazam-core RapidAPI. Queries 18 search terms across genres to surface trending tracks. Runs every 4h. Also available via Chartmetric /api/charts/shazam.',
+  },
+  apple_music: {
+    fields: [
+      { name: 'title',            desc: 'Track name' },
+      { name: 'artist_name',      desc: 'Artist name(s)' },
+      { name: 'apple_music_id',   desc: 'Apple Music track ID' },
+      { name: 'isrc',             desc: 'ISRC for cross-platform matching' },
+      { name: 'rank',             desc: 'Position on the storefront chart' },
+      { name: 'storefront',       desc: 'Market / country code (e.g. us)' },
+      { name: 'album_name',       desc: 'Album title' },
+      { name: 'genre_names',      desc: 'Apple Music genre list' },
+    ],
+    note: 'Fetches Apple Music top songs chart via JWT (ES256) auth. US storefront only. Via Chartmetric: /api/charts/applemusic/tracks (fixed Apr 2026). Runs every 6h.',
+  },
+  musicbrainz: {
+    fields: [
+      { name: 'isrc',         desc: 'ISRC — primary cross-platform key' },
+      { name: 'mbid',         desc: 'MusicBrainz Recording ID' },
+      { name: 'release_date', desc: 'Official release date' },
+      { name: 'genre_tags',   desc: 'Community-tagged genre list' },
+      { name: 'artist_mbid',  desc: 'MusicBrainz Artist ID' },
+      { name: 'country',      desc: 'Country of origin' },
+      { name: 'duration_ms',  desc: 'Track duration from MusicBrainz' },
+    ],
+    note: 'Free enrichment source. No auth required. Looks up tracks by ISRC and fills in missing metadata (release_date, mbid, genre_tags). Runs daily at 2am UTC.',
+  },
+  radio: {
+    fields: [
+      { name: 'title',       desc: 'Track name (parsed from station metadata)' },
+      { name: 'artist_name', desc: 'Artist name' },
+      { name: 'station',     desc: 'Radio station name' },
+      { name: 'play_count',  desc: 'Airplay frequency in the scrape window' },
+      { name: 'format',      desc: 'Station format (CHR, AC, Hip-Hop, etc.)' },
+    ],
+    note: 'Scrapes public radio "now playing" feeds. Useful leading indicator — radio play often precedes streaming peaks. Runs daily at 6am UTC.',
+  },
+
+  // ── Database tables ───────────────────────────────────────────────────────
+  trending_snapshots: {
+    fields: [
+      { name: 'id',               desc: 'UUID primary key' },
+      { name: 'entity_type',      desc: '"track" or "artist"' },
+      { name: 'entity_id',        desc: 'FK → tracks.id or artists.id' },
+      { name: 'snapshot_date',    desc: 'Date of this data point (anchors time window)' },
+      { name: 'platform',         desc: 'chartmetric / spotify / shazam / apple_music / etc.' },
+      { name: 'platform_rank',    desc: 'Position on source chart (nullable)' },
+      { name: 'platform_score',   desc: 'Raw score from source (popularity, streams, etc.)' },
+      { name: 'normalized_score', desc: '0–100 score scaled uniformly across platforms' },
+      { name: 'velocity',         desc: 'Rate of rank change from previous snapshot' },
+      { name: 'composite_score',  desc: 'Weighted cross-platform score (set at query time)' },
+      { name: 'signals_json',     desc: 'Full source payload: audio_features, genres, chart_type, etc.' },
+    ],
+    note: 'Central fact table. Every scrape cycle appends new rows. Date window for queries is anchored to MAX(snapshot_date), not today, because backfill data spans 2024–2025.',
+  },
+  tracks: {
+    fields: [
+      { name: 'id',              desc: 'UUID primary key' },
+      { name: 'title',           desc: 'Track name' },
+      { name: 'artist_id',       desc: 'FK → artists.id' },
+      { name: 'isrc',            desc: 'Cross-platform identifier (unique)' },
+      { name: 'spotify_id',      desc: 'Spotify track ID (unique)' },
+      { name: 'apple_music_id',  desc: 'Apple Music track ID (unique)' },
+      { name: 'shazam_id',       desc: 'Shazam track ID (unique)' },
+      { name: 'chartmetric_id',  desc: 'Chartmetric track ID (unique)' },
+      { name: 'release_date',    desc: 'Official release date' },
+      { name: 'genres[]',        desc: 'Array of genre strings (often sparse — use signals_json instead)' },
+      { name: 'audio_features{}',desc: 'JSON: tempo, energy, danceability, valence, key, mode, etc.' },
+      { name: 'metadata_json{}', desc: 'Catch-all for extra fields from enrichment scrapers' },
+    ],
+    note: 'Master track registry. De-duplicated by ISRC or (title+artist_name) match. audio_features comes from spotify_audio scraper — currently only ~6% populated.',
+  },
+  predictions: {
+    fields: [
+      { name: 'id',               desc: 'UUID primary key' },
+      { name: 'entity_id',        desc: 'Track or artist UUID' },
+      { name: 'entity_type',      desc: '"track", "artist", or "genre"' },
+      { name: 'horizon',          desc: 'Prediction window: "7d", "30d", "90d"' },
+      { name: 'predicted_score',  desc: 'Breakout probability (0–1) from GBM model' },
+      { name: 'confidence',       desc: 'Model confidence (0–1)' },
+      { name: 'model_version',    desc: 'Semver of the model that made this prediction' },
+      { name: 'features_json{}',  desc: 'Feature vector used at prediction time (for explainability)' },
+      { name: 'predicted_at',     desc: 'Timestamp of prediction' },
+      { name: 'resolved_at',      desc: 'When the prediction window closed (nullable)' },
+      { name: 'actual_score',     desc: 'Real outcome score after resolution (nullable)' },
+      { name: 'error',            desc: 'predicted_score – actual_score (nullable)' },
+    ],
+    note: 'Empty until model trains (needs ≥14 days of consecutive data, ETA mid-April 2026). Once populated, feeds the Model Validation page and Assistant context.',
+  },
+  backtest_results: {
+    fields: [
+      { name: 'id',               desc: 'String UUID primary key' },
+      { name: 'run_id',           desc: 'Groups all rows from one backtest run' },
+      { name: 'evaluation_date',  desc: 'The date being evaluated' },
+      { name: 'entity_type',      desc: 'Track / artist filter (nullable = all)' },
+      { name: 'genre_filter',     desc: 'Genre filter used in this run (nullable)' },
+      { name: 'horizon',          desc: 'Prediction window evaluated ("7d" default)' },
+      { name: 'mae',              desc: 'Mean Absolute Error for this period' },
+      { name: 'rmse',             desc: 'Root Mean Squared Error' },
+      { name: 'precision_score',  desc: 'Precision: of predicted breakouts, how many were real' },
+      { name: 'recall_score',     desc: 'Recall: of actual breakouts, how many were caught' },
+      { name: 'f1_score',         desc: 'Harmonic mean of precision and recall' },
+      { name: 'auc_roc',          desc: 'Area Under ROC Curve' },
+      { name: 'predicted_avg',    desc: 'Average predicted probability for charting' },
+      { name: 'actual_rate',      desc: 'Actual breakout rate for charting' },
+      { name: 'details_json{}',   desc: 'Per-entity predictions vs actuals (for drill-down)' },
+    ],
+    note: 'Populated by the daily backtest task (4:30am UTC) after model training. Used by the Model Validation page. Empty until first model trains.',
+  },
+
+  // ── Computed ──────────────────────────────────────────────────────────────
+  composite_scores: {
+    explanation: [
+      { label: 'What it is',  text: 'A single 0–100 number representing a track\'s cross-platform momentum, used to rank trending lists.' },
+      { label: 'Formula',     text: 'Weighted average of normalized_score across platforms: Chartmetric 35% + Spotify 30% + Shazam 20% + Apple Music 10% + Others 5%' },
+      { label: 'When',        text: 'Computed on the fly at query time from the most recent snapshot per platform, within a MAX(snapshot_date) anchored window.' },
+      { label: 'Where used',  text: 'Dashboard trending lists, Explore search results, TrendingCard score bar, SearchBar result ranking, Assistant context.' },
+      { label: 'Weights',     text: 'Configurable via /admin/scoring page. Changing weights takes effect immediately on the next query — no re-scrape needed.' },
+    ],
+  },
+  genre_opps: {
+    explanation: [
+      { label: 'What it is',  text: 'A score ranking music genres by how much opportunity they represent for a new release right now.' },
+      { label: 'Formula',     text: 'opportunity = 0.4 × momentum + 0.4 × quality + 0.2 × (1 − saturation)' },
+      { label: 'Momentum',    text: 'Average composite_score velocity across tracks in this genre over the last 60 days (anchored to MAX snapshot date).' },
+      { label: 'Quality',     text: 'Average composite_score of top performers in the genre (proxy for audience engagement).' },
+      { label: 'Saturation',  text: 'Fraction of top-200 tracks that already belong to this genre. High saturation = more competition.' },
+      { label: 'Data gap',    text: 'Genre labels live in signals_json->>"genres" (raw Chartmetric strings), not in tracks.genres[]. Only ~102 of 2,146 tracks have genre labels there — causing many genres to show low scores.' },
+      { label: 'Where used',  text: 'Song Lab left panel — genre list sorted by opportunity score.' },
+    ],
+  },
+  blueprints: {
+    explanation: [
+      { label: 'What it is',  text: 'A "winning profile" for a genre: the aggregated Song DNA of the top-performing tracks in that genre over the last 60 days.' },
+      { label: 'How built',   text: 'Query top tracks for the genre → average their audio features (tempo, energy, valence, danceability, key, mode) → identify common themes → translate into a model-specific text prompt.' },
+      { label: 'LLM?',        text: 'No. All deterministic Python string templates — no LLM involved. Runs in <100ms per request.' },
+      { label: 'Models',      text: 'Suno (natural language style text + [Verse]/[Chorus] lyrics skeleton), Udio (similar), SOUNDRAW (JSON params for tempo/energy/mood).' },
+      { label: 'Limitation',  text: 'Without audio_features (only ~6% of tracks have them), the blueprint falls back to generic energy/mood language instead of specific BPM and key values.' },
+      { label: 'Where used',  text: 'Song Lab right panel — Blueprint card + Generated Prompt text area.' },
+    ],
+  },
+  ml_model: {
+    explanation: [
+      { label: 'What it is',   text: 'A GradientBoostingClassifier trained to predict whether a track will "break out" (composite_score > 70) within a future time horizon.' },
+      { label: 'Algorithm',    text: 'sklearn GradientBoostingClassifier (100 estimators, max_depth=4, learning_rate=0.05). Also evaluates LogisticRegression and RandomForest; best F1 wins.' },
+      { label: 'Features',     text: 'velocity, normalized_score, platform_rank, release_age_days, tempo, energy, danceability, valence, acousticness, genre_encoded, snapshot_count_7d, score_trend_7d' },
+      { label: 'Label',        text: 'breakout=1 if composite_score > 70 at snapshot_date + horizon, else 0' },
+      { label: 'Training',     text: 'Daily at 3am UTC via Celery Beat. Needs MIN_SAMPLES=30 and ≥2 snapshot dates. ETA for first run: mid-April 2026 (~14 days consecutive data).' },
+      { label: 'Output',       text: 'predicted_score (breakout probability 0–1) + confidence per track → written to predictions table.' },
+      { label: 'Path fix',     text: 'Train script path bug (relative vs absolute) fixed Apr 2026 — will run correctly on next 3am UTC cycle once data threshold is met.' },
+    ],
+  },
+}
 
 // ── Diagram topology ─────────────────────────────────────────────────────────
 
@@ -14,32 +233,27 @@ const COLUMNS = [
 ]
 
 const NODES = [
-  // Sources
-  { id: 'chartmetric',    col: 'sources', label: 'Chartmetric',   scraperKey: 'chartmetric' },
-  { id: 'spotify',        col: 'sources', label: 'Spotify',       scraperKey: 'spotify' },
-  { id: 'spotify_audio',  col: 'sources', label: 'Spotify Audio', scraperKey: 'spotify_audio', subtitle: 'Audio features' },
-  { id: 'shazam',         col: 'sources', label: 'Shazam',        scraperKey: 'shazam' },
-  { id: 'apple_music',    col: 'sources', label: 'Apple Music',   scraperKey: 'apple_music' },
-  { id: 'musicbrainz',    col: 'sources', label: 'MusicBrainz',   scraperKey: 'musicbrainz', subtitle: 'Metadata' },
-  { id: 'radio',          col: 'sources', label: 'Radio',         scraperKey: 'radio' },
+  { id: 'chartmetric',    col: 'sources', label: 'Chartmetric',    scraperKey: 'chartmetric',   expandable: true },
+  { id: 'spotify',        col: 'sources', label: 'Spotify',        scraperKey: 'spotify',       expandable: true },
+  { id: 'spotify_audio',  col: 'sources', label: 'Spotify Audio',  scraperKey: 'spotify_audio', expandable: true },
+  { id: 'shazam',         col: 'sources', label: 'Shazam',         scraperKey: 'shazam',        expandable: true },
+  { id: 'apple_music',    col: 'sources', label: 'Apple Music',    scraperKey: 'apple_music',   expandable: true },
+  { id: 'musicbrainz',    col: 'sources', label: 'MusicBrainz',    scraperKey: 'musicbrainz',   expandable: true },
+  { id: 'radio',          col: 'sources', label: 'Radio',          scraperKey: 'radio',         expandable: true },
 
-  // Workers
-  { id: 'celery_beat',   col: 'workers', label: 'Celery Beat',   subtitle: 'Scheduler (cron)' },
+  { id: 'celery_beat',   col: 'workers', label: 'Celery Beat',   subtitle: 'Cron scheduler' },
   { id: 'celery_worker', col: 'workers', label: 'Celery Worker', subtitle: 'Task executor' },
 
-  // Storage
-  { id: 'trending_snapshots', col: 'storage', label: 'trending_snapshots', tableKey: 'trending_snapshots' },
-  { id: 'tracks',             col: 'storage', label: 'tracks',             tableKey: 'tracks' },
-  { id: 'predictions',        col: 'storage', label: 'predictions',        tableKey: 'predictions' },
-  { id: 'backtest_results',   col: 'storage', label: 'backtest_results',   tableKey: 'backtest_results' },
+  { id: 'trending_snapshots', col: 'storage', label: 'trending_snapshots', tableKey: 'trending_snapshots', expandable: true },
+  { id: 'tracks',             col: 'storage', label: 'tracks',             tableKey: 'tracks',             expandable: true },
+  { id: 'predictions',        col: 'storage', label: 'predictions',        tableKey: 'predictions',        expandable: true },
+  { id: 'backtest_results',   col: 'storage', label: 'backtest_results',   tableKey: 'backtest_results',   expandable: true },
 
-  // Computed (on-the-fly or model)
-  { id: 'composite_scores', col: 'computed', label: 'Composite Scores',     subtitle: 'Weighted platform avg' },
-  { id: 'genre_opps',       col: 'computed', label: 'Genre Opportunities',  subtitle: '0.4×mom + 0.4×qual + 0.2×sat' },
-  { id: 'blueprints',       col: 'computed', label: 'Blueprints',           subtitle: 'Song DNA templates' },
-  { id: 'ml_model',         col: 'computed', label: 'ML Model',             subtitle: 'GradientBoosting (GBM)' },
+  { id: 'composite_scores', col: 'computed', label: 'Composite Scores',    expandable: true },
+  { id: 'genre_opps',       col: 'computed', label: 'Genre Opportunities', expandable: true },
+  { id: 'blueprints',       col: 'computed', label: 'Blueprints',          expandable: true },
+  { id: 'ml_model',         col: 'computed', label: 'ML Model',            expandable: true },
 
-  // UI Pages
   { id: 'dashboard', col: 'frontend', label: 'Dashboard',        path: '/' },
   { id: 'explore',   col: 'frontend', label: 'Explore',          path: '/explore' },
   { id: 'song_lab',  col: 'frontend', label: 'Song Lab',         path: '/song-lab' },
@@ -48,7 +262,6 @@ const NODES = [
 ]
 
 const EDGES = [
-  // Sources → Worker
   { from: 'chartmetric',   to: 'celery_worker' },
   { from: 'spotify',       to: 'celery_worker' },
   { from: 'spotify_audio', to: 'celery_worker' },
@@ -57,14 +270,10 @@ const EDGES = [
   { from: 'musicbrainz',   to: 'celery_worker' },
   { from: 'radio',         to: 'celery_worker' },
   { from: 'celery_beat',   to: 'celery_worker' },
-
-  // Worker → Storage
   { from: 'celery_worker', to: 'trending_snapshots' },
   { from: 'celery_worker', to: 'tracks' },
   { from: 'celery_worker', to: 'predictions' },
   { from: 'celery_worker', to: 'backtest_results' },
-
-  // Storage → Computed
   { from: 'trending_snapshots', to: 'composite_scores' },
   { from: 'trending_snapshots', to: 'genre_opps' },
   { from: 'trending_snapshots', to: 'blueprints' },
@@ -72,8 +281,6 @@ const EDGES = [
   { from: 'tracks',             to: 'blueprints' },
   { from: 'tracks',             to: 'ml_model' },
   { from: 'predictions',        to: 'ml_model' },
-
-  // Computed → Frontend
   { from: 'composite_scores', to: 'dashboard' },
   { from: 'composite_scores', to: 'explore' },
   { from: 'composite_scores', to: 'assistant' },
@@ -84,12 +291,12 @@ const EDGES = [
   { from: 'ml_model',         to: 'assistant' },
 ]
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function relativeTime(isoStr) {
   if (!isoStr) return null
   const diff = Math.floor((Date.now() - new Date(isoStr)) / 1000)
-  if (diff < 60)  return `${diff}s ago`
+  if (diff < 60)   return `${diff}s ago`
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`
@@ -98,7 +305,7 @@ function relativeTime(isoStr) {
 function fmtNum(n) {
   if (n == null) return '—'
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k'
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k'
   return String(n)
 }
 
@@ -106,165 +313,208 @@ function statusColor(status) {
   if (status === 'success') return '#34d399'
   if (status === 'error')   return '#f87171'
   if (status === 'running') return '#60a5fa'
-  return '#52525b'  // null / never run
+  return '#52525b'
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ── Expandable detail panels ──────────────────────────────────────────────────
 
-function ColumnHeader({ col }) {
-  const { Icon, label, color } = col
+function FieldList({ fields }) {
   return (
-    <div className="flex items-center gap-1.5 mb-3 px-1">
-      <Icon size={13} style={{ color }} />
-      <span className="text-xs font-semibold uppercase tracking-wider" style={{ color }}>
-        {label}
-      </span>
+    <div className="mt-2 space-y-1 border-t border-zinc-800 pt-2">
+      {fields.map(f => (
+        <div key={f.name} className="flex gap-2">
+          <span className="font-mono text-[10px] text-violet-400 shrink-0 min-w-[120px]">{f.name}</span>
+          <span className="text-[10px] text-zinc-500 leading-tight">{f.desc}</span>
+        </div>
+      ))}
     </div>
   )
 }
 
-function ScraperBadge({ status, lastRun, recordCount }) {
-  const color = statusColor(status)
+function ExplanationList({ items }) {
   return (
-    <div className="flex items-center gap-1.5 mt-0.5">
-      <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
-      <span className="text-[10px]" style={{ color }}>
-        {status || 'never run'}
-      </span>
-      {lastRun && (
-        <span className="text-[10px] text-zinc-600">{relativeTime(lastRun)}</span>
-      )}
-      {recordCount != null && recordCount > 0 && (
-        <span className="text-[10px] text-zinc-500">{fmtNum(recordCount)} records</span>
-      )}
+    <div className="mt-2 space-y-1.5 border-t border-zinc-800 pt-2">
+      {items.map(item => (
+        <div key={item.label}>
+          <span className="text-[10px] font-semibold text-zinc-400">{item.label}: </span>
+          <span className="text-[10px] text-zinc-500">{item.text}</span>
+        </div>
+      ))}
     </div>
   )
 }
 
-function TableBadge({ tableData }) {
-  if (!tableData) return <div className="text-[10px] text-zinc-600 mt-0.5">loading…</div>
-  const rows = tableData.total_rows
-  return (
-    <div className="flex items-center gap-1.5 mt-0.5">
-      <div
-        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-        style={{ backgroundColor: rows > 0 ? '#34d399' : '#52525b' }}
-      />
-      <span className={`text-[10px] ${rows > 0 ? 'text-zinc-300' : 'text-zinc-600'}`}>
-        {fmtNum(rows)} rows
-      </span>
-      {tableData.latest_date && (
-        <span className="text-[10px] text-zinc-600">latest {tableData.latest_date}</span>
-      )}
-    </div>
-  )
-}
+// ── Main node card ────────────────────────────────────────────────────────────
 
-function DiagramNode({ node, nodeRef, live }) {
-  const colDef = COLUMNS.find(c => c.id === node.col)
-  const accentColor = colDef?.color || '#71717a'
+function DiagramNode({ node, nodeRef, live, isExpanded, onToggle }) {
+  const colDef  = COLUMNS.find(c => c.id === node.col)
+  const accent  = colDef?.color || '#71717a'
+  const details = NODE_DETAILS[node.id]
 
-  // Build badge content
-  let badge = null
-  if (node.scraperKey && live?.scrapers) {
-    const s = live.scrapers.find(sc => sc.id === node.scraperKey)
-    badge = s
-      ? <ScraperBadge status={s.last_status} lastRun={s.last_run_at} recordCount={s.last_record_count} />
-      : <div className="text-[10px] text-zinc-600 mt-0.5">not configured</div>
-  } else if (node.tableKey && live?.tables) {
-    badge = <TableBadge tableData={live.tables[node.tableKey]} />
-  } else if (node.col === 'computed') {
-    badge = <div className="text-[10px] text-zinc-500 mt-0.5">{node.subtitle}</div>
-  } else if (node.col === 'workers') {
-    badge = <div className="text-[10px] text-zinc-500 mt-0.5">{node.subtitle}</div>
-  } else if (node.col === 'frontend' && node.path) {
-    badge = (
-      <Link to={node.path} className="text-[10px] text-violet-400 hover:text-violet-300 mt-0.5 block">
-        open →
-      </Link>
-    )
-  }
+  // Scraper status badge
+  const scraperData = node.scraperKey && live?.scrapers
+    ? live.scrapers.find(s => s.id === node.scraperKey)
+    : null
 
-  // Extra detail line for tracks
-  let extraDetail = null
-  if (node.tableKey === 'tracks' && live?.tables?.tracks) {
-    const t = live.tables.tracks
-    extraDetail = (
-      <div className="text-[10px] text-zinc-600 mt-0.5">
-        {fmtNum(t.with_audio_features)} / {fmtNum(t.total_rows)} with audio features
-      </div>
-    )
-  }
-  if (node.tableKey === 'trending_snapshots' && live?.tables?.trending_snapshots) {
-    const sn = live.tables.trending_snapshots
-    extraDetail = (
-      <div className="text-[10px] text-zinc-600 mt-0.5">
-        {sn.distinct_dates} distinct dates
-      </div>
-    )
-  }
+  const tableData = node.tableKey && live?.tables
+    ? live.tables[node.tableKey]
+    : null
+
+  // Record count for the label parenthetical
+  let recordCount = null
+  if (scraperData?.last_record_count != null) recordCount = scraperData.last_record_count
+  if (tableData?.total_rows != null) recordCount = tableData.total_rows
+
+  const handleClick = node.expandable && details ? onToggle : undefined
 
   return (
     <div
       ref={nodeRef}
-      className="rounded-lg border bg-zinc-900 px-3 py-2 mb-2 select-none"
-      style={{ borderColor: `${accentColor}30` }}
+      onClick={handleClick}
+      className={`rounded-lg border bg-zinc-900 px-3 py-2 mb-2 ${node.expandable && details ? 'cursor-pointer select-none' : ''}`}
+      style={{ borderColor: isExpanded ? accent : `${accent}30` }}
     >
-      <div className="text-xs font-medium text-zinc-200 leading-tight">{node.label}</div>
-      {badge}
-      {extraDetail}
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-1">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1 flex-wrap">
+            <span className="text-xs font-medium text-zinc-200 leading-tight">{node.label}</span>
+            {recordCount != null && (
+              <span className="text-[10px] text-zinc-500">({fmtNum(recordCount)})</span>
+            )}
+          </div>
+
+          {/* Sub-status line */}
+          {scraperData && (
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: statusColor(scraperData.last_status) }} />
+              <span className="text-[10px]" style={{ color: statusColor(scraperData.last_status) }}>
+                {scraperData.last_status || 'never run'}
+              </span>
+              {scraperData.last_run_at && (
+                <span className="text-[10px] text-zinc-600">{relativeTime(scraperData.last_run_at)}</span>
+              )}
+            </div>
+          )}
+
+          {tableData && !scraperData && (
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <div className="w-1.5 h-1.5 rounded-full shrink-0"
+                style={{ backgroundColor: (tableData.total_rows || 0) > 0 ? '#34d399' : '#52525b' }} />
+              <span className={`text-[10px] ${(tableData.total_rows || 0) > 0 ? 'text-zinc-300' : 'text-zinc-600'}`}>
+                {fmtNum(tableData.total_rows)} rows
+              </span>
+              {tableData.latest_date && (
+                <span className="text-[10px] text-zinc-600">· {tableData.latest_date}</span>
+              )}
+              {tableData.distinct_dates != null && (
+                <span className="text-[10px] text-zinc-600">· {tableData.distinct_dates} dates</span>
+              )}
+            </div>
+          )}
+
+          {node.col === 'workers' && (
+            <div className="text-[10px] text-zinc-500 mt-0.5">{node.subtitle}</div>
+          )}
+
+          {node.col === 'computed' && !isExpanded && (
+            <div className="text-[10px] text-zinc-600 mt-0.5">click to expand</div>
+          )}
+
+          {node.col === 'frontend' && node.path && (
+            <Link
+              to={node.path}
+              onClick={e => e.stopPropagation()}
+              className="text-[10px] text-violet-400 hover:text-violet-300 mt-0.5 block"
+            >
+              open →
+            </Link>
+          )}
+
+          {/* Tracks audio feature coverage sub-note */}
+          {node.tableKey === 'tracks' && live?.tables?.tracks && (
+            <div className="text-[10px] text-zinc-600 mt-0.5">
+              {fmtNum(live.tables.tracks.with_audio_features)} / {fmtNum(live.tables.tracks.total_rows)} with audio
+            </div>
+          )}
+        </div>
+
+        {/* Chevron */}
+        {node.expandable && details && (
+          <div className="shrink-0 ml-1">
+            {isExpanded
+              ? <ChevronDown size={11} style={{ color: accent }} />
+              : <ChevronRight size={11} className="text-zinc-600" />
+            }
+          </div>
+        )}
+      </div>
+
+      {/* Expanded content */}
+      {isExpanded && details && (
+        <div>
+          {details.note && (
+            <p className="text-[10px] text-zinc-500 mt-1.5 italic leading-snug">{details.note}</p>
+          )}
+          {details.fields && <FieldList fields={details.fields} />}
+          {details.explanation && <ExplanationList items={details.explanation} />}
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function DataFlow() {
   const { data: rawData, isLoading, refetch, dataUpdatedAt } = useDataFlow()
   const live = rawData?.data?.data
 
   const containerRef = useRef(null)
-  const nodeRefs = useRef({})
-  const [svgLines, setSvgLines] = useState([])
-  const [svgSize, setSvgSize] = useState({ w: 0, h: 0 })
+  const nodeRefs     = useRef({})
+  const [svgLines, setSvgLines]     = useState([])
+  const [svgSize, setSvgSize]       = useState({ w: 0, h: 0 })
+  const [expanded, setExpanded]     = useState(new Set())
+
+  const toggleNode = useCallback((id) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }, [])
 
   const recalcLines = useCallback(() => {
     if (!containerRef.current) return
-    const containerRect = containerRef.current.getBoundingClientRect()
-    setSvgSize({ w: containerRect.width, h: containerRect.height })
+    const cr = containerRef.current.getBoundingClientRect()
+    setSvgSize({ w: cr.width, h: cr.height })
 
-    const newLines = EDGES.map(edge => {
+    const lines = EDGES.map(edge => {
       const fromEl = nodeRefs.current[edge.from]
       const toEl   = nodeRefs.current[edge.to]
       if (!fromEl || !toEl) return null
       const fr = fromEl.getBoundingClientRect()
       const tr = toEl.getBoundingClientRect()
-
-      const x1 = fr.right  - containerRect.left
-      const y1 = fr.top    + fr.height / 2 - containerRect.top
-      const x2 = tr.left   - containerRect.left
-      const y2 = tr.top    + tr.height / 2 - containerRect.top
-
-      // Cubic bezier control points for smooth S-curves
+      const x1 = fr.right  - cr.left
+      const y1 = fr.top    + fr.height / 2 - cr.top
+      const x2 = tr.left   - cr.left
+      const y2 = tr.top    + tr.height / 2 - cr.top
       const cx = (x1 + x2) / 2
       const d  = `M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`
-
-      // Determine edge color based on source column
       const fromNode = NODES.find(n => n.id === edge.from)
       const fromCol  = COLUMNS.find(c => c.id === fromNode?.col)
-      const color    = fromCol ? fromCol.color + '30' : '#ffffff15'
-
+      const color    = fromCol ? fromCol.color + '28' : '#ffffff12'
       return { d, color, key: `${edge.from}-${edge.to}` }
     }).filter(Boolean)
 
-    setSvgLines(newLines)
+    setSvgLines(lines)
   }, [])
 
+  // Recalc after expansions and after data loads
   useEffect(() => {
-    // Initial calc + recalc after data loads
-    const timer = setTimeout(recalcLines, 50)
-    return () => clearTimeout(timer)
-  }, [recalcLines, live])
+    const t = setTimeout(recalcLines, 30)
+    return () => clearTimeout(t)
+  }, [recalcLines, live, expanded])
 
   useEffect(() => {
     const ro = new ResizeObserver(recalcLines)
@@ -272,7 +522,6 @@ export default function DataFlow() {
     return () => ro.disconnect()
   }, [recalcLines])
 
-  // Group nodes by column
   const nodesByCol = {}
   COLUMNS.forEach(c => { nodesByCol[c.id] = NODES.filter(n => n.col === c.id) })
 
@@ -286,13 +535,11 @@ export default function DataFlow() {
           <GitBranch size={28} className="text-violet-400" />
           <div>
             <h1 className="text-2xl font-bold text-zinc-100">Data Pipeline</h1>
-            <p className="text-sm text-zinc-500">Live architecture — sources, storage, computation, and UI</p>
+            <p className="text-sm text-zinc-500">Live architecture — click any node to expand fields &amp; details</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {lastUpdated && (
-            <span className="text-xs text-zinc-500">Updated {lastUpdated}</span>
-          )}
+          {lastUpdated && <span className="text-xs text-zinc-500">Updated {lastUpdated}</span>}
           <button
             onClick={() => refetch()}
             className="flex items-center gap-2 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-sm text-zinc-300 transition-colors"
@@ -305,17 +552,17 @@ export default function DataFlow() {
 
       {/* Coverage strip */}
       {live?.coverage && (
-        <div className="flex gap-4 flex-wrap">
+        <div className="flex gap-3 flex-wrap">
           {[
-            { label: 'Audio Features Coverage', value: `${live.coverage.audio_features_pct}%`, ok: live.coverage.audio_features_pct > 50 },
-            { label: 'Prediction Coverage',     value: `${live.coverage.prediction_coverage_pct}%`, ok: live.coverage.prediction_coverage_pct > 0 },
-            { label: 'Model Trained',            value: live.coverage.model_trained ? 'Yes' : 'No', ok: live.coverage.model_trained },
-            { label: 'Snapshot Dates',           value: live.tables?.trending_snapshots?.distinct_dates ?? '—', ok: (live.tables?.trending_snapshots?.distinct_dates || 0) >= 14 },
+            { label: 'Audio Features', value: `${live.coverage.audio_features_pct}%`,    ok: live.coverage.audio_features_pct > 50 },
+            { label: 'Predictions',    value: `${live.coverage.prediction_coverage_pct}%`, ok: live.coverage.prediction_coverage_pct > 0 },
+            { label: 'Model Trained',  value: live.coverage.model_trained ? 'Yes' : 'No', ok: live.coverage.model_trained },
+            { label: 'Snapshot Dates', value: String(live.tables?.trending_snapshots?.distinct_dates ?? '—'), ok: (live.tables?.trending_snapshots?.distinct_dates || 0) >= 14 },
           ].map(({ label, value, ok }) => (
-            <div key={label} className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2">
+            <div key={label} className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5">
               {ok
-                ? <CheckCircle size={12} className="text-emerald-400 flex-shrink-0" />
-                : <XCircle size={12} className="text-rose-400 flex-shrink-0" />
+                ? <CheckCircle size={12} className="text-emerald-400 shrink-0" />
+                : <XCircle    size={12} className="text-rose-400 shrink-0" />
               }
               <span className="text-xs text-zinc-400">{label}:</span>
               <span className={`text-xs font-semibold ${ok ? 'text-emerald-400' : 'text-rose-400'}`}>{value}</span>
@@ -328,9 +575,8 @@ export default function DataFlow() {
       <div
         ref={containerRef}
         className="relative rounded-xl border border-zinc-800 bg-zinc-950 p-6 overflow-x-auto"
-        style={{ minHeight: 480 }}
       >
-        {/* SVG overlay for edges */}
+        {/* SVG edge overlay */}
         <svg
           className="absolute inset-0 pointer-events-none"
           width={svgSize.w}
@@ -349,17 +595,29 @@ export default function DataFlow() {
           ))}
         </svg>
 
-        {/* Columns */}
-        <div className="relative z-10 grid gap-6" style={{ gridTemplateColumns: `repeat(${COLUMNS.length}, minmax(160px, 1fr))` }}>
+        {/* Column grid */}
+        <div
+          className="relative z-10 grid gap-6"
+          style={{ gridTemplateColumns: `repeat(${COLUMNS.length}, minmax(170px, 1fr))` }}
+        >
           {COLUMNS.map(col => (
             <div key={col.id}>
-              <ColumnHeader col={col} />
+              {/* Column header */}
+              <div className="flex items-center gap-1.5 mb-3 px-1">
+                <col.Icon size={13} style={{ color: col.color }} />
+                <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: col.color }}>
+                  {col.label}
+                </span>
+              </div>
+
               {nodesByCol[col.id].map(node => (
                 <DiagramNode
                   key={node.id}
                   node={node}
                   nodeRef={el => { nodeRefs.current[node.id] = el }}
                   live={live}
+                  isExpanded={expanded.has(node.id)}
+                  onToggle={() => toggleNode(node.id)}
                 />
               ))}
             </div>
@@ -367,14 +625,14 @@ export default function DataFlow() {
         </div>
       </div>
 
-      {/* Platform breakdown table */}
+      {/* Platform breakdown */}
       {live?.tables?.trending_snapshots?.platforms && Object.keys(live.tables.trending_snapshots.platforms).length > 0 && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
           <h3 className="text-sm font-semibold text-zinc-300 mb-3 flex items-center gap-2">
             <Database size={14} className="text-violet-400" />
             Snapshots by Platform
           </h3>
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap gap-2">
             {Object.entries(live.tables.trending_snapshots.platforms)
               .sort(([, a], [, b]) => b - a)
               .map(([platform, count]) => (
@@ -387,7 +645,7 @@ export default function DataFlow() {
         </div>
       )}
 
-      {/* Scraper status table */}
+      {/* Scraper detail table */}
       {live?.scrapers && live.scrapers.length > 0 && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
           <h3 className="text-sm font-semibold text-zinc-300 mb-3 flex items-center gap-2">
@@ -399,7 +657,7 @@ export default function DataFlow() {
               <thead>
                 <tr className="text-zinc-500 border-b border-zinc-800">
                   <th className="text-left py-1.5 px-2">Scraper</th>
-                  <th className="text-center py-1.5 px-2">Enabled</th>
+                  <th className="text-center py-1.5 px-2">On</th>
                   <th className="text-left py-1.5 px-2">Status</th>
                   <th className="text-left py-1.5 px-2">Last Run</th>
                   <th className="text-right py-1.5 px-2">Records</th>
@@ -413,11 +671,13 @@ export default function DataFlow() {
                     <td className="py-1.5 px-2 text-center">
                       <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.enabled ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
                     </td>
-                    <td className="py-1.5 px-2">
-                      <span style={{ color: statusColor(s.last_status) }}>{s.last_status || 'never'}</span>
+                    <td className="py-1.5 px-2" style={{ color: statusColor(s.last_status) }}>
+                      {s.last_status || 'never'}
                     </td>
                     <td className="py-1.5 px-2 text-zinc-500">{relativeTime(s.last_run_at) || '—'}</td>
-                    <td className="py-1.5 px-2 text-right text-zinc-400">{s.last_record_count != null ? fmtNum(s.last_record_count) : '—'}</td>
+                    <td className="py-1.5 px-2 text-right text-zinc-400">
+                      {s.last_record_count != null ? fmtNum(s.last_record_count) : '—'}
+                    </td>
                     <td className="py-1.5 px-2 text-zinc-600 max-w-xs truncate">{s.last_error || ''}</td>
                   </tr>
                 ))}
