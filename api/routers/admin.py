@@ -1943,3 +1943,108 @@ loadConfig();
 async def scoring_page():
     """Serve the scoring configuration admin page."""
     return HTMLResponse(content=SCORING_HTML)
+
+
+# ---------------------------------------------------------------------------
+# Data Flow / Architecture Stats endpoint
+# ---------------------------------------------------------------------------
+
+@router.get("/admin/data-flow")
+async def get_data_flow(
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_admin),
+):
+    """
+    Returns live pipeline statistics for the architecture diagram:
+    scraper statuses, table row counts, coverage metrics, and data freshness.
+    """
+    from datetime import datetime, timezone
+    from sqlalchemy import func, text, distinct
+    from api.models.scraper_config import ScraperConfig
+    from api.models.trending_snapshot import TrendingSnapshot
+    from api.models.track import Track
+    from api.models.prediction import Prediction
+    from api.models.backtest_result import BacktestResult
+
+    # --- Scrapers ---
+    scraper_rows = (await db.execute(select(ScraperConfig))).scalars().all()
+    scrapers = [
+        {
+            "id": s.id,
+            "enabled": s.enabled,
+            "last_status": s.last_status,
+            "last_run_at": s.last_run_at.isoformat() if s.last_run_at else None,
+            "last_record_count": s.last_record_count,
+            "last_error": s.last_error,
+        }
+        for s in scraper_rows
+    ]
+
+    # --- trending_snapshots ---
+    snap_total = (await db.execute(select(func.count()).select_from(TrendingSnapshot))).scalar() or 0
+    snap_latest = (await db.execute(select(func.max(TrendingSnapshot.snapshot_date)))).scalar()
+    snap_distinct_dates = (
+        await db.execute(select(func.count(distinct(TrendingSnapshot.snapshot_date))))
+    ).scalar() or 0
+
+    # Platform breakdown (top 8)
+    platform_rows = (
+        await db.execute(
+            select(TrendingSnapshot.platform, func.count().label("cnt"))
+            .group_by(TrendingSnapshot.platform)
+            .order_by(func.count().desc())
+            .limit(8)
+        )
+    ).all()
+    platforms_breakdown = {r.platform: r.cnt for r in platform_rows}
+
+    # --- tracks ---
+    track_total = (await db.execute(select(func.count()).select_from(Track))).scalar() or 0
+    with_spotify_id = (
+        await db.execute(
+            select(func.count()).select_from(Track).where(Track.spotify_id.isnot(None))
+        )
+    ).scalar() or 0
+    with_audio_features = (
+        await db.execute(
+            select(func.count()).select_from(Track).where(Track.audio_features.isnot(None))
+        )
+    ).scalar() or 0
+
+    # --- predictions ---
+    pred_total = (await db.execute(select(func.count()).select_from(Prediction))).scalar() or 0
+
+    # --- backtest_results ---
+    bt_total = (await db.execute(select(func.count()).select_from(BacktestResult))).scalar() or 0
+
+    # --- scraper_configs count ---
+    cfg_total = len(scraper_rows)
+    cfg_enabled = sum(1 for s in scraper_rows if s.enabled)
+
+    return {
+        "data": {
+            "scrapers": scrapers,
+            "tables": {
+                "trending_snapshots": {
+                    "total_rows": snap_total,
+                    "latest_date": snap_latest.isoformat() if snap_latest else None,
+                    "distinct_dates": snap_distinct_dates,
+                    "platforms": platforms_breakdown,
+                },
+                "tracks": {
+                    "total_rows": track_total,
+                    "with_spotify_id": with_spotify_id,
+                    "with_audio_features": with_audio_features,
+                },
+                "predictions": {"total_rows": pred_total},
+                "backtest_results": {"total_rows": bt_total},
+                "scraper_configs": {"total_rows": cfg_total, "enabled": cfg_enabled},
+            },
+            "coverage": {
+                "audio_features_pct": round(with_audio_features / track_total * 100, 1) if track_total else 0,
+                "prediction_coverage_pct": round(pred_total / track_total * 100, 1) if track_total else 0,
+                "model_trained": pred_total > 0,
+            },
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    }

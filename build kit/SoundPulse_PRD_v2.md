@@ -437,9 +437,39 @@ Vocal style, instrument palette, build patterns, hook placement, sonic similarit
 
 - 959 genres, hierarchical, 12 root categories
 - Bidirectional mappings to Spotify, Apple Music, MusicBrainz, Chartmetric
-- Genre opportunity score = trending velocity × inverse saturation
-- Per-genre sonic profile (average features across trending tracks)
 - Genre classifier auto-assigns tracks on ingest
+
+### Genre Opportunity Score — Exact Formula
+
+**Source:** `GET /api/v1/blueprint/genres` (Song Lab left panel)
+
+**How it's computed (on the fly, no precomputation):**
+
+1. Pull all track snapshots from the last 60 days, anchored to `MAX(snapshot_date)` in the DB (not `date.today()` — ensures historical backfill data always appears)
+2. Extract genre strings from `signals_json->>'genres'` (e.g. `"pop, indie pop, chill pop"`) — this is a raw Chartmetric field, NOT the `tracks.genres` array column
+3. Split by comma, normalize to lowercase, aggregate per tag:
+   - `total_composite_score` and `total_velocity` across all snapshots for that tag
+   - `track_count` = distinct entity IDs in this genre
+4. Compute:
+
+```
+momentum  = max(0, avg_velocity) / 10          # normalized 0-1
+quality   = avg_composite_score / 100           # normalized 0-1
+saturation = min(1.0, track_count / 50)         # >50 tracks = fully saturated
+
+opportunity_score = 0.4 × momentum + 0.4 × quality + 0.2 × (1 - saturation)
+```
+
+**Interpretation:**
+- High score = genre has rising velocity + high-scoring tracks + not yet crowded
+- A genre with 3 exceptional tracks beats a genre with 200 mediocre ones
+- Minimum 2 distinct tracks required to appear in results
+
+**Momentum label:** `rising` if avg_velocity > 0.5, `declining` if < -0.5, else `stable`
+
+### Genre Data Caveat (Current)
+
+Genre data lives in `signals_json` (raw Chartmetric strings like `"pop, chill pop"`) not in the `tracks.genres` column (a structured array). The genre classifier is supposed to parse these and populate `tracks.genres`, but currently only 102/2,146 tracks have the structured genres array populated. The Song Lab and opportunity scoring work correctly from `signals_json` directly.
 
 ---
 
@@ -517,20 +547,93 @@ Validated via Granger causality tests after 8 weeks of data. Re-evaluated quarte
 ## 11. Blueprint Generation
 
 **Endpoint:** `POST /api/v1/blueprint/generate`
+**UI:** Song Lab → select genre → select model → Generated Prompt
 
-1. Query 30-60 days of trending snapshots for the genre
-2. Aggregate Song DNA across top performers
-3. Compute sonic profile (avg tempo, dominant key, mean energy/valence)
-4. Detect dominant lyrical themes
-5. Translate to model-specific prompt (Suno/Udio/SOUNDRAW/MusicGen)
+### How It Works (Implementation Detail)
+
+**No LLM is used.** Prompts are generated entirely by deterministic Python code in `api/services/blueprint_service.py`. The process:
+
+1. Query last 60 days of snapshots for the genre (anchored to `MAX(snapshot_date)`)
+2. Filter snapshots where `signals_json` contains the genre tag
+3. Aggregate Song DNA across matching tracks:
+   - From `signals_json->>'audio_features'`: avg tempo, dominant key/mode, mean energy/valence/danceability
+   - From `signals_json->>'primary_theme'` and `themes`: lyrical theme frequency count
+   - From `signals_json->>'spotify_popularity'`: proxy for energy if no audio features
+4. Format into a model-specific string template:
+
+```
+Suno:   "STYLE: {genre}, {tempo} BPM, {key} {mode}, {mood} mood, {energy_desc}"
+        + lyrics skeleton with [Intro]/[Verse]/[Pre-Chorus]/[Chorus]/[Bridge]/[Outro] tags
+
+Udio:   "PROMPT: {genre}, {tempo} BPM, {mood}, {energy}, Themes: {themes}"
+
+SOUNDRAW: JSON params { mood, genre, tempo, energy_levels, length }
+
+MusicGen: "PROMPT: {genre}, {tempo} BPM, {mood}, {energy}, instrumental"
+```
+
+5. Return blueprint (sonic profile + lyrical profile) + formatted prompt
+
+### Current Limitation
+
+Only 121/2,146 tracks have audio features populated (the `spotify_audio` scraper has never run despite being enabled). Most blueprints currently lack tempo/key/energy data and produce generic prompts. Once `spotify_audio` scraper accumulates data, blueprints will be rich and specific.
+
+### Prompt Generation — On the Fly vs. Precomputed
+
+**Entirely on the fly.** Nothing is precomputed on ingest. When you click a genre:
+- Fresh DB query runs
+- Latest 60 days of data aggregated
+- Prompt formatted in ~100-200ms
+
+**No caching** (deliberately — genre trends shift daily, stale blueprints waste song generation budget).
 
 ---
 
 ## 12. Model Validation & Backtesting
 
-For each monthly evaluation period: predict using historical data, compare against actuals.
+**UI:** Model Validation page — timeline charts, accuracy metrics, genre breakdown table
 
-Metrics: MAE, RMSE, precision, recall, F1. Filterable by genre and entity type. Frontend page with charts.
+### What the Model Is
+
+Currently: `sklearn.ensemble.GradientBoostingClassifier` (basic mode) or advanced LightGBM ensemble (Phase 2+).
+
+**Binary classification:** Will this entity reach top-20 within 14 days? (yes/no)
+
+**Training data requirements:**
+- Entities with ≥14 days of snapshot history
+- Minimum 30 valid training rows (otherwise training is skipped)
+- Features computed as of a cutoff date; label = did it reach top-20 in the following 14 days
+
+**Current status (April 2026):** Model has not run successfully yet. Only 4-5 distinct recent snapshot dates exist, insufficient to generate 30 labeled training examples. Once daily scraping accumulates 14+ consecutive days, the 3am Celery task will produce the first real model.
+
+### Feature Engineering
+
+Features extracted per entity at a cutoff date:
+- `avg_score`, `max_score`, `velocity`, `acceleration` (from trending_snapshots)
+- `platform_count` (distinct platforms with data)
+- `days_since_first_seen`, `snapshot_count`
+- `genre_*` flags (from signals_json genre strings)
+- `audio_*` features (tempo, energy, valence — when populated)
+
+### Backtesting
+
+For each evaluation period (monthly slices of historical data):
+1. Compute features as-of period start
+2. Predict using stored model
+3. Compare against actuals (did they reach top-20?)
+4. Record: MAE, precision, recall, F1, sample count
+
+Results stored in `backtest_results` table, visualized in Model Validation page.
+
+**Current status:** `backtest_results` is empty. The Celery Beat task runs at 4:30am but requires: (a) a trained model to exist, and (b) the subprocess path to resolve correctly in Railway's container.
+
+### Why the Model Validation Page is Empty
+
+1. `predictions` table: 0 rows — model has never trained successfully
+2. `backtest_results` table: 0 rows — backtest has never run
+3. Root cause: insufficient consecutive daily data + container working directory issue with `subprocess.run([sys.executable, "scripts/train_model.py"])`
+
+**ETA for first real predictions:** ~14 days after daily scraping stabilizes (mid-April 2026)
 
 ---
 
@@ -936,7 +1039,148 @@ Example: "If I wanted a Christian rock single, what should the artist and song l
 
 ---
 
-## 22. API Reference
+## 21.5. Full Data Architecture Diagram
+
+```
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║  DATA SOURCES                                                                            ║
+╠══════════════╦══════════════════╦════════════════════╦══════════════╦════════════════════╣
+║  CHARTMETRIC ║  SPOTIFY DIRECT  ║  SPOTIFY AUDIO     ║   SHAZAM     ║  GENIUS (ready)    ║
+║  $350/mo     ║  Free API        ║  Analysis API      ║  RapidAPI    ║  Free API          ║
+║  2 req/sec   ║  every 6h        ║  daily             ║  every 4h    ║  daily             ║
+╠══════════════╬══════════════════╬════════════════════╬══════════════╬════════════════════╣
+║ chart_rank   ║ search results   ║ tempo (BPM)        ║ chart_rank   ║ lyrics text        ║
+║ artist_name  ║ track_id         ║ key + mode         ║ shazam_id    ║ verse/chorus       ║
+║ track_title  ║ artist_name      ║ energy (0-1)       ║ track_title  ║ themes             ║
+║ spotify_id   ║ popularity       ║ valence (0-1)      ║ artist_name  ║ vocabulary         ║
+║ genres str   ║ genre hints      ║ danceability (0-1) ║              ║ word density       ║
+║ isrc         ║                  ║ acousticness       ║              ║                    ║
+║ platform_rank║                  ║ instrumentalness   ║              ║                    ║
+║ raw_score    ║                  ║ loudness           ║              ║                    ║
+╚══════════════╩══════════════════╩════════════════════╩══════════════╩════════════════════╝
+         │                │                 │                 │                │
+         ▼                ▼                 ▼                 ▼                ▼
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║  ENTITY RESOLUTION (api/services/entity_resolution.py)                                  ║
+║  Deduplicates across sources using: spotify_id → ISRC → fuzzy title+artist (RapidFuzz  ║
+║  >85%) → creates new entity if no match                                                  ║
+╚═══════════════════════════════════════╦══════════════════════════════════════════════════╝
+                                        │
+                    ╔═══════════════════╩═══════════════════╗
+                    ▼                                       ▼
+╔═══════════════════════════════╗         ╔═════════════════════════════════╗
+║  TABLE: tracks                ║         ║  TABLE: artists                 ║
+║  id (UUID, PK)                ║         ║  id (UUID, PK)                  ║
+║  title                        ║         ║  name                           ║
+║  artist_id (FK → artists)     ║         ║  spotify_id                     ║
+║  spotify_id                   ║         ║  image_url                      ║
+║  isrc                         ║         ║  genres[] ← classifier          ║
+║  chartmetric_id               ║         ║  metadata_json                  ║
+║  genres[] ← classifier        ║         ║  audio_profile                  ║
+║  audio_features ←spotify_audio║         ╚═════════════════════════════════╝
+║  metadata_json                ║
+╚═══════════════════════════════╝
+                    │
+                    ▼
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║  TABLE: trending_snapshots  (one row per entity × platform × date)                       ║
+╠══════════════════════════════════════════════════════════════════════════════════════════╣
+║  RAW FIELDS (from scrapers):                                                             ║
+║    entity_id, entity_type, snapshot_date, platform                                      ║
+║    platform_rank     ← chart position from source                                       ║
+║    platform_score    ← raw score from source                                            ║
+║    signals_json      ← full payload blob: genres str, audio_features, artist_name,      ║
+║                         spotify_popularity, themes, etc.                                 ║
+║                                                                                          ║
+║  COMPUTED FIELDS (on ingest, api/services/normalization.py + aggregation.py):            ║
+║    normalized_score  ← rank/score normalized to 0-100 across all entities/dates         ║
+║    velocity          ← score change vs. same entity 7 days prior                        ║
+║    composite_score   ← weighted avg of normalized_score across all platforms for entity ║
+╚══════════════════════════════════════════════════════════════════════════════════════════╝
+         │                              │                              │
+         ▼                              ▼                              ▼
+╔═══════════════════╗    ╔══════════════════════════╗    ╔════════════════════════════════╗
+║  TABLE: genres    ║    ║  BLUEPRINT SERVICE        ║    ║  ML MODEL (ml/train.py)        ║
+║  (static taxonomy)║    ║  on-the-fly, no LLM       ║    ║  GradientBoostingClassifier    ║
+║  959 genres       ║    ║                           ║    ║  → ml/models/*.joblib          ║
+║  hierarchical     ║    ║  1. Pull 60d snapshots    ║    ║                                ║
+║  12 root categories║   ║  2. Extract genre from    ║    ║  INPUTS (per entity cutoff):   ║
+║  platform mappings║    ║     signals_json genres   ║    ║  avg_score, max_score          ║
+╚═══════════════════╝    ║  3. Avg audio_features    ║    ║  velocity, acceleration        ║
+                         ║  4. Count lyric themes    ║    ║  platform_count                ║
+                         ║  5. Compute opp score:    ║    ║  days_since_first_seen         ║
+                         ║     0.4×momentum          ║    ║  snapshot_count                ║
+                         ║   + 0.4×quality           ║    ║  genre flags                   ║
+                         ║   + 0.2×(1-saturation)    ║    ║  audio features (when avail)   ║
+                         ║  6. Format prompt string  ║    ║                                ║
+                         ║     per model (template)  ║    ║  OUTPUT:                       ║
+                         ╚══════════════════════════╝    ║  probability 0-1               ║
+                                    │                    ║  (will reach top-20 in 14d?)   ║
+                                    │                    ╚══════════════╦═════════════════╝
+                                    │                                   │
+                                    │                    ╔══════════════╩═════════════════╗
+                                    │                    ║  TABLE: predictions             ║
+                                    │                    ║  entity_id, entity_type         ║
+                                    │                    ║  predicted_score (probability)  ║
+                                    │                    ║  confidence                     ║
+                                    │                    ║  horizon (7d/30d/90d)           ║
+                                    │                    ║  predicted_at                   ║
+                                    │                    ║  resolved_at (after horizon)    ║
+                                    │                    ║  actual_score (feedback)        ║
+                                    │                    ╚══════════════╦═════════════════╝
+                                    │                                   │
+                                    ▼                                   ▼
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║  FRONTEND — WHERE EACH DATA POINT APPEARS                                                ║
+╠══════════════════╦══════════════════╦═══════════════════╦═══════════════╦═══════════════╣
+║  DASHBOARD       ║  EXPLORE         ║  SONG LAB         ║  MODEL VAL    ║  ASSISTANT    ║
+╠══════════════════╬══════════════════╬═══════════════════╬═══════════════╬═══════════════╣
+║ Trending Table:  ║ Trending Table   ║ Genre List:       ║ Timeline      ║ Live DB query ║
+║  track title     ║  (same as →)     ║  genre name       ║ charts:       ║ + PRD summary ║
+║  artist name     ║                  ║  opportunity_score║  predicted vs ║ always in     ║
+║  composite_score ║ Genre Tree:      ║  momentum label   ║  actual rate  ║ system prompt ║
+║  velocity        ║  959 genres from ║  track_count      ║               ║               ║
+║  platform badges ║  genres table    ║                   ║ Metric cards: ║ Topic keyword ║
+║  7d sparkline    ║                  ║ Blueprint Card:   ║  MAE           ║ detection →   ║
+║                  ║ Filters:         ║  avg tempo (BPM)  ║  precision    ║ injects       ║
+║ Breakout Preds:  ║  entity type     ║  key + mode       ║  recall       ║ relevant PRD  ║
+║  predicted score ║  time range      ║  energy %         ║  F1 score     ║ section       ║
+║  confidence bar  ║  genre           ║  mood/valence     ║               ║               ║
+║                  ║                  ║  lyrical themes   ║ Genre table:  ║               ║
+║ Genre Heatmap:   ║                  ║                   ║  per-genre    ║               ║
+║  genre names     ║                  ║ Prompt Output:    ║  MAE/F1       ║               ║
+║  momentum score  ║                  ║  Suno style text  ║               ║               ║
+║                  ║                  ║  + lyrics skeleton║               ║               ║
+║                  ║                  ║  Udio prompt      ║               ║               ║
+║                  ║                  ║  SOUNDRAW JSON    ║               ║               ║
+║                  ║                  ║  MusicGen prompt  ║               ║               ║
+╚══════════════════╩══════════════════╩═══════════════════╩═══════════════╩═══════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║  CELERY BEAT SCHEDULE (UTC)                                                              ║
+╠══════════════╦══════════════════╦═════════════════════════════════════════════════════════╣
+║  Time        ║  Task            ║  What it does                                          ║
+╠══════════════╬══════════════════╬═════════════════════════════════════════════════════════╣
+║  */4h :15    ║  chartmetric     ║  Pull Spotify/Shazam US charts → trending_snapshots    ║
+║  */6h :00    ║  spotify         ║  Search top tracks per genre → trending_snapshots      ║
+║  */4h :30    ║  shazam          ║  Pull Shazam chart → trending_snapshots                ║
+║  daily 2:00  ║  musicbrainz     ║  Enrich tracks with ISRC + genre tags                 ║
+║  daily 3:00  ║  train_model     ║  Retrain GBM on all history → ml/models/*.joblib       ║
+║  */6h :45    ║  gen_predictions ║  Score top-50 trending entities → predictions table   ║
+║  daily 4:30  ║  backtest        ║  Evaluate model vs actuals → backtest_results table   ║
+║  */15m       ║  health_check    ║  Ping all scraper endpoints                            ║
+╚══════════════╩══════════════════╩═════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║  DATA GAPS (April 2026)                                                                  ║
+╠══════════════════════════════════════════════════════════════════════════════════════════╣
+║  audio_features  121/2,146 tracks  spotify_audio scraper enabled but never run          ║
+║  tracks.genres   102/2,146 tracks  genre classifier runs on ingest but sparse results   ║
+║  predictions     0 rows            model needs 14+ consecutive days of history          ║
+║  backtest_results 0 rows           depends on predictions + container path fix           ║
+║  genius_lyrics   0 rows            scraper ready but disabled in scraper_configs         ║
+╚══════════════════════════════════════════════════════════════════════════════════════════╝
+```
 
 | Method | Endpoint | Description |
 |---|---|---|

@@ -217,3 +217,13 @@ export function useAssistantChat() {
     mutationFn: ({ body }) => makeRequest('POST', '/assistant/chat', {}, body),
   })
 }
+
+// Data Flow / Architecture diagram hook
+export function useDataFlow() {
+  return useQuery({
+    queryKey: ['admin', 'data-flow'],
+    queryFn: () => makeRequest('GET', '/admin/data-flow'),
+    refetchInterval: 60_000,  // auto-refresh every 60s
+    staleTime: 30_000,
+  })
+}

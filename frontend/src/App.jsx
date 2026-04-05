@@ -8,6 +8,7 @@ import ApiPlayground from './pages/ApiPlayground'
 import ModelValidation from './pages/ModelValidation'
 import SongLab from './pages/SongLab'
 import Assistant from './pages/Assistant'
+import DataFlow from './pages/DataFlow'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -52,6 +53,7 @@ function App() {
             <Route path="/model-validation" element={<ErrorBoundary><ModelValidation /></ErrorBoundary>} />
             <Route path="/song-lab" element={<ErrorBoundary><SongLab /></ErrorBoundary>} />
             <Route path="/assistant" element={<ErrorBoundary><Assistant /></ErrorBoundary>} />
+            <Route path="/data-flow" element={<ErrorBoundary><DataFlow /></ErrorBoundary>} />
           </Route>
         </Routes>
       </BrowserRouter>

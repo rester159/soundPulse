@@ -110,9 +110,13 @@ def train_model():
     try:
         import subprocess
         import sys
+        # Use absolute path so this works regardless of CWD in the Railway container
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script_path = os.path.join(project_root, "scripts", "train_model.py")
         result = subprocess.run(
-            [sys.executable, "scripts/train_model.py"],
+            [sys.executable, script_path],
             capture_output=True, text=True, timeout=1800,  # 30 min max
+            cwd=project_root,
         )
         logger.info("Training stdout: %s", result.stdout[-500:] if result.stdout else "")
         if result.returncode != 0:

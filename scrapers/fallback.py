@@ -165,4 +165,17 @@ def build_chains(credentials: dict, api_base_url: str, admin_key: str) -> dict[s
         )
         chains["chartmetric"] = FallbackChain("chartmetric", [(cm, DataQuality.LIVE)])
 
+    # Spotify Audio Enrichment (enriches tracks already in DB with audio features)
+    if credentials.get("spotify_client_id"):
+        from scrapers.spotify_audio import SpotifyAudioScraper
+        spotify_audio = SpotifyAudioScraper(
+            credentials={
+                "client_id": credentials["spotify_client_id"],
+                "client_secret": credentials.get("spotify_client_secret", ""),
+            },
+            api_base_url=api_base_url,
+            admin_key=admin_key,
+        )
+        chains["spotify_audio"] = FallbackChain("spotify_audio", [(spotify_audio, DataQuality.LIVE)])
+
     return chains

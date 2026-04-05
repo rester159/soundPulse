@@ -77,5 +77,10 @@ app.config_from_object({
             "task": "scrapers.tasks.run_backtest",
             "schedule": crontab(minute=30, hour=4),  # 4:30am UTC daily, after training
         },
+        "spotify-audio-enrich-daily": {
+            "task": "scrapers.tasks.run_scraper",
+            "schedule": crontab(minute=0, hour=5),  # 5am UTC daily, after main scrapes
+            "args": ("spotify_audio",),
+        },
     },
 })
