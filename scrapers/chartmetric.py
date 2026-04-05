@@ -70,20 +70,20 @@ class ChartmetricScraper(BaseScraper):
             "path": "/api/charts/shazam",
             "params": {},
         },
-        # Apple Music and TikTok charts require higher-tier Chartmetric access.
-        # Uncomment when plan is upgraded or access is granted:
-        # {
-        #     "source_platform": "apple-music",
-        #     "chart_type": "top",
-        #     "path": "/api/charts/applemusic",
-        #     "params": {"type": "top", "interval": "daily"},
-        # },
-        # {
-        #     "source_platform": "tiktok",
-        #     "chart_type": "viral",
-        #     "path": "/api/charts/tiktok",
-        #     "params": {"interval": "daily"},
-        # },
+        # Apple Music charts — /tracks sub-resource required (confirmed by Chartmetric support Apr 2026)
+        {
+            "source_platform": "apple_music",
+            "chart_type": "top",
+            "path": "/api/charts/applemusic/tracks",
+            "params": {"type": "top"},
+        },
+        # TikTok charts — /tracks sub-resource required (confirmed by Chartmetric support Apr 2026)
+        {
+            "source_platform": "tiktok",
+            "chart_type": "viral",
+            "path": "/api/charts/tiktok/tracks",
+            "params": {},
+        },
     ]
 
     def __init__(self, credentials: dict, api_base_url: str, admin_key: str):
