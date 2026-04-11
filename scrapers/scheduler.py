@@ -50,156 +50,21 @@ async def _run_scraper_job(scraper_id: str):
         config.last_run_at = datetime.now(timezone.utc)
         await db.commit()
 
-    # Import and run the appropriate scraper
+    # Resolve the scraper via the registry (scrapers/registry.py).
+    # Adding a new scraper is a one-line edit to SCRAPER_REGISTRY — the
+    # scheduler stays agnostic.
+    from scrapers.registry import load_scraper
+
     stats = {}
     error_msg = None
     api_url = os.environ.get("SOUNDPULSE_API_URL", "http://localhost:8000")
     admin_key = os.environ.get("API_ADMIN_KEY", "")
-    scraper = None
-    try:
-        if scraper_id == "spotify":
-            from scrapers.spotify import SpotifyScraper
-            scraper = SpotifyScraper(
-                credentials={
-                    "client_id": os.environ.get("SPOTIFY_CLIENT_ID", ""),
-                    "client_secret": os.environ.get("SPOTIFY_CLIENT_SECRET", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "chartmetric":
-            from scrapers.chartmetric import ChartmetricScraper
-            scraper = ChartmetricScraper(
-                credentials={
-                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "chartmetric_deep_us":
-            # P1-059: continuous daily run of the full deep US ENDPOINT_MATRIX.
-            # This is the comprehensive pass — ~281 chart pulls covering every
-            # platform × chart_type × genre fan-out for the US. Runs once a day;
-            # the live `chartmetric` scraper above keeps its 4h cadence on the
-            # small confirmed endpoint set for freshness.
-            from scrapers.chartmetric_deep_us import ChartmetricDeepUSScraper
-            scraper = ChartmetricDeepUSScraper(
-                credentials={
-                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "chartmetric_playlist_crawler":
-            # Phase 2a: paginate top US playlists on Spotify/AppleMusic/Deezer,
-            # then fetch each playlist's tracks. Weekly cadence. Captures the
-            # long-tail tracks that live in playlists but never chart.
-            from scrapers.chartmetric_playlist_crawler import ChartmetricPlaylistCrawler
-            scraper = ChartmetricPlaylistCrawler(
-                credentials={
-                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "chartmetric_artist_tracks":
-            # Phase 2b: for every artist in our DB with a chartmetric_id,
-            # call /api/artist/{id}/tracks and harvest their full catalog.
-            # Weekly cadence. Captures deep catalog tracks that never chart.
-            from scrapers.chartmetric_artist_tracks import ChartmetricArtistTracksScraper
-            scraper = ChartmetricArtistTracksScraper(
-                credentials={
-                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "chartmetric_us_cities":
-            # Phase 3: top US cities × Apple Music tracks per city.
-            # Auto-discovers top 20 US cities by population each run via
-            # /api/cities?country_code=US, then pulls /charts/applemusic/tracks
-            # with city_id + 7 top genres per city = 140 calls per run.
-            # Captures regionally-popular tracks the national charts miss.
-            from scrapers.chartmetric_us_cities import ChartmetricUSCitiesScraper
-            scraper = ChartmetricUSCitiesScraper(
-                credentials={
-                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "chartmetric_artist_stats":
-            # Phase 4: per-artist platform stats enrichment. Iterates every
-            # artist with a chartmetric_id and calls /api/artist/{id}/stat/
-            # {platform} for 6 platforms (spotify, instagram, tiktok, youtube,
-            # twitter, shazam). Merges latest values into
-            # artists.metadata_json.chartmetric_stats. Weekly cadence.
-            from scrapers.chartmetric_artist_stats import ChartmetricArtistStatsScraper
-            scraper = ChartmetricArtistStatsScraper(
-                credentials={
-                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "shazam":
-            from scrapers.shazam import ShazamScraper
-            scraper = ShazamScraper(
-                credentials={
-                    "rapidapi_key": os.environ.get("SHAZAM_RAPIDAPI_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "apple_music":
-            from scrapers.apple_music import AppleMusicScraper
-            scraper = AppleMusicScraper(
-                credentials={
-                    "team_id": os.environ.get("APPLE_MUSIC_TEAM_ID", ""),
-                    "key_id": os.environ.get("APPLE_MUSIC_KEY_ID", ""),
-                    "private_key_path": os.environ.get("APPLE_MUSIC_PRIVATE_KEY_PATH", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "musicbrainz":
-            from scrapers.musicbrainz import MusicBrainzEnricher
-            scraper = MusicBrainzEnricher(
-                credentials={},
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "radio":
-            from scrapers.radio import RadioScraper
-            scraper = RadioScraper(
-                credentials={},
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "kworb":
-            from scrapers.kworb import KworbScraper
-            scraper = KworbScraper(
-                credentials={},
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "chartmetric_artists":
-            from scrapers.chartmetric_artists import ChartmetricArtistsScraper
-            scraper = ChartmetricArtistsScraper(
-                credentials={
-                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "spotify_audio":
-            from scrapers.spotify_audio import SpotifyAudioScraper
-            scraper = SpotifyAudioScraper(
-                credentials={
-                    "client_id": os.environ.get("SPOTIFY_CLIENT_ID", ""),
-                    "client_secret": os.environ.get("SPOTIFY_CLIENT_SECRET", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        elif scraper_id == "genius_lyrics":
-            from scrapers.genius_lyrics import GeniusLyricsScraper
-            scraper = GeniusLyricsScraper(
-                credentials={
-                    "api_key": os.environ.get("GENIUS_API_KEY", ""),
-                },
-                api_base_url=api_url, admin_key=admin_key,
-            )
-        else:
-            logger.warning("Unknown scraper: %s", scraper_id)
-            return
+    scraper = load_scraper(scraper_id, api_base_url=api_url, admin_key=admin_key)
+    if scraper is None:
+        logger.warning("Unknown scraper: %s", scraper_id)
+        return
 
+    try:
         try:
             stats = await scraper.run()
         finally:
