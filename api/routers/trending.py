@@ -70,13 +70,23 @@ async def ingest_trending(
         matched_by = "new" if is_new else "resolved"
 
     # Merge genre-relevant signals from the ingest payload into entity metadata
-    # so the genre classifier can use them
+    # so the genre classifier can use them.
+    # P1-012: also grab Chartmetric's raw `signals.genres` field (which is a
+    # comma-separated string like "pop, dance pop, chill pop") and store it
+    # under `chartmetric_genres`. The classifier's _normalize_label_list
+    # handles both list and string shapes.
     signals = body.signals or {}
     metadata_updates = {}
     for key in ("spotify_genres", "apple_music_genres", "musicbrainz_tags",
                 "chartmetric_genres", "tiktok_hashtags", "playlist_genres"):
         if key in signals:
             metadata_updates[key] = signals[key]
+    # Chartmetric comma-string fallback — if `chartmetric_genres` wasn't set
+    # explicitly, check the raw `genres` / `track_genre` fields.
+    if "chartmetric_genres" not in metadata_updates:
+        raw_cm_genres = signals.get("genres") or signals.get("track_genre")
+        if raw_cm_genres:
+            metadata_updates["chartmetric_genres"] = raw_cm_genres
     if metadata_updates:
         entity.metadata_json = {**(entity.metadata_json or {}), **metadata_updates}
 

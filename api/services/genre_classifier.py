@@ -123,6 +123,11 @@ class ClassificationResult:
     primary_genres: list[str]
     all_candidates: list[GenreCandidate]
     classification_quality: str
+    # P1-013: richer quality metric beyond the single high/medium/low label
+    signal_sources: dict[str, int] = field(default_factory=dict)  # {"platform_labels": 3, "audio_features": 1, ...}
+    taxonomy_matched_count: int = 0   # how many unique genre IDs had any signal
+    top_candidate_score: float = 0.0  # best candidate's raw score
+    platform_hit_count: int = 0       # how many distinct platforms contributed
 
 
 # ---------------------------------------------------------------------------
@@ -220,11 +225,18 @@ class GenreClassifier:
                 merged[genre_id]["score"] += weighted
                 merged[genre_id]["signals"][signal_name] = raw_score
 
+        # P1-013: compute richer quality metrics
+        signal_sources = {name: len(scores) for name, scores in signal_results.items() if scores}
+
         if not merged:
             return ClassificationResult(
                 primary_genres=[],
                 all_candidates=[],
                 classification_quality="low",
+                signal_sources=signal_sources,
+                taxonomy_matched_count=0,
+                top_candidate_score=0.0,
+                platform_hit_count=len(self._last_platform_hits),
             )
 
         candidates = [
@@ -245,20 +257,66 @@ class GenreClassifier:
             primary_genres=[c.genre_id for c in primary],
             all_candidates=ranked,
             classification_quality=quality,
+            signal_sources=signal_sources,
+            taxonomy_matched_count=len(merged),
+            top_candidate_score=ranked[0].confidence if ranked else 0.0,
+            platform_hit_count=len(self._last_platform_hits),
         )
 
     async def classify_and_save(
         self, entity: Union[Artist, Track]
     ) -> ClassificationResult:
-        """Classify and persist the result to the entity's genres field."""
+        """Classify, persist genres on the entity, and write rich quality
+        metrics into metadata_json under `classification_details`.
+        """
         result = await self.classify(entity)
         if result.primary_genres:
             entity.genres = result.primary_genres
+
+        # P1-013: write richer classification details so we can debug why
+        # classification succeeded or failed without re-running.
+        existing_meta = entity.metadata_json or {}
+        entity.metadata_json = {
+            **existing_meta,
+            "classification_quality": result.classification_quality,
+            "classification_details": {
+                "primary_genres": result.primary_genres,
+                "signal_sources": result.signal_sources,
+                "taxonomy_matched_count": result.taxonomy_matched_count,
+                "top_candidate_score": result.top_candidate_score,
+                "platform_hit_count": result.platform_hit_count,
+                "candidate_count": len(result.all_candidates),
+            },
+        }
         return result
 
     # ------------------------------------------------------------------
     # Signal 1: Platform Label Mapping (weight 0.30)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_label_list(value: Any) -> list[str]:
+        """
+        Accept either a list of genre labels OR a comma-separated string
+        (optionally with semicolons, slashes, pipes) and return a clean list.
+
+        P1-012: Chartmetric ships genres as a comma-string like
+        `"pop, dance pop, chill pop"` inside `signals_json.genres` — NOT
+        as a structured array. The trending ingest path copied that into
+        `metadata_json` unchanged, and the classifier's original iteration
+        walked character-by-character through the string. This is the root
+        cause of ~95% of tracks being unclassified.
+        """
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if item and str(item).strip()]
+        if isinstance(value, str):
+            # Split on comma, semicolon, slash, pipe
+            import re
+            parts = re.split(r"[,;/|]+", value)
+            return [p.strip() for p in parts if p.strip()]
+        return []
 
     def _signal_platform_labels(self, entity: Union[Artist, Track]) -> dict[str, float]:
         meta = entity.metadata_json or {}
@@ -266,11 +324,23 @@ class GenreClassifier:
         # Track how many distinct platforms contributed to each genre
         platform_hits: dict[str, int] = {}
 
+        # P1-012: normalize every source list in case it came in as a
+        # comma-string. Also check `genres` (the raw Chartmetric field that
+        # the bulk endpoint copies straight through) — it maps to
+        # chartmetric_reverse because that's where Chartmetric's labels live.
+        raw_chartmetric_genres = (
+            meta.get("chartmetric_genres") or meta.get("genres") or []
+        )
+
         source_configs: list[tuple[list[str], dict[str, list[str]], float]] = [
-            (meta.get("spotify_genres", []), self.spotify_reverse, 1.0),
-            (meta.get("apple_music_genres", []), self.apple_reverse, 0.8),
-            (meta.get("musicbrainz_tags", []), self.musicbrainz_reverse, 0.7),
-            (meta.get("chartmetric_genres", []), self.chartmetric_reverse, 0.8),
+            (self._normalize_label_list(meta.get("spotify_genres", [])),
+             self.spotify_reverse, 1.0),
+            (self._normalize_label_list(meta.get("apple_music_genres", [])),
+             self.apple_reverse, 0.8),
+            (self._normalize_label_list(meta.get("musicbrainz_tags", [])),
+             self.musicbrainz_reverse, 0.7),
+            (self._normalize_label_list(raw_chartmetric_genres),
+             self.chartmetric_reverse, 0.8),
         ]
 
         unmatched_labels: list[str] = []
@@ -486,27 +556,58 @@ class GenreClassifier:
         entity: Union[Artist, Track],
         is_track: bool,
     ) -> dict[str, float]:
-        # Determine root categories from the entity (or its artist)
+        # Determine root categories from the entity (or its artist).
+        # For tracks, we need the artist's genres. Accessing entity.artist on
+        # an async-loaded Track fails with MissingGreenlet if the relationship
+        # wasn't eagerly loaded — catch that explicitly instead of silently
+        # returning {}.
         source_genres: list[str] = []
+        artist_id: Any = None
         if is_track:
-            artist = getattr(entity, "artist", None)
-            if artist:
+            try:
+                artist = getattr(entity, "artist", None)
+            except Exception as exc:
+                logger.warning(
+                    "[genre-classifier] neighbor inference: could not access "
+                    "entity.artist for track %s (likely not eager-loaded): %s",
+                    getattr(entity, "id", None), exc,
+                )
+                artist = None
+            if artist is not None:
                 source_genres = list(getattr(artist, "genres", None) or [])
+                artist_id = getattr(artist, "id", None)
+            else:
+                # Fall back: load the artist by FK
+                try:
+                    from api.models.artist import Artist as ArtistModel
+                    fk = getattr(entity, "artist_id", None)
+                    if fk:
+                        result = await self.db.execute(
+                            select(ArtistModel).where(ArtistModel.id == fk)
+                        )
+                        artist = result.scalar_one_or_none()
+                        if artist:
+                            source_genres = list(getattr(artist, "genres", None) or [])
+                            artist_id = artist.id
+                except Exception as exc:
+                    logger.warning(
+                        "[genre-classifier] neighbor inference fallback load "
+                        "failed for track %s: %s",
+                        getattr(entity, "id", None), exc,
+                    )
         else:
             source_genres = list(getattr(entity, "genres", None) or [])
+            artist_id = getattr(entity, "id", None)
 
         root_categories = list({g.split(".")[0] for g in source_genres if g})
         if not root_categories:
             return {}
 
-        # Determine entity ID to exclude
-        entity_id = getattr(entity, "id", None)
-        if is_track:
-            artist = getattr(entity, "artist", None)
-            if artist:
-                entity_id = artist.id
-
-        if entity_id is None:
+        # CORRECTED: previously fell back to entity.id (the track's UUID)
+        # when artist couldn't be resolved — that comparison against the
+        # artists table would never match and made the filter meaningless.
+        # Now we only run the query when we have a real artist_id.
+        if artist_id is None:
             return {}
 
         try:
@@ -517,11 +618,17 @@ class GenreClassifier:
                     "AND id != :eid "
                     "LIMIT 20"
                 ),
-                {"roots": root_categories, "eid": str(entity_id)},
+                {"roots": root_categories, "eid": str(artist_id)},
             )
             rows = result.fetchall()
-        except Exception:
-            logger.debug("Neighbor inference query failed for %s", entity_id)
+        except Exception as exc:
+            # AUD-005 + AUD-006 family: was logger.debug (invisible). Promoted
+            # to warning so neighbor-inference failures surface in logs.
+            logger.warning(
+                "[genre-classifier] neighbor inference query failed "
+                "for artist_id=%s roots=%s: %s",
+                artist_id, root_categories, exc,
+            )
             return {}
 
         if not rows:

@@ -1028,6 +1028,67 @@ async def put_model_config(
 
 
 # ---------------------------------------------------------------------------
+# Tracks needing audio feature enrichment (AUD-011 fix)
+# ---------------------------------------------------------------------------
+#
+# Returns tracks that have a spotify_id but no audio_features yet. Consumed
+# by `scrapers/spotify_audio.py` to find work to do. Previously the scraper
+# tried to parse the /trending response for this — that endpoint has a
+# different shape and doesn't include audio_features, so the scraper always
+# got 0 results and silently exited. See L001 / AUD-011 / P1-004.
+
+@router.get("/api/v1/admin/tracks/needing-audio-features")
+async def get_tracks_needing_audio_features(
+    limit: int = 500,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Return tracks with a spotify_id but no audio_features.
+
+    Cap limit at 1000 to prevent runaway queries.
+    """
+    from sqlalchemy import or_, text as sa_text
+
+    from api.models.track import Track
+
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
+
+    result = await db.execute(
+        select(Track.id, Track.spotify_id, Track.title, Track.artist_id, Track.isrc)
+        .where(
+            Track.spotify_id.isnot(None),
+            or_(
+                Track.audio_features.is_(None),
+                sa_text("tracks.audio_features::text = '{}'::text"),
+            ),
+        )
+        .order_by(Track.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = result.all()
+
+    return {
+        "data": [
+            {
+                "track_id": str(r.id),
+                "spotify_id": r.spotify_id,
+                "title": r.title,
+                "isrc": r.isrc,
+                "artist_id": str(r.artist_id) if r.artist_id else None,
+            }
+            for r in rows
+        ],
+        "limit": limit,
+        "offset": offset,
+        "returned": len(rows),
+    }
+
+
+# ---------------------------------------------------------------------------
 # DB Stats — diagnostic view (P2.I, PRD §22.2)
 # ---------------------------------------------------------------------------
 #

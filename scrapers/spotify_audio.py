@@ -105,61 +105,57 @@ class SpotifyAudioScraper(BaseScraper):
 
     async def _fetch_tracks_needing_enrichment(self) -> list[dict[str, Any]]:
         """
-        Query the SoundPulse API to find tracks with spotify_id that are
-        missing audio_features in their signals.
+        Query the SoundPulse API to find tracks with spotify_id but no
+        audio_features yet.
 
-        Fetches recent trending data and filters for tracks without audio data.
+        AUD-011 fix: the previous implementation tried to parse the
+        /api/v1/trending response — which doesn't include audio_features,
+        uses `limit`/`offset` not `page`/`per_page`, and returns a different
+        item shape. The scraper silently got 0 results for months. Now
+        using the purpose-built /api/v1/admin/tracks/needing-audio-features
+        endpoint which queries the DB directly.
         """
         tracks: list[dict[str, Any]] = []
-        page = 1
-        max_pages = 20
+        offset = 0
+        limit = 500
+        max_iterations = 20  # hard cap: 10,000 tracks per run
 
-        while page <= max_pages:
+        for _ in range(max_iterations):
             try:
                 resp = await self.client.get(
-                    f"{self.api_base_url}/api/v1/trending",
-                    params={
-                        "platform": "spotify",
-                        "entity_type": "track",
-                        "page": page,
-                        "per_page": 100,
-                    },
+                    f"{self.api_base_url}/api/v1/admin/tracks/needing-audio-features",
+                    params={"limit": limit, "offset": offset},
                     headers={"X-API-Key": self.admin_key},
                 )
                 if resp.status_code != 200:
                     logger.warning(
-                        "[spotify_audio] Failed to fetch tracks page %d: HTTP %d",
-                        page, resp.status_code,
+                        "[spotify_audio] Failed to fetch tracks: HTTP %d body=%s",
+                        resp.status_code, resp.text[:200],
                     )
                     break
 
-                data = resp.json()
-                items = data.get("items", data) if isinstance(data, dict) else data
-                if not items:
+                body = resp.json()
+                rows = body.get("data", [])
+                if not rows:
                     break
 
-                for item in items:
-                    entity_id = item.get("entity_identifier", {})
-                    spotify_id = entity_id.get("spotify_id", "")
-                    signals = item.get("signals", {})
-                    audio_feats = signals.get("audio_features", {})
+                for row in rows:
+                    spotify_id = row.get("spotify_id")
+                    if not spotify_id:
+                        continue
+                    tracks.append({
+                        "spotify_id": spotify_id,
+                        "track_id": row.get("track_id", ""),
+                        "title": row.get("title", ""),
+                        "isrc": row.get("isrc"),
+                    })
 
-                    # Track has a spotify_id but no audio features yet
-                    if spotify_id and not audio_feats:
-                        tracks.append({
-                            "spotify_id": spotify_id,
-                            "title": entity_id.get("title", ""),
-                            "artist_name": entity_id.get("artist_name", ""),
-                            "raw_score": item.get("raw_score", 0),
-                        })
-
-                # If we got fewer items than requested, we've reached the end
-                if len(items) < 100:
+                if len(rows) < limit:
                     break
-                page += 1
+                offset += limit
 
-            except Exception as e:
-                logger.warning("[spotify_audio] Error fetching tracks page %d: %s", page, e)
+            except Exception as exc:
+                logger.warning("[spotify_audio] Error fetching tracks offset=%d: %s", offset, exc)
                 break
 
         logger.info(
