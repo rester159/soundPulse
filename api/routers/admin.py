@@ -1143,6 +1143,127 @@ async def merge_artist_metadata(
     return {"artist_id": artist_id, "merged_keys": list(body.keys())}
 
 
+@router.post("/api/v1/admin/artists/backfill-spotify-ids")
+async def backfill_artists_spotify_ids(
+    limit: int = 300,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    One-shot: for artists without a spotify_id, query Spotify's search
+    endpoint by name, fuzzy-match the top result, and persist the ID.
+
+    Only fills artists whose top search result is a strong (>=0.85
+    Levenshtein ratio) name match — never guesses. Capped at `limit`
+    per call so the caller can paginate manually and observe progress.
+
+    Spotify's /v1/search is not part of the November 2024 deprecation
+    set, so this works for client-credential apps. If auth or search
+    fails, returns a useful error.
+    """
+    import base64
+    import os
+    import httpx
+    from Levenshtein import ratio as levenshtein_ratio
+    from api.models.artist import Artist
+    from api.services.entity_resolution import _normalize_name
+
+    client_id = os.environ.get("SPOTIFY_CLIENT_ID", "")
+    client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        return {
+            "checked": 0, "matched": 0, "skipped": 0,
+            "error": "SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET not set",
+        }
+
+    limit = max(1, min(limit, 1000))
+
+    result = await db.execute(
+        select(Artist)
+        .where(Artist.spotify_id.is_(None))
+        .where(Artist.name.isnot(None))
+        .order_by(Artist.created_at.desc())
+        .limit(limit)
+    )
+    candidates = result.scalars().all()
+    if not candidates:
+        return {"checked": 0, "matched": 0, "skipped": 0, "detail": "no artists need backfill"}
+
+    encoded = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Auth
+        try:
+            auth_resp = await client.post(
+                "https://accounts.spotify.com/api/token",
+                data={"grant_type": "client_credentials"},
+                headers={
+                    "Authorization": f"Basic {encoded}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            auth_resp.raise_for_status()
+        except Exception as exc:
+            return {
+                "checked": 0, "matched": 0, "skipped": 0,
+                "error": f"Spotify auth failed: {exc}",
+            }
+
+        access_token = auth_resp.json()["access_token"]
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        matched = 0
+        skipped = 0
+        errors = 0
+        for artist in candidates:
+            try:
+                search_resp = await client.get(
+                    "https://api.spotify.com/v1/search",
+                    params={"q": artist.name, "type": "artist", "limit": 1},
+                    headers=headers,
+                )
+                if search_resp.status_code != 200:
+                    errors += 1
+                    continue
+                items = (search_resp.json().get("artists") or {}).get("items") or []
+                if not items:
+                    skipped += 1
+                    continue
+                top = items[0]
+                top_name = top.get("name", "")
+                top_id = top.get("id")
+                if not top_id:
+                    skipped += 1
+                    continue
+                score = levenshtein_ratio(_normalize_name(artist.name), _normalize_name(top_name))
+                if score < 0.85:
+                    skipped += 1
+                    continue
+                artist.spotify_id = top_id
+                # Capture Spotify-provided genre labels so the classifier
+                # sweep can use them on the next pass.
+                sp_genres = top.get("genres") or []
+                if sp_genres:
+                    artist.metadata_json = {
+                        **(artist.metadata_json or {}),
+                        "spotify_genres": sp_genres,
+                        "needs_classification": True,
+                    }
+                matched += 1
+            except Exception:
+                errors += 1
+            await asyncio.sleep(0.1)  # light throttle, ~10/s
+
+        await db.commit()
+
+    return {
+        "checked": len(candidates),
+        "matched": matched,
+        "skipped": skipped,
+        "errors": errors,
+        "detail": f"paged: call again to continue (Artist.spotify_id IS NULL ordered by created_at DESC)",
+    }
+
+
 @router.post("/api/v1/admin/artists/flag-for-classification")
 async def flag_artists_for_classification(
     db: AsyncSession = Depends(get_db),
