@@ -19,7 +19,21 @@ import time
 from datetime import date
 from typing import Any
 
-from scrapers.base import AuthenticationError, BaseScraper, RawDataPoint
+import httpx
+
+from scrapers.base import AuthenticationError, BaseScraper, RawDataPoint, ScraperError
+
+
+class SpotifyEndpointForbidden(ScraperError):
+    """
+    Raised when Spotify returns 401/403 on audio-features or audio-analysis.
+
+    Most likely cause: the client-credential app post-dates Spotify's
+    November 2024 policy change that revoked access to these endpoints
+    for apps created after that date. Surface this explicitly so the
+    scheduler dashboard shows a real error rather than silent success
+    with zero records.
+    """
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +185,14 @@ class SpotifyAudioScraper(BaseScraper):
     async def _batch_fetch_audio_features(
         self, track_ids: list[str]
     ) -> dict[str, dict[str, Any]]:
-        """Fetch audio features for tracks in batches of 100. 1 req/sec."""
+        """
+        Fetch audio features for tracks in batches of 100.
+
+        If Spotify returns 401/403 on the *first* batch, we raise
+        SpotifyEndpointForbidden so the run fails loudly instead of
+        completing with zero features. For subsequent batches or
+        transient 5xx errors we log and continue.
+        """
         features_map: dict[str, dict[str, Any]] = {}
 
         for i in range(0, len(track_ids), 100):
@@ -186,6 +207,21 @@ class SpotifyAudioScraper(BaseScraper):
                         features_map[feat["id"]] = {
                             k: feat.get(k) for k in AUDIO_FEATURE_KEYS
                         }
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                body = (e.response.text or "")[:300]
+                if code in (401, 403) and i == 0:
+                    raise SpotifyEndpointForbidden(
+                        f"Spotify /v1/audio-features returned {code}: {body}. "
+                        "Likely cause: this Spotify app was created after "
+                        "2024-11-27 and no longer has access to audio-features. "
+                        "Register a pre-2024 app or switch to a different "
+                        "audio-features source (Chartmetric, AcousticBrainz)."
+                    ) from e
+                logger.warning(
+                    "[spotify_audio] HTTP %d on batch %d-%d: %s",
+                    code, i, i + len(batch), body,
+                )
             except Exception as e:
                 logger.warning(
                     "[spotify_audio] Failed to fetch audio features batch %d-%d: %s",
@@ -335,10 +371,13 @@ class SpotifyAudioScraper(BaseScraper):
         # Step 2: Batch fetch audio features
         features_map = await self._batch_fetch_audio_features(all_spotify_ids)
 
-        # Step 3: For top tracks by raw_score, also fetch full audio analysis
-        sorted_tracks = sorted(unique_tracks, key=lambda t: t["raw_score"], reverse=True)
+        # Step 3: For the most recently added tracks, also fetch full audio
+        # analysis. The admin endpoint returns tracks ordered by created_at
+        # DESC, so unique_tracks is already in "newest first" order — no
+        # raw_score available here (entity_resolution strips it from the
+        # track row), so we can't re-rank by trending strength.
         top_track_ids = [
-            t["spotify_id"] for t in sorted_tracks[:TOP_TRACKS_FOR_ANALYSIS]
+            t["spotify_id"] for t in unique_tracks[:TOP_TRACKS_FOR_ANALYSIS]
         ]
         analysis_map: dict[str, dict[str, Any]] = {}
 
@@ -376,16 +415,21 @@ class SpotifyAudioScraper(BaseScraper):
             if analysis:
                 signals["audio_analysis"] = analysis
 
+            # spotify_id alone is enough to match the existing track via
+            # entity resolution. title is included only for log/debug
+            # readability; artist_name is not available from the admin
+            # endpoint (the old code sent an empty string, which could
+            # disrupt resolution — now omitted entirely).
+            entity_identifier: dict[str, Any] = {"spotify_id": spotify_id}
+            if track.get("title"):
+                entity_identifier["title"] = track["title"]
+
             data_points.append(
                 RawDataPoint(
                     platform="spotify",
                     entity_type="track",
-                    entity_identifier={
-                        "spotify_id": spotify_id,
-                        "title": track.get("title", ""),
-                        "artist_name": track.get("artist_name", ""),
-                    },
-                    raw_score=track.get("raw_score", 0),
+                    entity_identifier=entity_identifier,
+                    raw_score=None,
                     signals=signals,
                     snapshot_date=today,
                 )
