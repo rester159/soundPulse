@@ -365,6 +365,222 @@ For each new blueprint, decide: assign to existing artist or create new?
 
 Chartmetric ($350/month, 2 req/sec = ~170K req/day) is the primary data source. Covers Spotify, Apple Music, TikTok, YouTube, Shazam, Instagram, Twitter. Direct APIs (Spotify, Shazam, Genius) add depth Chartmetric doesn't provide.
 
+### Chartmetric Import Scope (current — 2026-04-11)
+
+**The scraper (`scrapers/chartmetric.py`) queries exactly these 6 chart endpoints, all US-only:**
+
+| # | Source | Chart type | Endpoint | Typical size |
+|---|---|---|---|---|
+| 1 | spotify | regional | `/api/charts/spotify?type=regional&country_code=us` | ~200 tracks |
+| 2 | spotify | viral | `/api/charts/spotify?type=viral&country_code=us` | ~50 tracks |
+| 3 | spotify | plays | `/api/charts/spotify?type=plays&country_code=us` | ~200 tracks |
+| 4 | shazam | top | `/api/charts/shazam?country_code=us` | ~200 tracks |
+| 5 | apple_music | top | `/api/charts/applemusic/tracks?type=top&country_code=us` | ~100–200 tracks |
+| 6 | tiktok | viral | `/api/charts/tiktok/tracks?country_code=us` | ~100–200 tracks |
+
+**Backfill scripts (`backfill_chartmetric.py`, `backfill_deep.py`) only run the first 4** — no Apple Music or TikTok historical pulls.
+
+**Addressable daily volume:** ~600–1,200 chart entries → **~300–600 unique tracks/day** after cross-chart dedup.
+
+**Rate budget consumption:** Daily scraper uses ~24 API calls/day. Backfill uses 4 calls × N days. **Current consumption is <2% of the 170K/day rate budget** — there is enormous headroom to expand scope.
+
+**Definition (canonical):** SoundPulse's data corpus is "the top performers of the US Spotify, Shazam, Apple Music, and TikTok charts on each given day, plus their cross-chart overlap." It is **not** "all songs on streaming." The long tail is intentionally excluded at the source.
+
+### Coverage Expansion Plan (Phase 1.E)
+
+The current scope is the bottleneck for ML training quality and for genre breadth. Expansion priorities, in order:
+
+1. **Multi-country**: add GB, DE, JP, BR, MX, FR, KR, IN to the country list → 8 countries × 6 charts ≈ 9,600 entries/day → ~2K unique tracks/day. **~50× current volume.** Costs ~192 API calls/day (still <0.2% of budget).
+2. **Genre-specific charts**: query Chartmetric's per-genre Spotify charts (if available on the tier) for the top of each of the 906 genres. Long-tail discovery — fills the gap between "top 200 mainstream" and our 906-genre taxonomy.
+3. **Billboard verticals**: add Billboard Hot 100, country, R&B, dance, rock charts via Chartmetric.
+4. **Chart depth**: if Chartmetric supports top-1000 instead of top-200 (`limit` param), use it on the regional charts.
+5. **Backfill**: re-run `backfill_deep.py` against the expanded scope after AUD-002 (sync classifier in async ingest) is fixed — without that fix, large-scale backfill will time out on Neon.
+
+**Order of execution is mandatory**: fix ingest perf (AUD-002, P1-022/023) BEFORE expanding scope, otherwise backfill collapses. See `tasks.md` P1.E.
+
+### 7.2. Chartmetric Deep US Coverage — MECE Definition
+
+**Goal:** exhaust the Chartmetric paid-tier API for **US-only** data so the SoundPulse corpus contains every track that is currently or historically charting on any US-tracked platform. The MECE space below defines exactly what is in scope and what is not. Implementation lives in `scrapers/chartmetric_deep_us.py` (the deep scraper) and `scripts/backfill_chartmetric_deep_us.py` (the backfill runner). A discovery probe lives in `scripts/chartmetric_probe.py`.
+
+**Source of truth:** the official Chartmetric apidoc (`api.chartmetric.com/apidoc`) cross-referenced against the `musicfox/pycmc` Python client and the Mixture Labs `chartmetric-cli` reference (which mirrors every documented endpoint 1-to-1). The endpoint matrix below is what those sources confirm — speculation has been removed.
+
+**Critical corrections vs the v1 of this section** (recorded for posterity):
+- **Spotify `type=plays` is NOT a valid value.** `/charts/spotify` only accepts `regional` or `viral`. The existing `scrapers/chartmetric.py` has been silently failing on `plays` for months — flagged in `tasks.md` as a follow-up cleanup.
+- **Billboard charts are NOT exposed via Chartmetric API.** Confirmed by absence from the entire `cm charts` CLI subcommand list. If you want Billboard, use a separate scraper.
+- **City-level Spotify top-tracks does NOT exist.** Spotify itself does not publish per-city top-200. The only per-city Spotify signal is `/artist/{id}/where-people-listen` (per-artist listener counts by city).
+- **Charts have NO `limit` param** — chart depth is fixed by the upstream provider (200 for Spotify, Apple Music, Shazam, iTunes, Amazon; 100 for YouTube, Deezer). To go deeper, use `offset` pagination. List endpoints (`/artist/list`, `/track/list`) DO accept `limit` (max 100/page) and paginate exhaustively via `offset`.
+- **Amazon uses `code2`, not `country_code`,** for the country param.
+- **Several charts are weekday-restricted:** YouTube + Spotify Fresh Find = Thursday only; SoundCloud + Beatport = Friday only. Calling them on the wrong weekday returns 404.
+
+#### The MECE space
+
+The atomic unit of a "pull" is one tuple:
+
+```
+(source_platform, chart_type, country, genre_filter, snapshot_date)
+```
+
+Every cell in the cross-product is either fetched once, or explicitly skipped (not in tier / not supported / wrong weekday). No cell is ever fetched twice for the same tuple. Below is the cross-product, decomposed by axis.
+
+##### Axis 1 — Track charts (verified against official apidoc)
+
+| source_platform | chart_type | endpoint | weekday | params | notes |
+|---|---|---|---|---|---|
+| spotify | regional_daily | `/api/charts/spotify` | — | `type=regional&interval=daily` | top 200 |
+| spotify | viral_daily | `/api/charts/spotify` | — | `type=viral&interval=daily` | top 200 |
+| spotify | regional_weekly | `/api/charts/spotify` | — | `type=regional&interval=weekly` | top 200 |
+| spotify | viral_weekly | `/api/charts/spotify` | — | `type=viral&interval=weekly` | top 200 |
+| spotify | freshfind | `/api/charts/spotify/freshfind` | thursday | — | editorial new music |
+| apple_music | tracks_top × 24 genres | `/api/charts/applemusic/tracks` | — | `insight=top&genre={g}` | 24 Apple genre strings |
+| apple_music | tracks_daily × 24 genres | `/api/charts/applemusic/tracks` | — | `insight=daily&genre={g}` | playlist-based |
+| apple_music | albums × 24 genres | `/api/charts/applemusic/albums` | — | `genre={g}` | speculative — probe |
+| apple_music | videos | `/api/charts/applemusic/videos` | — | — | speculative |
+| itunes | tracks × 24 genres | `/api/charts/itunes/tracks` | — | `genre={g}` | purchases signal |
+| itunes | albums × 24 genres | `/api/charts/itunes/albums` | — | `genre={g}` | |
+| itunes | videos | `/api/charts/itunes/videos` | — | — | |
+| amazon | tracks_popular × 24 genres | `/api/charts/amazon/tracks` | — | `insight=popular_track&genre={g}&code2=US` | |
+| amazon | tracks_new × 24 genres | `/api/charts/amazon/tracks` | — | `insight=new_track&genre={g}&code2=US` | |
+| amazon | albums_popular × 24 genres | `/api/charts/amazon/albums` | — | `insight=popular_album&genre={g}&code2=US` | |
+| amazon | albums_new × 24 genres | `/api/charts/amazon/albums` | — | `insight=new_album&genre={g}&code2=US` | |
+| shazam | top_us | `/api/charts/shazam` | — | — | top 200 |
+| shazam | top_us × 4 genres | `/api/charts/shazam` | — | `genre={g}` | alternative/rock/house/pop |
+| tiktok | tracks_weekly | `/api/charts/tiktok` | — | `type=tracks&interval=weekly` | canonical form |
+| tiktok | tracks_daily | `/api/charts/tiktok` | — | `type=tracks&interval=daily` | |
+| tiktok | videos_weekly | `/api/charts/tiktok` | — | `type=videos&interval=weekly` | |
+| tiktok | top_tracks | `/api/charts/tiktok/top-tracks` | — | `limit=200` | separate chart |
+| youtube | tracks | `/api/charts/youtube/tracks` | thursday | — | weekly |
+| youtube | videos | `/api/charts/youtube/videos` | thursday | — | weekly |
+| youtube | trends | `/api/charts/youtube/trends` | thursday | — | weekly |
+| soundcloud | top × 10 genres | `/api/charts/soundcloud` | friday | `kind=top&genre={g}` | weekly |
+| soundcloud | trending × 10 genres | `/api/charts/soundcloud` | friday | `kind=trending&genre={g}` | weekly |
+| deezer | top | `/api/charts/deezer/` | — | — | weak US signal |
+| beatport | top × 14 genres | `/api/charts/beatport` | friday | `genre={g}` | electronic, no country param |
+
+##### Axis 2 — Artist charts (verified against official apidoc)
+
+| source_platform | chart_type | endpoint | params | notes |
+|---|---|---|---|---|
+| spotify | artists_monthly_listeners | `/api/charts/spotify/artists` | `type=monthly_listeners&interval=daily` | **biggest single missed signal** |
+| spotify | artists_popularity | `/api/charts/spotify/artists` | `type=popularity&interval=daily` | |
+| spotify | artists_followers | `/api/charts/spotify/artists` | `type=followers&interval=daily` | |
+| spotify | artists_playlist_count | `/api/charts/spotify/artists` | `type=playlist_count&interval=daily` | |
+| spotify | artists_playlist_reach | `/api/charts/spotify/artists` | `type=playlist_reach&interval=daily` | |
+| youtube | artists | `/api/charts/youtube/artists` | thursday | |
+| tiktok | users_likes | `/api/charts/tiktok` | `type=users&user_chart_type=likes&interval=weekly` | |
+| tiktok | users_followers | `/api/charts/tiktok` | `type=users&user_chart_type=followers&interval=weekly` | |
+| twitch | followers_daily | `/api/charts/twitch` | `type=followers&duration=daily&limit=200` | speculative |
+| twitch | viewer_hours_daily | `/api/charts/twitch` | `type=viewer_hours&duration=daily&limit=200` | speculative |
+| radio | airplay × 5 metric types | `/api/charts/airplay` | `type={mt}&duration=daily&limit=500` | mt ∈ {monthly_listeners, popularity, followers, playlist_count, playlist_reach}. **Sometimes a paid add-on tier — probe to confirm.** |
+
+##### Axis 3 — Per-city US data (separate execution lane)
+
+Chartmetric exposes city data through a first-class `/api/city/...` resource. The seed call is `/api/cities?country_code=US`, which returns the numeric city IDs to use elsewhere.
+
+| Endpoint | Purpose | Notes |
+|---|---|---|
+| `GET /api/cities?country_code=US` | Seed call — list every US city Chartmetric tracks with its numeric `id` | Run once, persist the table |
+| `GET /api/charts/applemusic/tracks?city_id={id}` | Per-city Apple Music top tracks | Only Apple supports this directly at chart level |
+| `GET /api/charts/shazam?city={city_name}` | Per-city Shazam top tracks | Uses city NAME (string), not numeric ID |
+| `GET /api/city/{city_id}/tracks?platform={p}` | Top tracks for a city | platforms: youtube, radio, shazam |
+| `GET /api/city/{city_id}/artists?platform={p}` | Top artists for a city | platforms: spotify, youtube, shazam, radio, instagram |
+
+**City charts are gated on probe-discovered city IDs and added to ENDPOINT_MATRIX in a follow-up task once the probe seeds them.** They're documented here as part of the MECE space but not yet executed in v1.
+
+##### Axis 4 — Snapshot date
+
+| Mode | Range | Cadence |
+|---|---|---|
+| Live refresh | yesterday | every 4 hours via the existing `chartmetric` scheduled job |
+| Deep refresh | yesterday only | once per day, full ENDPOINT_MATRIX |
+| Historical backfill | configurable, default last 730 days | one-shot via `scripts/backfill_chartmetric_deep_us.py` |
+
+##### Axis 5 — Depth
+
+Chart depth is **fixed by the upstream provider** (200 for Spotify/Apple/Shazam/iTunes/Amazon; 100 for YouTube/Deezer). Charts do NOT accept a `limit` param — pagination is via `offset`. Exception: `/charts/airplay`, `/charts/twitch`, and `/charts/tiktok/top-tracks` accept `limit` and we pass it. For exhaustive long-tail crawls, use the **list endpoints** (`/api/artist/list`, `/api/track/list`, `/api/playlist/{p}/lists`) which paginate at 100/page with no upper bound on offset.
+
+##### Axis 6 — Artist & track enrichment (separate execution lane)
+
+For every unique entity that appears in any chart, we additionally pull (in a follow-up enrichment task):
+
+| Enrichment | Endpoint | Cadence |
+|---|---|---|
+| Artist metadata | `/api/artist/{id}` | once per artist |
+| Artist platform stats | `/api/artist/{id}/stat/{platform}` for {spotify, instagram, tiktok, youtube, twitter, shazam} | weekly |
+| Where people listen (Spotify cities) | `/api/artist/{id}/where-people-listen` | weekly |
+| Audience demographics (Instagram/TikTok/YouTube) | `/api/artist/{id}/{platform}-audience` | weekly — **may be a paid add-on** |
+| Career stage | `/api/artist/{id}/career` | weekly |
+| Related artists | `/api/artist/{id}/relatedartists` | once |
+| Track metadata | `/api/track/{id}` | once per track |
+| Track playlist memberships | `/api/track/{id}/{platform}/{status}/playlists` | weekly |
+
+This is a separate execution lane from the chart pulls — distinct rate budget, distinct schedule. Built in a follow-up task after the chart corpus is solid.
+
+##### Axis 7 — Long-tail crawls (the `/list` endpoints)
+
+For exhaustive coverage beyond what's surfaced by any chart, use:
+
+| Endpoint | Filter for US | Notes |
+|---|---|---|
+| `/api/artist/list?code2=US&sortColumn=sp_monthly_listeners&limit=100` | yes | Exhaustive US artist enumeration, paginate by `offset` |
+| `/api/track/list?code2=US&sortColumn=...&limit=100` | yes | Exhaustive track enumeration |
+| `/api/playlist/{spotify}/lists?code2=US&tags={genre_id}&limit=100` | yes | Per-genre US playlist enumeration |
+
+#### Budget math
+
+Chartmetric paid tier: **2 req/sec → 172,800 req/day** at the entry-level Developer plan.
+
+The current `ENDPOINT_MATRIX` in `scrapers/chartmetric_deep_us.py` resolves to **~250 fetches per snapshot date** when fully expanded (per-genre fan-out across Apple/iTunes/Amazon/SoundCloud/Beatport adds the bulk):
+
+| Endpoint group | Calls per date |
+|---|---|
+| Spotify tracks (regional + viral, daily + weekly) | 4 |
+| Spotify artists (5 type variants) | 5 |
+| Spotify Fresh Find (Thursday) | 1 |
+| Apple Music tracks (top + daily, 24 genres each) | 48 |
+| Apple Music albums (24 genres) | 24 |
+| iTunes (tracks + albums, 24 genres each) | 48 |
+| Amazon (tracks popular/new + albums popular/new, 24 genres each) | 96 |
+| Shazam (top + 4 per-genre) | 5 |
+| TikTok (4 chart variants + top-tracks) | 5 |
+| YouTube (3 weekly variants) | 3 |
+| SoundCloud (top + trending, 10 genres each, Friday) | 20 |
+| Deezer | 1 |
+| Beatport (14 genres, Friday) | 14 |
+| Twitch (2 type variants) | 2 |
+| Airplay (5 metric type variants) | 5 |
+| **Total per date** | **~281** |
+
+| Workload | Calls | % of daily budget |
+|---|---|---|
+| Daily live cadence (existing 4h scraper, 6 endpoints × 4 ticks) | ~24 | 0.01% |
+| Deep refresh (full matrix once per day, yesterday only) | ~281 | 0.16% |
+| 730-day historical backfill (one-shot) | ~205,000 | runs in ~31 hours at 1.8 req/sec — split into 4–5 day chunks |
+| Artist enrichment (5,000 artists weekly × 6 platforms × per-day amortized) | ~4,300/day | 2.5% |
+| Track enrichment (50,000 tracks lifetime, amortized per-day) | ~7,000/day | 4% |
+
+**Steady-state daily consumption (after backfill completes): ~12,000 calls = 7% of budget.** Plenty of headroom for cadence increases, more cities, playlist crawls.
+
+**Backfill chunking:** because the full 730-day backfill takes ~31 hours, run it in 90-day chunks (`--start ... --end ...`) so it can be paused/resumed and so a network blip doesn't lose 12+ hours of progress.
+
+#### MECE invariants (the contract)
+
+1. **No tuple is fetched twice in the same scraper run** — the `ENDPOINT_MATRIX × dates` iteration is a flat loop, not nested with overlap.
+2. **Every cell either resolves to "fetched" or "skipped with reason"** — speculative endpoints log `TIER` / `NOT_FOUND` / `ERROR` and continue. Nothing is silently dropped.
+3. **Bulk ingest is atomic per batch** — `POST /api/v1/trending/bulk` either ingests all 500 records or fails the batch. No partial state.
+4. **Genre classification and composite scoring are deferred** — the bulk path tags entities `needs_classification: true` in `metadata_json` and a background sweep handles them. This is what makes massive ingest possible.
+5. **The same source is never double-counted** — `signals.source_platform` records the upstream platform; `platform="chartmetric"` is fixed because Chartmetric is the data fetcher. Cross-platform composite scoring happens later via the scoring config.
+
+#### Execution order
+
+1. `python scripts/chartmetric_probe.py` — runs ONE call against every endpoint in the matrix to verify tier access, plus discovers US city IDs via `/api/cities?country_code=US`, plus probes the artist demographic endpoints (which are sometimes a paid add-on). Outputs a per-endpoint pass/fail table and any speculative endpoints to promote.
+2. Edit `scrapers/chartmetric_deep_us.py` based on probe output: promote any speculative endpoints that returned OK to `confirmed=True`.
+3. `python scripts/backfill_chartmetric_deep_us.py --confirmed-only --days 90` — first chunk of historical pull (~5 hours). Verify it landed in the DB via the DB Stats view (P2.I) before moving on.
+4. `python scripts/backfill_chartmetric_deep_us.py --days 90 --start 2026-01-12 --end 2026-04-11` — confirmed + any newly-promoted endpoints, same window.
+5. Continue chunking backwards by 90 days until you have 730 days of history (~5 chunks × ~5 hours each = ~25 hours of pulling, runnable as a sequence of background jobs).
+6. Wire the deep refresh into the daily scheduler (separate task — see `tasks.md` P1.E.2 P1-059).
+7. Build the per-city ENDPOINT_MATRIX additions using the discovered city IDs (separate task — P1-065).
+8. Build the artist + track enrichment lane (separate task — P1-063, P1-064).
+
 ### Entity Resolution
 
 Chartmetric handles most cross-platform matching. For non-Chartmetric entities: ISRC → Platform ID → Fuzzy match (RapidFuzz >85%) → Manual disambiguation queue.
@@ -1031,11 +1247,30 @@ Revenue reconciliation across sources (Revelator, SoundExchange, ASCAP, distribu
 
 ## 21. AI Assistant
 
-**Status: BUILT**
+**Status: BUILT** (hideable UI: TODO — see below)
 
 Groq/Llama 3.3 70B chat interface. Gathers DB context (trending, genres, stats, scrapers), answers questions in natural language.
 
 Example: "If I wanted a Christian rock single, what should the artist and song look like?" → queries genre data, generates blueprint-style recommendation.
+
+### 21.1 Hideable Panel (UI requirement)
+
+The Assistant currently mounts as a fixed-width 288px right-side `<aside>` (`frontend/src/components/AssistantPanel.jsx`) and is always visible, eating screen real estate on every page including ones where the user is focused on data exploration.
+
+**Requirement:** the user must be able to hide and re-show the Assistant panel.
+
+**Behavior:**
+- A toggle control collapses the panel out of the main layout flow; main content reflows to fill the freed width.
+- When hidden, a small persistent affordance (icon button on the right edge — e.g. a `MessageSquare` chevron) lets the user re-open it.
+- A keyboard shortcut (`Cmd/Ctrl + .`) toggles the panel.
+- Preference persists across page navigation and reloads via `localStorage` key `soundpulse.assistant.visible` (default `true` — opt-in to the new UX, not opt-out).
+- The toggle lives in the panel header (collapse arrow on the left of the header) AND in the floating re-open button (when hidden).
+- Panel state is global, not per-page — toggling on Dashboard hides it on Explore too.
+- Implementation: lift visibility into a top-level context (e.g. `AssistantVisibilityContext`) consumed by both `Layout.jsx` (which conditionally renders the aside) and any header that exposes the toggle. Avoid prop drilling.
+
+**Why:** the assistant is useful but the dashboard, explore, and song lab pages need full horizontal real estate when the user is scanning trending tables, genre trees, or generated prompts. Forcing it always-on penalizes the most important workflows.
+
+**Out of scope (for this iteration):** resizable panel width, multiple chat tabs, history persistence beyond the in-memory message list.
 
 ---
 
@@ -1202,6 +1437,65 @@ Example: "If I wanted a Christian rock single, what should the artist and song l
 | `GET` | `/health` | Service health check |
 
 Auth: `X-API-Key` header. Tiers: Free (100 req/hr), Pro (1K), Admin (unlimited).
+
+### 22.2. DB Stats View (TODO — new feature)
+
+A diagnostic view in the admin/dashboard area answering "what's actually in the database, and how is it growing?"
+
+**Backend endpoints:**
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/v1/admin/db-stats` | Current totals across all tables |
+| GET | `/api/v1/admin/db-stats/history?days=90` | Daily counts of new rows per table for the last N days, derived from `created_at` timestamps |
+
+**`GET /api/v1/admin/db-stats` response shape:**
+
+```json
+{
+  "as_of": "2026-04-11T10:16:00Z",
+  "tables": {
+    "tracks": {"total": 2146, "with_audio_features": 121, "with_genres": 102, "with_isrc": 1843},
+    "artists": {"total": 487, "with_genres": 156, "with_spotify_id": 412},
+    "trending_snapshots": {"total": 9031, "distinct_dates": 40, "distinct_platforms": 4, "earliest_date": "2026-03-02", "latest_date": "2026-04-11"},
+    "genres": {"total": 906, "active": 906, "with_audio_profile": 612},
+    "predictions": {"total": 0, "by_horizon": {"7d": 0, "30d": 0, "90d": 0}},
+    "backtest_results": {"total": 0, "completed_runs": 0},
+    "scraper_configs": {"total": 8, "enabled": 6},
+    "api_keys": {"total": 4}
+  }
+}
+```
+
+**`GET /api/v1/admin/db-stats/history?days=90` response shape:**
+
+```json
+{
+  "as_of": "2026-04-11T10:16:00Z",
+  "days": 90,
+  "series": [
+    {
+      "date": "2026-04-11",
+      "tracks_added": 12, "tracks_total": 2146,
+      "artists_added": 3, "artists_total": 487,
+      "snapshots_added": 220, "snapshots_total": 9031,
+      "predictions_added": 0, "predictions_total": 0
+    },
+    ...
+  ]
+}
+```
+
+**Frontend page** (new `frontend/src/pages/DbStats.jsx` at route `/db-stats`):
+- **Top section — current state**: cards for each table showing total + key sub-counts (e.g. `tracks: 2,146 (121 with audio, 102 classified)`). Color-coded warnings when sub-counts are <50% of total (e.g. classification coverage <50% → yellow).
+- **Middle section — additions over time**: stacked bar chart showing daily new rows per table (tracks/artists/snapshots/predictions) for the last 90 days.
+- **Bottom section — totals over time**: line chart showing cumulative row counts for each table over the last 90 days.
+- **Filter**: date range selector (7d / 30d / 90d / custom).
+- **Auth**: admin key required (this is diagnostic data, not for end users).
+
+**Why this matters:** without this view, the team has no visibility into whether scrapers are actually running, whether the genre classifier is improving, whether the ML model is producing predictions, or how the database is growing. Currently the only way to answer "how many tracks do we have?" is to query Neon directly. This is the canonical source of truth for "is the data pipeline healthy."
+
+**Out of scope (this iteration):** per-source breakdowns (e.g. "snapshots by chartmetric vs spotify"), per-genre track counts, drilldown into specific entities. Those can come later if useful.
 
 ---
 

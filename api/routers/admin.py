@@ -938,21 +938,41 @@ async def start_backfill(
     _admin: ApiKey = Depends(require_admin),
 ):
     """Start a deep historical backfill from Chartmetric in the background."""
+    import os
     import subprocess
     import sys
 
-    cmd = [sys.executable, "scripts/backfill_deep.py", "--days", str(request.days)]
+    # AUD-003: use absolute path so this works regardless of CWD in the Railway
+    # container. Same fix pattern as the train_model task.
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    script_path = os.path.join(project_root, "scripts", "backfill_deep.py")
+    cmd = [sys.executable, script_path, "--days", str(request.days)]
     if request.start_date:
         cmd.extend(["--start", request.start_date])
     if request.end_date:
         cmd.extend(["--end", request.end_date])
 
-    # Run as background subprocess so it doesn't block the API
-    subprocess.Popen(cmd, stdout=open("/tmp/backfill.log", "w"), stderr=subprocess.STDOUT)
+    # AUD-003: previously this leaked the log file handle on every call
+    # (`open("/tmp/backfill.log", "w")` inline → never closed → after ~1024
+    # backfill calls the OS file descriptor table exhausts). Use a context
+    # manager and dup the FD into the child so we can close ours immediately.
+    log_path = os.path.join("/tmp", "soundpulse_backfill.log")
+    log_file = open(log_path, "w")
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            cwd=project_root,
+            close_fds=True,
+        )
+    finally:
+        # The child has dup'd the FD; we close our copy so we don't leak.
+        log_file.close()
 
     return {
         "detail": f"Backfill started: {request.days} days",
-        "log_file": "/tmp/backfill.log",
+        "log_file": log_path,
         "command": " ".join(cmd),
     }
 
@@ -997,6 +1017,94 @@ async def put_model_config(
         json.dump(config, f, indent=2)
 
     return {"detail": "Model config updated", "config": config}
+
+
+# ---------------------------------------------------------------------------
+# DB Stats — diagnostic view (P2.I, PRD §22.2)
+# ---------------------------------------------------------------------------
+#
+# Two endpoints answer "what's in the database, and how is it growing?":
+#   - GET /api/v1/admin/db-stats             — current totals + sub-counts
+#   - GET /api/v1/admin/db-stats/history     — daily new-row counts (last N days)
+#
+# Powers the new DbStats frontend page. Without this view the only way to
+# answer "did the deep US backfill land?" is to shell into Neon.
+
+@router.get("/api/v1/admin/db-stats")
+async def get_db_stats(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Current totals + sub-counts across every operational table."""
+    from api.services.db_stats import get_current_stats
+    return await get_current_stats(db)
+
+
+@router.get("/api/v1/admin/db-stats/history")
+async def get_db_stats_history(
+    days: int = 90,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Daily new-row counts per table for the last N days (cap 365)."""
+    from api.services.db_stats import get_history
+    return await get_history(db, days=days)
+
+
+# ---------------------------------------------------------------------------
+# Deferred sweep endpoints (classification + composite recalc)
+# ---------------------------------------------------------------------------
+#
+# The bulk ingest endpoint defers genre classification and composite scoring
+# to keep ingest fast. These endpoints let you (a) check the queue depth and
+# (b) trigger a sweep manually. The same functions are also wired into the
+# Celery beat schedule (see scrapers/tasks.py) and APScheduler (see
+# scrapers/scheduler.py).
+
+@router.get("/api/v1/admin/sweeps/status")
+async def sweep_status(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Queue depth for the deferred sweeps."""
+    from api.services.classification_sweep import count_pending_classification
+    from api.services.composite_sweep import count_pending_normalization
+
+    classification = await count_pending_classification(db)
+    normalization = await count_pending_normalization(db)
+    return {
+        "classification": classification,
+        "normalization": normalization,
+    }
+
+
+@router.post("/api/v1/admin/sweeps/classification", status_code=202)
+async def trigger_classification_sweep(
+    batch_size: int = 500,
+    force_reclassify: bool = False,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Run one classification sweep batch synchronously and return stats."""
+    from api.services.classification_sweep import sweep_unclassified_entities
+
+    stats = await sweep_unclassified_entities(
+        db, batch_size=batch_size, force_reclassify=force_reclassify
+    )
+    return {"detail": "classification sweep complete", "stats": stats}
+
+
+@router.post("/api/v1/admin/sweeps/composite", status_code=202)
+async def trigger_composite_sweep(
+    batch_size: int = 1000,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Run one composite-recalc sweep batch synchronously and return stats."""
+    from api.services.composite_sweep import sweep_zero_normalized_snapshots
+
+    stats = await sweep_zero_normalized_snapshots(db, batch_size=batch_size)
+    return {"detail": "composite sweep complete", "stats": stats}
 
 
 # ---------------------------------------------------------------------------

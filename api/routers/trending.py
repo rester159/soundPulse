@@ -1,10 +1,13 @@
+import logging
 import uuid as uuid_mod
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, case, func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from api.database import get_db
 from api.dependencies import get_api_key_record, get_redis, require_admin
@@ -12,7 +15,13 @@ from api.models.api_key import ApiKey
 from api.models.artist import Artist
 from api.models.track import Track
 from api.models.trending_snapshot import TrendingSnapshot
-from api.schemas.trending import TrendingIngest, TrendingIngestResponse, TrendingResponse
+from api.schemas.trending import (
+    TrendingIngest,
+    TrendingIngestBulk,
+    TrendingIngestBulkResponse,
+    TrendingIngestResponse,
+    TrendingResponse,
+)
 from api.services.aggregation import recalculate_composite_for_entity
 from api.services.cache import CacheService
 from api.services.entity_resolution import resolve_artist, resolve_track
@@ -75,7 +84,11 @@ async def ingest_trending(
     if body.entity_type == "track" and "audio_features" in signals:
         entity.audio_features = signals["audio_features"]
 
-    # Classify genre on new entities or when new platform data arrives
+    # Classify genre on new entities or when new platform data arrives.
+    # AUD-001: previously this `except Exception: pass`-equivalent silently
+    # swallowed every classifier failure, masking the bug that left ~95% of
+    # tracks unclassified. We now log the exception with the entity id, type,
+    # and any signals that might explain the failure.
     needs_classification = is_new or not entity.genres or bool(metadata_updates)
     if needs_classification:
         try:
@@ -85,7 +98,17 @@ async def ingest_trending(
                 **(entity.metadata_json or {}),
                 "classification_quality": classification.classification_quality,
             }
-        except Exception:
+        except Exception as classifier_exc:
+            logger.warning(
+                "[trending-ingest] genre classifier failed for %s id=%s name=%s: %s "
+                "(metadata_updates=%s, signals_keys=%s)",
+                body.entity_type,
+                getattr(entity, "id", None),
+                getattr(entity, "title", None) or getattr(entity, "name", None),
+                classifier_exc,
+                list(metadata_updates.keys()),
+                list((body.signals or {}).keys()),
+            )
             # Classification failure must not corrupt the DB session
             await db.rollback()
             # Re-fetch the entity after rollback
@@ -160,6 +183,140 @@ async def ingest_trending(
             "is_new_entity": is_new,
             "normalized_score": norm_score,
             "snapshot_id": str(snapshot.id),
+        }
+    )
+
+
+@router.post("/bulk", response_model=TrendingIngestBulkResponse, status_code=201)
+async def ingest_trending_bulk(
+    body: TrendingIngestBulk,
+    db: AsyncSession = Depends(get_db),
+    admin_key: ApiKey = Depends(require_admin),
+    redis=Depends(get_redis),
+):
+    """
+    Bulk trending ingest. Accepts up to 1000 items per call.
+
+    Optimized for large-scale backfills:
+      - Single DB transaction for the whole batch
+      - Entity resolution runs per item but reuses the session (no per-item commit)
+      - Snapshot inserts use ON CONFLICT DO NOTHING (no per-item duplicate query)
+      - Genre classification and composite-score recalc are DEFERRED — entities
+        are tagged in metadata_json with `needs_classification: true` and a
+        background sweep handles them
+      - Cache invalidation happens once at the end, not per item
+      - Normalized score is left at 0.0; the deferred sweep computes it via the
+        normal aggregation/normalization pipeline
+
+    Returns counts: ingested, duplicates, errors, entities_created.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    items = body.items
+    n_items = len(items)
+
+    # Validate up front (cheap, fail fast on bad batches)
+    for i, item in enumerate(items):
+        if item.platform not in VALID_PLATFORMS:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "VALIDATION_ERROR",
+                                  "message": f"items[{i}]: invalid platform '{item.platform}'", "details": {}}},
+            )
+        if item.entity_type not in VALID_ENTITY_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "VALIDATION_ERROR",
+                                  "message": f"items[{i}]: invalid entity_type '{item.entity_type}'", "details": {}}},
+            )
+        ident = item.entity_identifier
+        if not any([ident.spotify_id, ident.apple_music_id, ident.tiktok_sound_id, ident.isrc, ident.title]):
+            raise HTTPException(
+                status_code=422,
+                detail={"error": {"code": "UNPROCESSABLE_ENTITY",
+                                  "message": f"items[{i}]: no usable identifiers", "details": {}}},
+            )
+
+    started = datetime.now(timezone.utc)
+    entities_created = 0
+    snapshot_rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for i, item in enumerate(items):
+        try:
+            if item.entity_type == "track":
+                entity, is_new = await resolve_track(db, item.entity_identifier)
+            else:
+                entity, is_new = await resolve_artist(db, item.entity_identifier)
+
+            if is_new:
+                entities_created += 1
+
+            # Merge classification-relevant signals into metadata so the deferred
+            # sweep has them available
+            sig = item.signals or {}
+            meta_updates: dict[str, Any] = {}
+            for key in ("spotify_genres", "apple_music_genres", "musicbrainz_tags",
+                        "chartmetric_genres", "tiktok_hashtags", "playlist_genres", "genres"):
+                if key in sig:
+                    meta_updates[key] = sig[key]
+            if meta_updates or is_new or not (entity.metadata_json or {}).get("classification_quality"):
+                entity.metadata_json = {
+                    **(entity.metadata_json or {}),
+                    **meta_updates,
+                    "needs_classification": True,
+                }
+
+            # Audio features get copied directly to the track row when present
+            if item.entity_type == "track" and "audio_features" in sig and sig["audio_features"]:
+                entity.audio_features = sig["audio_features"]
+
+            snapshot_rows.append({
+                "id": uuid_mod.uuid4(),
+                "entity_type": item.entity_type,
+                "entity_id": entity.id,
+                "snapshot_date": item.snapshot_date,
+                "platform": item.platform,
+                "platform_rank": item.rank,
+                "platform_score": item.raw_score,
+                "normalized_score": 0.0,
+                "signals_json": item.signals or {},
+            })
+        except Exception as exc:
+            errors.append({"index": i, "error": str(exc)[:300]})
+
+    # Flush entity changes (so snapshot FK references resolve) before bulk insert
+    await db.flush()
+
+    ingested = 0
+    duplicates = 0
+    if snapshot_rows:
+        stmt = pg_insert(TrendingSnapshot).values(snapshot_rows)
+        # ON CONFLICT against the unique (entity_type, entity_id, snapshot_date, platform) constraint
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=["entity_type", "entity_id", "snapshot_date", "platform"]
+        )
+        result = await db.execute(stmt)
+        ingested = result.rowcount or 0
+        duplicates = len(snapshot_rows) - ingested
+
+    await db.commit()
+
+    # Single cache invalidation
+    cache = CacheService(redis)
+    await cache.delete_pattern("trending:*")
+
+    elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+
+    return TrendingIngestBulkResponse(
+        data={
+            "received": n_items,
+            "ingested": ingested,
+            "duplicates": duplicates,
+            "errors": len(errors),
+            "entities_created": entities_created,
+            "elapsed_ms": elapsed_ms,
+            "error_samples": errors[:5],
         }
     )
 

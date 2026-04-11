@@ -41,6 +41,9 @@ BACKFILL_DAYS = 90
 RATE_LIMIT_DELAY = 1.0  # seconds between Chartmetric requests
 INGEST_DELAY = 0.1  # seconds between SoundPulse ingest calls
 
+# NOTE: /api/charts/spotify accepts type ∈ {regional, viral} only.
+# The `plays` entry that used to be here has been removed (P1-069 / L001) —
+# it's not a valid value and was silently failing for months.
 CHART_ENDPOINTS = [
     {
         "source_platform": "spotify",
@@ -53,12 +56,6 @@ CHART_ENDPOINTS = [
         "chart_type": "viral",
         "path": "/api/charts/spotify",
         "params": {"type": "viral", "interval": "daily"},
-    },
-    {
-        "source_platform": "spotify",
-        "chart_type": "plays",
-        "path": "/api/charts/spotify",
-        "params": {"type": "plays", "interval": "daily"},
     },
     {
         "source_platform": "shazam",

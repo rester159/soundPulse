@@ -227,3 +227,47 @@ export function useDataFlow() {
     staleTime: 30_000,
   })
 }
+
+// DB Stats hooks (P2.I, PRD §22.2)
+export function useDbStats() {
+  return useQuery({
+    queryKey: ['admin', 'db-stats'],
+    queryFn: () => makeRequest('GET', '/admin/db-stats'),
+    refetchInterval: 60_000,  // auto-refresh every 60s
+    staleTime: 30_000,
+  })
+}
+
+export function useDbStatsHistory(days = 90) {
+  return useQuery({
+    queryKey: ['admin', 'db-stats', 'history', days],
+    queryFn: () => makeRequest('GET', '/admin/db-stats/history', { days }),
+    refetchInterval: 300_000,  // 5 min — historical data doesn't change rapidly
+    staleTime: 60_000,
+  })
+}
+
+export function useSweepStatus() {
+  return useQuery({
+    queryKey: ['admin', 'sweeps', 'status'],
+    queryFn: () => makeRequest('GET', '/admin/sweeps/status'),
+    refetchInterval: 30_000,
+  })
+}
+
+export function useTriggerClassificationSweep() {
+  return useMutation({
+    mutationFn: ({ batchSize = 500, forceReclassify = false } = {}) =>
+      makeRequest('POST', '/admin/sweeps/classification', {
+        batch_size: batchSize,
+        force_reclassify: forceReclassify,
+      }),
+  })
+}
+
+export function useTriggerCompositeSweep() {
+  return useMutation({
+    mutationFn: ({ batchSize = 1000 } = {}) =>
+      makeRequest('POST', '/admin/sweeps/composite', { batch_size: batchSize }),
+  })
+}

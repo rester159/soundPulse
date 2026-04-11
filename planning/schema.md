@@ -1,0 +1,415 @@
+# Approved Database Schema
+
+> Canonical schema reference. Mirrors `alembic/versions/` migrations 001–005 (current state) and documents the proposed Phase 3 additions.
+>
+> **Rule:** when a migration is added or changed, update this file in the same commit. Drift here = bugs later.
+
+---
+
+## Conventions
+
+- All UUID PKs use `uuid-ossp` extension (enabled in 001).
+- All timestamps are `TIMESTAMPTZ` with `server_default = NOW()`.
+- `pg_trgm` extension enabled in 001 for fuzzy name search via gist trgm indexes.
+- JSON columns use `postgresql.JSON` (not JSONB) — flagged as a candidate for migration to JSONB later.
+
+---
+
+## Migration timeline
+
+| Rev | Date | What it added |
+|---|---|---|
+| 001 | 2026-03-21 | Initial schema: genres, artists, tracks, trending_snapshots, predictions, feedback, api_keys + extensions + `genre_status` enum |
+| 002 | 2026-03-22 | `scraper_configs` table + seeds `spotify` row |
+| 003 | — | `scraper_configs.last_record_count` column |
+| 004 | — | `tracks`: shazam_id, tiktok_sound_id, billboard_id, chartmetric_id columns + unique indexes (incl. apple_music_id which was previously not indexed) |
+| 005 | 2026-04-03 | `backtest_results` table |
+
+Head: `005`
+
+---
+
+# Part I — Current schema (live)
+
+## `genres`
+
+Static taxonomy of 906 genres (12 root categories), seeded by `scripts/seed_genres.py` from `shared/genre_taxonomy.py`.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `String(200)` | PK | Dot-notation, e.g. `pop.dance-pop.electropop` |
+| name | `String(200)` | NOT NULL | Human-readable |
+| parent_id | `String(200)` | FK → genres.id, NULL | NULL for roots |
+| root_category | `String(50)` | NOT NULL | One of 12 roots: pop, rock, electronic, hip-hop, r-and-b, latin, country, jazz, classical, african, asian, caribbean |
+| depth | `Integer` | NOT NULL, default 0 | 0 = root, 1 = category, 2+ = subcategory |
+| spotify_genres | `ARRAY(String)` | default `{}` | Platform mapping |
+| apple_music_genres | `ARRAY(String)` | default `{}` | Platform mapping |
+| musicbrainz_tags | `ARRAY(String)` | default `{}` | Platform mapping |
+| chartmetric_genres | `ARRAY(String)` | default `{}` | Platform mapping |
+| audio_profile | `JSON` | NULL | `{tempo_range, energy_range, valence_range, danceability_range}` |
+| adjacent_genres | `ARRAY(String)` | default `{}` | Cross-branch genre IDs |
+| status | `genre_status` ENUM | default `'active'` | `active | deprecated | proposed` |
+| created_at | `TIMESTAMPTZ` | default NOW() | |
+| updated_at | `TIMESTAMPTZ` | default NOW() | |
+
+**Indexes:** `idx_genre_parent (parent_id)`, `idx_genre_root (root_category)`
+
+---
+
+## `artists`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `UUID` | PK | |
+| name | `String(500)` | NOT NULL | |
+| spotify_id | `String(100)` | UNIQUE, NULL | Cross-platform key |
+| apple_music_id | `String(100)` | UNIQUE, NULL | |
+| tiktok_handle | `String(200)` | NULL | |
+| chartmetric_id | `Integer` | NULL | |
+| musicbrainz_id | `String(100)` | NULL | |
+| image_url | `String(1000)` | NULL | |
+| genres | `ARRAY(String)` | default `{}` | Populated by genre classifier |
+| metadata_json | `JSON` | default `{}` | `{classification_quality, ...}` |
+| canonical | `Boolean` | default `true` | Entity dedup flag |
+| created_at | `TIMESTAMPTZ` | default NOW() | |
+| updated_at | `TIMESTAMPTZ` | default NOW() | |
+
+**Indexes:** `idx_artist_name (name)`, `idx_artist_spotify (spotify_id) WHERE spotify_id IS NOT NULL`, `idx_artist_name_trgm (name gist_trgm_ops)`
+
+---
+
+## `tracks`
+
+| Column | Type | Constraints | Migration | Notes |
+|---|---|---|---|---|
+| id | `UUID` | PK | 001 | |
+| title | `String(500)` | NOT NULL | 001 | |
+| artist_id | `UUID` | FK → artists.id, NOT NULL | 001 | |
+| isrc | `String(20)` | UNIQUE, NULL | 001 | International Standard Recording Code — best cross-platform key |
+| spotify_id | `String(100)` | UNIQUE, NULL | 001 | |
+| apple_music_id | `String(100)` | NULL (UNIQUE INDEX added in 004) | 001 / 004 | |
+| duration_ms | `Integer` | NULL | 001 | |
+| release_date | `Date` | NULL | 001 | |
+| genres | `ARRAY(String)` | default `{}` | 001 | Populated by classifier — **only 102/2,146 populated as of 2026-04-11** |
+| audio_features | `JSON` | NULL | 001 | `{tempo, energy, valence, danceability, key, mode, ...}` — **only 121/2,146 populated as of 2026-04-11** |
+| metadata_json | `JSON` | default `{}` | 001 | `{classification_quality, ...}` |
+| shazam_id | `String(100)` | NULL (UNIQUE INDEX in 004) | 004 | |
+| tiktok_sound_id | `String(100)` | NULL (UNIQUE INDEX in 004) | 004 | |
+| billboard_id | `String(200)` | NULL (UNIQUE INDEX in 004) | 004 | |
+| chartmetric_id | `Integer` | NULL (UNIQUE INDEX in 004) | 004 | |
+| created_at | `TIMESTAMPTZ` | default NOW() | 001 | |
+| updated_at | `TIMESTAMPTZ` | default NOW() | 001 | |
+
+**Indexes:**
+- `idx_track_title (title)`
+- `idx_track_isrc (isrc) WHERE isrc IS NOT NULL`
+- `idx_track_spotify (spotify_id) WHERE spotify_id IS NOT NULL`
+- `idx_track_title_trgm (title gist_trgm_ops)` — fuzzy search
+- `idx_track_fts USING gin(to_tsvector('english', title))` — full-text search
+- `ix_tracks_apple_music_id (apple_music_id) UNIQUE`
+- `ix_tracks_shazam_id (shazam_id) UNIQUE`
+- `ix_tracks_tiktok_sound_id (tiktok_sound_id) UNIQUE`
+- `ix_tracks_billboard_id (billboard_id) UNIQUE`
+- `ix_tracks_chartmetric_id (chartmetric_id) UNIQUE`
+
+---
+
+## `trending_snapshots`
+
+One row per (entity, platform, date). The hot table — most queries hit this.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `UUID` | PK | |
+| entity_type | `String(10)` | NOT NULL | `'artist'` or `'track'` |
+| entity_id | `UUID` | NOT NULL | FK is implicit (no DB-level constraint) |
+| snapshot_date | `Date` | NOT NULL | |
+| platform | `String(20)` | NOT NULL | `chartmetric | spotify | shazam | apple_music | kworb | radio | tiktok` |
+| platform_rank | `Integer` | NULL | Rank from source |
+| platform_score | `Float` | NULL | Raw score from source |
+| normalized_score | `Float` | NOT NULL, default 0 | Normalized 0–100 across entities/dates (`api/services/normalization.py`) |
+| velocity | `Float` | NULL | Score change vs same entity 7 days prior |
+| signals_json | `JSON` | default `{}` | Full payload: `{spotify_genres, apple_music_genres, audio_features, playlist_genres, primary_theme, themes, ...}` — **genre data currently lives here as raw strings, not in `tracks.genres`** |
+| composite_score | `Float` | NULL | Weighted avg across platforms (`api/services/aggregation.py`) |
+| created_at | `TIMESTAMPTZ` | default NOW() | |
+| updated_at | `TIMESTAMPTZ` | default NOW() | |
+
+**Constraints:** `uq_snapshot UNIQUE(entity_type, entity_id, snapshot_date, platform)`
+
+**Indexes:**
+- `idx_trending_entity_date (entity_id, snapshot_date DESC)`
+- `idx_trending_platform_date (platform, snapshot_date DESC)`
+- `idx_trending_snapshot_date (snapshot_date)`
+
+**Note (not enforced):** no FK on `entity_id` because it can reference either `artists.id` or `tracks.id` depending on `entity_type`. Polymorphic FK — pay attention when joining.
+
+---
+
+## `predictions`
+
+ML model outputs. **Currently 0 rows** — model has never trained successfully.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `UUID` | PK | |
+| entity_type | `String(10)` | NOT NULL | `artist | track | genre` |
+| entity_id | `String(200)` | NOT NULL | UUID for artist/track, dot-notation for genre |
+| horizon | `String(5)` | NOT NULL | `7d | 30d | 90d` |
+| predicted_score | `Float` | NOT NULL | |
+| confidence | `Float` | NOT NULL | 0–1, isotonic-calibrated |
+| model_version | `String(20)` | NOT NULL | Tag of ensemble |
+| features_json | `JSON` | default `{}` | `{top_features, temporal_info, ...}` |
+| predicted_at | `TIMESTAMPTZ` | NOT NULL | |
+| resolved_at | `TIMESTAMPTZ` | NULL | When prediction was validated |
+| actual_score | `Float` | NULL | |
+| error | `Float` | NULL | |
+| created_at | `TIMESTAMPTZ` | default NOW() | |
+| updated_at | `TIMESTAMPTZ` | default NOW() | |
+
+**Indexes:** `idx_prediction_horizon (horizon, predicted_at DESC)`, `idx_prediction_entity (entity_id, horizon)`
+
+---
+
+## `feedback`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `UUID` | PK | |
+| prediction_id | `UUID` | FK → predictions.id, NOT NULL | |
+| actual_score | `Float` | NOT NULL | |
+| notes | `Text` | NULL | |
+| submitted_by | `String(100)` | NULL | |
+| created_at | `TIMESTAMPTZ` | default NOW() | |
+
+---
+
+## `api_keys`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `UUID` | PK | |
+| key_hash | `String(64)` | UNIQUE, NOT NULL | SHA-256 of full key |
+| key_prefix | `String(20)` | NOT NULL | e.g. `sp_admin_` for display |
+| key_last4 | `String(4)` | NOT NULL | For display |
+| tier | `String(10)` | NOT NULL, default `'free'` | `free | pro | admin` |
+| owner | `String(200)` | NULL | |
+| last_used_at | `TIMESTAMPTZ` | NULL | |
+| created_at | `TIMESTAMPTZ` | default NOW() | |
+| updated_at | `TIMESTAMPTZ` | default NOW() | |
+
+**Indexes:** `idx_api_key_hash (key_hash)`
+
+**Rate limits** (from `shared/constants.py`, enforced in middleware): free=100/min, pro=1000/min, admin=unlimited.
+
+---
+
+## `scraper_configs`
+
+Added in migration 002. Seeded only with `'spotify'` row by the migration; other scrapers (chartmetric, shazam, apple_music, ...) are auto-created on first scheduler tick.
+
+| Column | Type | Constraints | Migration |
+|---|---|---|---|
+| id | `String(100)` | PK | 002 — e.g. `'spotify'`, `'chartmetric'`, `'shazam'` |
+| enabled | `Boolean` | NOT NULL, default `true` | 002 |
+| interval_hours | `Float` | NOT NULL, default `6.0` | 002 |
+| last_run_at | `TIMESTAMPTZ` | NULL | 002 |
+| last_status | `String(50)` | NULL | 002 — `success | error | running` |
+| last_error | `String(2000)` | NULL | 002 |
+| config_json | `JSON` | NOT NULL, default `{}` | 002 — source-specific options |
+| last_record_count | `Integer` | NULL | 003 |
+| created_at | `TIMESTAMPTZ` | default NOW() | 002 |
+| updated_at | `TIMESTAMPTZ` | default NOW() | 002 |
+
+---
+
+## `backtest_results`
+
+Added in migration 005. **Currently 0 rows** — backtest job has never produced output.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `String(36)` | PK | UUID as string |
+| run_id | `String(36)` | NOT NULL | Batch identifier |
+| evaluation_date | `Date` | NOT NULL | Period being scored |
+| entity_type | `String(10)` | NULL | `artist | track` filter |
+| genre_filter | `String(200)` | NULL | Genre ID filter |
+| horizon | `String(5)` | NOT NULL, default `'7d'` | |
+| mae | `Float` | NULL | |
+| rmse | `Float` | NULL | |
+| precision_score | `Float` | NULL | |
+| recall_score | `Float` | NULL | |
+| f1_score | `Float` | NULL | |
+| auc_roc | `Float` | NULL | |
+| sample_count | `Integer` | default 0 | |
+| positive_count | `Integer` | default 0 | |
+| predicted_avg | `Float` | NULL | |
+| actual_rate | `Float` | NULL | |
+| model_version | `String(20)` | NULL | |
+| status | `String(20)` | default `'running'` | `running | completed | failed` |
+| details_json | `JSON` | NULL | |
+| created_at | `TIMESTAMPTZ` | default NOW() | |
+
+**Indexes:** `idx_backtest_run_date (run_id, evaluation_date)`, `idx_backtest_genre_date (genre_filter, evaluation_date)`
+
+---
+
+# Part II — Phase 3 target schema (PROPOSED, not yet migrated)
+
+These tables come from `planning/PRD/SoundPulse_PRD_v2.md` §15 and `TECHNICAL_SPEC.md` §5–7. They have not been migrated yet — Phase 3 work is gated on Phase 2 closing out.
+
+## `ai_artists` (proposed)
+
+Persistent virtual artist personas. Each has a distinct identity, voice, visuals, and grows a discography over time.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | `UUID` PK | |
+| stage_name | `VARCHAR(200)` NOT NULL | Public name |
+| legal_name | `VARCHAR(200)` | For PRO registration |
+| age | `Integer` | |
+| gender | `VARCHAR(20)` | |
+| ethnicity | `VARCHAR(100)` | |
+| provenance | `VARCHAR(500)` | e.g. "Atlanta, raised in Seoul" |
+| languages | `TEXT[]` | |
+| voice_dna | `JSONB` NOT NULL default `{}` | `{timbre, vocal_range, delivery_style, accent, autotune_level, ad_libs, suno_persona_id}` |
+| visual_dna | `JSONB` NOT NULL default `{}` | `{face_description, fashion_style, color_palette, art_direction, tattoos, reference_image_id (6-angle portrait)}` |
+| genre_home | `TEXT[]` NOT NULL | Primary genre IDs |
+| adjacent_genres | `TEXT[]` | |
+| influences | `TEXT[]` | |
+| anti_influences | `TEXT[]` | Negative tags for generation |
+| production_signature | `JSONB` default `{}` | "always uses 808s, spacey reverb" |
+| lyrical_voice | `JSONB` default `{}` | `{themes, vocabulary_level, perspective, recurring_motifs}` |
+| backstory | `Text` | |
+| personality_traits | `TEXT[]` | |
+| social_voice | `JSONB` default `{}` | `{posting_style, caption_format, emoji_usage, controversy_stance}` |
+| spotify_artist_id | `VARCHAR(100)` | Claimed after first release |
+| tiktok_handle | `VARCHAR(100)` | |
+| instagram_handle | `VARCHAR(100)` | |
+| youtube_channel_id | `VARCHAR(100)` | |
+| status | `VARCHAR(20)` default `'active'` | `active | growth | mature | retired` |
+| portfolio_role | `VARCHAR(20)` default `'growth'` | `growth | cash_cow | experimental` |
+| content_rating | `VARCHAR(10)` default `'mild'` | `clean | mild | explicit` — controls profanity |
+| created_at, updated_at | `TIMESTAMPTZ` | |
+
+**Indexes:** `idx_ai_artist_status (status)`, `idx_ai_artist_genre_home GIN (genre_home)`
+
+---
+
+## `ai_artist_releases` (proposed)
+
+| Column | Type | Notes |
+|---|---|---|
+| id | `UUID` PK | |
+| artist_id | `UUID` FK → ai_artists.id | |
+| track_title | `VARCHAR(500)` | |
+| song_dna | `JSONB` NOT NULL | Full blueprint used for generation |
+| generation_model | `VARCHAR(50)` | `suno | udio | soundraw | musicgen` |
+| generation_prompt | `Text` | The exact prompt sent |
+| audio_file_url | `VARCHAR(1000)` | Object storage path |
+| cover_art_url | `VARCHAR(1000)` | |
+| distributed_at | `TIMESTAMPTZ` | NULL until distribution success |
+| distribution_service | `VARCHAR(50)` | `revelator | labelgrid` |
+| isrc | `VARCHAR(20)` | Assigned by distributor |
+| upc | `VARCHAR(20)` | |
+| released_at | `TIMESTAMPTZ` | Public release date |
+| total_streams | `BigInt` default 0 | Updated by scrapers |
+| spotify_streams | `BigInt` default 0 | |
+| apple_streams | `BigInt` default 0 | |
+| tiktok_creates | `Integer` default 0 | UGC count |
+| shazam_lookups | `Integer` default 0 | |
+| revenue_cents | `BigInt` default 0 | Aggregated from `revenue_events` |
+| created_at | `TIMESTAMPTZ` | |
+
+**Indexes:** `idx_release_artist (artist_id, released_at DESC)`, `idx_release_isrc (isrc)`
+
+---
+
+## `revenue_events` (proposed)
+
+Append-only royalty events. Reconciled from Revelator, SoundExchange, ASCAP, distributor reports.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | `UUID` PK | |
+| release_id | `UUID` FK → ai_artist_releases.id | |
+| artist_id | `UUID` FK → ai_artists.id | Denormalized for aggregation queries |
+| platform | `VARCHAR(50)` | spotify, apple_music, youtube, ... |
+| territory | `VARCHAR(10)` | ISO country code |
+| period_start | `Date` | |
+| period_end | `Date` | |
+| stream_count | `BigInt` default 0 | |
+| revenue_cents | `BigInt` default 0 | USD cents |
+| royalty_type | `VARCHAR(20)` | `streaming | mechanical | performance | sync` |
+| source | `VARCHAR(50)` | `revelator | soundexchange | ascap | bmi | distributor` |
+| created_at | `TIMESTAMPTZ` | |
+
+**Indexes:** `idx_revenue_release_period (release_id, period_start)`, `idx_revenue_artist_period (artist_id, period_start)`
+
+---
+
+## `social_posts` (proposed)
+
+| Column | Type | Notes |
+|---|---|---|
+| id | `UUID` PK | |
+| artist_id | `UUID` FK → ai_artists.id | |
+| release_id | `UUID` FK → ai_artist_releases.id NULL | Some posts aren't tied to a specific release |
+| platform | `VARCHAR(20)` | `tiktok | instagram | youtube | x` |
+| content_type | `VARCHAR(30)` | `mood_photo | teaser | release_announcement | lyric_video | ...` |
+| caption | `Text` | |
+| media_url | `VARCHAR(1000)` | Image/video |
+| scheduled_for | `TIMESTAMPTZ` | |
+| posted_at | `TIMESTAMPTZ` NULL | Set after API confirmation |
+| platform_post_id | `VARCHAR(200)` | Returned by platform API |
+| status | `VARCHAR(20)` default `'scheduled'` | `scheduled | posted | failed | cancelled` |
+| likes | `Integer` default 0 | |
+| views | `Integer` default 0 | |
+| shares | `Integer` default 0 | |
+| ugc_creates | `Integer` default 0 | TikTok sound adoptions |
+| created_at, updated_at | `TIMESTAMPTZ` | |
+
+**Indexes:** `idx_social_artist_scheduled (artist_id, scheduled_for)`, `idx_social_status (status)`
+
+---
+
+## `generation_logs` (proposed)
+
+| Column | Type | Notes |
+|---|---|---|
+| id | `UUID` PK | |
+| release_id | `UUID` FK → ai_artist_releases.id NULL | NULL on failed attempts that never produced a release |
+| attempt_number | `Integer` | 1-indexed; max 3 per blueprint |
+| model | `VARCHAR(50)` | suno, udio, ... |
+| prompt | `Text` | Full prompt sent |
+| audio_url | `VARCHAR(1000)` NULL | Output file (NULL on failure) |
+| quality_check_passed | `Boolean` | tempo/energy/duration checks |
+| quality_check_details | `JSONB` | `{tempo_actual, tempo_target, energy_actual, ...}` |
+| cost_cents | `Integer` | API cost in cents |
+| latency_ms | `Integer` | Generation time |
+| error | `Text` NULL | If generation failed |
+| created_at | `TIMESTAMPTZ` | |
+
+**Indexes:** `idx_genlog_release (release_id)`
+
+---
+
+## `llm_calls` (proposed — supports CLAUDE.md "every LLM call must be logged")
+
+CLAUDE.md mandates that every LLM call is logged with model, tokens, cost, timestamp, action type. Currently no such table exists. Proposed:
+
+| Column | Type | Notes |
+|---|---|---|
+| id | `UUID` PK | |
+| model | `VARCHAR(100)` | e.g. `llama-3.3-70b-versatile` (Groq) |
+| provider | `VARCHAR(50)` | `groq | openai | anthropic | replicate` |
+| action_type | `VARCHAR(50)` | `assistant_chat | lyrics_generation | persona_generation | blueprint_assist | ...` |
+| input_tokens | `Integer` | |
+| output_tokens | `Integer` | |
+| cost_cents | `Integer` | Estimated cost in USD cents |
+| latency_ms | `Integer` | |
+| caller | `VARCHAR(200)` | Function or service name |
+| context_id | `VARCHAR(200)` NULL | e.g. release_id, artist_id, prediction_id |
+| metadata_json | `JSON` default `{}` | Anything else worth keeping |
+| created_at | `TIMESTAMPTZ` default NOW() | |
+
+**Indexes:** `idx_llm_call_action_date (action_type, created_at DESC)`, `idx_llm_call_model_date (model, created_at DESC)`

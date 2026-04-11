@@ -193,6 +193,54 @@ def generate_predictions():
         return {"status": "error", "error": str(e)}
 
 
+@app.task(name="scrapers.tasks.run_classification_sweep")
+def run_classification_sweep(batch_size: int = 500):
+    """Periodic sweep that classifies bulk-ingested entities (deferred classification)."""
+    logger.info("Starting classification sweep (batch_size=%d)...", batch_size)
+    try:
+        from api.database import async_session_factory
+        from api.services.classification_sweep import sweep_unclassified_entities
+
+        async def _run():
+            async with async_session_factory() as db:
+                return await sweep_unclassified_entities(db, batch_size=batch_size)
+
+        loop = asyncio.new_event_loop()
+        try:
+            stats = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+        logger.info("Classification sweep complete: %s", stats)
+        return {"status": "success", **stats}
+    except Exception as e:
+        logger.exception("Classification sweep failed")
+        return {"status": "error", "error": str(e)}
+
+
+@app.task(name="scrapers.tasks.run_composite_sweep")
+def run_composite_sweep(batch_size: int = 1000):
+    """Periodic sweep that normalizes + recomputes composite scores for bulk-ingested snapshots."""
+    logger.info("Starting composite sweep (batch_size=%d)...", batch_size)
+    try:
+        from api.database import async_session_factory
+        from api.services.composite_sweep import sweep_zero_normalized_snapshots
+
+        async def _run():
+            async with async_session_factory() as db:
+                return await sweep_zero_normalized_snapshots(db, batch_size=batch_size)
+
+        loop = asyncio.new_event_loop()
+        try:
+            stats = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+        logger.info("Composite sweep complete: %s", stats)
+        return {"status": "success", **stats}
+    except Exception as e:
+        logger.exception("Composite sweep failed")
+        return {"status": "error", "error": str(e)}
+
+
 @app.task(name="scrapers.tasks.health_check")
 def health_check():
     """Run health check on all scrapers."""

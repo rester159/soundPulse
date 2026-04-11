@@ -40,8 +40,12 @@ class ChartmetricScraper(BaseScraper):
     TOKEN_URL = "https://api.chartmetric.com/api/token"
 
     # Chart endpoints to fetch.
-    # Spotify charts use: /api/charts/spotify?date=...&country_code=...&type=...&interval=...
-    #   type options: plays, popularity, playlist_count, playlist_reach, viral, regional
+    # Spotify track chart accepts type ∈ {regional, viral} ONLY (per
+    # api.chartmetric.com/apidoc — verified 2026-04-11). The values
+    # `plays`, `popularity`, `monthly_listeners`, `playlist_count`,
+    # `playlist_reach` belong to the SEPARATE `/charts/spotify/artists`
+    # endpoint, which is covered by `scrapers/chartmetric_deep_us.py`.
+    # The previously-defined `plays` entry has been removed (P1-069 / L001).
     # Other platforms may have different param requirements or need higher-tier access.
     CHART_ENDPOINTS: list[dict[str, Any]] = [
         # Spotify charts
@@ -56,12 +60,6 @@ class ChartmetricScraper(BaseScraper):
             "chart_type": "viral",
             "path": "/api/charts/spotify",
             "params": {"type": "viral", "interval": "daily"},
-        },
-        {
-            "source_platform": "spotify",
-            "chart_type": "plays",
-            "path": "/api/charts/spotify",
-            "params": {"type": "plays", "interval": "daily"},
         },
         # Shazam charts (200 items — great discovery signal)
         {

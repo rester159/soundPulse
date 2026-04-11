@@ -74,6 +74,19 @@ async def _run_scraper_job(scraper_id: str):
                 },
                 api_base_url=api_url, admin_key=admin_key,
             )
+        elif scraper_id == "chartmetric_deep_us":
+            # P1-059: continuous daily run of the full deep US ENDPOINT_MATRIX.
+            # This is the comprehensive pass — ~281 chart pulls covering every
+            # platform × chart_type × genre fan-out for the US. Runs once a day;
+            # the live `chartmetric` scraper above keeps its 4h cadence on the
+            # small confirmed endpoint set for freshness.
+            from scrapers.chartmetric_deep_us import ChartmetricDeepUSScraper
+            scraper = ChartmetricDeepUSScraper(
+                credentials={
+                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
+                },
+                api_base_url=api_url, admin_key=admin_key,
+            )
         elif scraper_id == "shazam":
             from scrapers.shazam import ShazamScraper
             scraper = ShazamScraper(
@@ -170,10 +183,17 @@ async def init_scheduler(database_url: str):
 
     _scheduler = AsyncIOScheduler()
 
-    # Default scraper configs to seed if missing
+    # Default scraper configs to seed if missing.
+    # AUD-004: previously had `spotify_audio` defined twice — Python silently
+    # kept the second definition. Now defined exactly once.
+    # P1-059: `chartmetric_deep_us` is the continuous daily comprehensive
+    # pass — full ENDPOINT_MATRIX (~281 calls/day) hitting the bulk endpoint.
+    # The existing `chartmetric` scraper above keeps its 4h cadence on the
+    # small confirmed endpoint set for freshness; the deep one runs once a day.
     DEFAULT_CONFIGS = {
         "spotify": {"interval_hours": 6, "enabled": True},
         "chartmetric": {"interval_hours": 4, "enabled": True},
+        "chartmetric_deep_us": {"interval_hours": 24, "enabled": True},
         "shazam": {"interval_hours": 4, "enabled": True},
         "apple_music": {"interval_hours": 6, "enabled": False},
         "musicbrainz": {"interval_hours": 12, "enabled": False},
@@ -182,7 +202,6 @@ async def init_scheduler(database_url: str):
         "chartmetric_artists": {"interval_hours": 12, "enabled": True},
         "spotify_audio": {"interval_hours": 24, "enabled": True},
         "genius_lyrics": {"interval_hours": 24, "enabled": False},
-        "spotify_audio": {"interval_hours": 24, "enabled": True},
     }
 
     # Seed default configs for scrapers that don't exist in DB yet
@@ -221,8 +240,59 @@ async def init_scheduler(database_url: str):
             )
             logger.info("Scheduled scraper '%s' every %.1f hours", config.id, config.interval_hours)
 
+    # Deferred sweeps — run every 15 minutes regardless of scraper config.
+    # These process the queues created by the bulk ingest endpoint
+    # (`POST /api/v1/trending/bulk`):
+    #   - classification sweep: clears `metadata_json.needs_classification`
+    #   - composite sweep: normalizes `normalized_score=0` snapshots and
+    #     recomputes composite scores
+    _scheduler.add_job(
+        _run_classification_sweep_job,
+        trigger=IntervalTrigger(minutes=15),
+        id="sweep_classification",
+        replace_existing=True,
+        name="classification sweep (deferred)",
+    )
+    _scheduler.add_job(
+        _run_composite_sweep_job,
+        trigger=IntervalTrigger(minutes=15),
+        id="sweep_composite",
+        replace_existing=True,
+        name="composite sweep (deferred)",
+    )
+
     _scheduler.start()
     logger.info("Scraper scheduler started with %d jobs", len(_scheduler.get_jobs()))
+
+
+# ---------------------------------------------------------------------------
+# Deferred sweep job runners (called by APScheduler)
+# ---------------------------------------------------------------------------
+
+async def _run_classification_sweep_job():
+    """APScheduler entry point for the classification sweep."""
+    from api.services.classification_sweep import sweep_unclassified_entities
+
+    factory = _get_session_factory()
+    try:
+        async with factory() as db:
+            stats = await sweep_unclassified_entities(db, batch_size=500)
+        logger.info("[scheduler] classification sweep: %s", stats)
+    except Exception:
+        logger.exception("[scheduler] classification sweep failed")
+
+
+async def _run_composite_sweep_job():
+    """APScheduler entry point for the composite recalc sweep."""
+    from api.services.composite_sweep import sweep_zero_normalized_snapshots
+
+    factory = _get_session_factory()
+    try:
+        async with factory() as db:
+            stats = await sweep_zero_normalized_snapshots(db, batch_size=1000)
+        logger.info("[scheduler] composite sweep: %s", stats)
+    except Exception:
+        logger.exception("[scheduler] composite sweep failed")
 
 
 def update_job(scraper_id: str, interval_hours: float, enabled: bool):

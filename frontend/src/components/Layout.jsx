@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
-import { BarChart3, Search, Terminal, FlaskConical, Music, Settings, AudioLines, GitBranch } from 'lucide-react'
+import { BarChart3, Search, Terminal, FlaskConical, Music, Settings, AudioLines, GitBranch, Database } from 'lucide-react'
 import AssistantPanel from './AssistantPanel'
 import SettingsDrawer from './SettingsDrawer'
 
@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { to: '/song-lab',        label: 'Song Lab',        icon: Music },
   { to: '/model-validation',label: 'Model Validation',icon: FlaskConical },
   { to: '/data-flow',       label: 'Data Pipeline',   icon: GitBranch },
+  { to: '/db-stats',        label: 'DB Stats',        icon: Database },
   { to: '/api-tester',      label: 'API Tester',      icon: Terminal },
 ]
 

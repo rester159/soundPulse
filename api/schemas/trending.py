@@ -31,6 +31,14 @@ class TrendingIngestResponse(BaseModel):
     data: dict[str, Any]
 
 
+class TrendingIngestBulk(BaseModel):
+    items: list[TrendingIngest] = Field(..., min_length=1, max_length=1000)
+
+
+class TrendingIngestBulkResponse(BaseModel):
+    data: dict[str, Any]
+
+
 class EntityInfo(BaseModel):
     id: str
     type: str

@@ -399,8 +399,14 @@ class GenreClassifier:
                     select(ArtistModel).where(ArtistModel.id == artist_id)
                 )
                 artist = result.scalar_one_or_none()
-            except Exception:
-                logger.debug("Failed to load artist for track %s", entity.id)
+            except Exception as exc:
+                # AUD-006: was `logger.debug` which is invisible at default
+                # log levels. Failed artist lookups directly cause empty
+                # genre classification — surface them at warning.
+                logger.warning(
+                    "[genre-classifier] artist inheritance failed: track=%s artist_id=%s err=%s",
+                    entity.id, artist_id, exc,
+                )
                 return {}
 
         if artist is None:
