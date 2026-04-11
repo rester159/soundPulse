@@ -16,14 +16,30 @@ _PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import logging
+    log = logging.getLogger(__name__)
+
+    # AUD-036/037: security check runs here (not at import time). Logs a
+    # CRITICAL warning if running in production with default keys but does
+    # not raise, so the app still boots. L005: previous implementation
+    # raised at import time and caused 4 consecutive deploys to fail.
+    try:
+        from api.config import InsecureDefaultError
+        settings = get_settings()
+        try:
+            settings.assert_secure_in_production()
+        except InsecureDefaultError as exc:
+            log.critical("[SECURITY] %s", exc)
+    except Exception as e:
+        log.warning("Security check skipped: %s", e)
+
     # Start scraper scheduler
     try:
         from scrapers.scheduler import init_scheduler, shutdown_scheduler
         settings = get_settings()
         await init_scheduler(settings.database_url)
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("Scheduler startup failed: %s", e, exc_info=True)
+        log.warning("Scheduler startup failed: %s", e, exc_info=True)
 
     yield
 

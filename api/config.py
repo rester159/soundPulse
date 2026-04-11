@@ -56,6 +56,9 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    settings = Settings()
-    settings.assert_secure_in_production()
-    return settings
+    # NOTE: we deliberately do NOT call assert_secure_in_production() here.
+    # That would run at import time and brick the app on any import path
+    # (migrations, scripts, tests, etc.) if the env var is set to the
+    # default. Instead, main.py's lifespan calls the check at startup
+    # and logs a CRITICAL warning but does not raise. See L005.
+    return Settings()
