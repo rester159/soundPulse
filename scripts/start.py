@@ -23,9 +23,16 @@ def main() -> None:
         sys.exit(exc.returncode or 1)
 
     print("Seeding genre taxonomy...")
+    # L006: invoke as a MODULE (`-m scripts.seed_genres`), NOT as a bare
+    # script path. Running `python scripts/seed_genres.py` puts `scripts/`
+    # on sys.path[0] instead of the project root, breaking the
+    # `from shared.genre_taxonomy import ...` import inside. This had been
+    # silently failing on every deploy — AUD-039 (`check=True`) made it
+    # loud and broke Railway deploys for 4 commits straight.
+    # seed_genres.py's own docstring says `Usage: python -m scripts.seed_genres`.
     try:
         subprocess.run(
-            [sys.executable, "scripts/seed_genres.py"],
+            [sys.executable, "-m", "scripts.seed_genres"],
             check=True,
         )
     except subprocess.CalledProcessError as exc:
