@@ -201,7 +201,9 @@ export function useGenreOpportunities() {
   return useQuery({
     queryKey: ['blueprint', 'genres'],
     queryFn: () => makeRequest('GET', '/blueprint/genres'),
-    staleTime: 300_000,
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+    refetchOnMount: true,
   })
 }
 

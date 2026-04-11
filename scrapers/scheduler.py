@@ -198,6 +198,20 @@ async def init_scheduler(database_url: str):
         name="composite sweep (deferred)",
     )
 
+    # Stale-job reaper — clears scrapers whose last_status got stuck at
+    # "running" because the process was killed mid-run (deploy, OOM, crash).
+    # Without this, a scraper can sit in "running" forever until the next
+    # scheduled interval fires, masking failures on the admin dashboard.
+    # Runs once on startup and every 30 minutes thereafter.
+    await _reap_stale_running_scrapers()
+    _scheduler.add_job(
+        _reap_stale_running_scrapers,
+        trigger=IntervalTrigger(minutes=30),
+        id="sweep_stale_scrapers",
+        replace_existing=True,
+        name="stale-scraper reaper",
+    )
+
     _scheduler.start()
     logger.info("Scraper scheduler started with %d jobs", len(_scheduler.get_jobs()))
 
@@ -230,6 +244,55 @@ async def _run_composite_sweep_job():
         logger.info("[scheduler] composite sweep: %s", stats)
     except Exception:
         logger.exception("[scheduler] composite sweep failed")
+
+
+async def _reap_stale_running_scrapers():
+    """
+    Mark scrapers whose last_status='running' is older than 2x their
+    configured interval (or 2 hours, whichever is larger) as "error: stale".
+
+    Why: scheduler.py's `_run_scraper_job` updates last_status inside a
+    post-run transaction. If the container dies between `scraper.run()`
+    finishing and that transaction committing (deploy restart, OOM), the
+    row stays at "running" forever. The admin dashboard then shows a
+    phantom in-flight job that masks real failures and blocks the next
+    scheduled run from looking normal.
+
+    This reaper runs on startup (once) and every 30 minutes thereafter.
+    """
+    from api.models.scraper_config import ScraperConfig
+
+    factory = _get_session_factory()
+    try:
+        async with factory() as db:
+            result = await db.execute(
+                select(ScraperConfig).where(ScraperConfig.last_status == "running")
+            )
+            stuck = result.scalars().all()
+            now = datetime.now(timezone.utc)
+            reaped = 0
+            for cfg in stuck:
+                if cfg.last_run_at is None:
+                    continue
+                grace_hours = max(2.0, (cfg.interval_hours or 1.0) * 2.0)
+                last_run = cfg.last_run_at
+                # Normalize naive timestamps from older rows
+                if last_run.tzinfo is None:
+                    last_run = last_run.replace(tzinfo=timezone.utc)
+                age_hours = (now - last_run).total_seconds() / 3600.0
+                if age_hours >= grace_hours:
+                    cfg.last_status = "error"
+                    cfg.last_error = (
+                        f"stale: last_status stuck at 'running' for "
+                        f"{age_hours:.1f}h (grace={grace_hours:.1f}h) — "
+                        f"likely killed mid-run by deploy/crash"
+                    )
+                    reaped += 1
+            if reaped:
+                await db.commit()
+                logger.warning("[scheduler] reaped %d stale 'running' scraper row(s)", reaped)
+    except Exception:
+        logger.exception("[scheduler] stale-scraper reaper failed")
 
 
 def update_job(scraper_id: str, interval_hours: float, enabled: bool):
