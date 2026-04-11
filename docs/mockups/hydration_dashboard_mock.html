@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SoundPulse — Hydration Coverage (MOCK)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #09090b;
+    color: #e4e4e7;
+    padding: 24px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .container { max-width: 1280px; margin: 0 auto; }
+  .header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #27272a;
+    padding-bottom: 16px;
+  }
+  .header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    color: #fafafa;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .header h1::before {
+    content: '●';
+    color: #a78bfa;
+    font-size: 14px;
+  }
+  .subtitle { color: #71717a; font-size: 11px; margin-top: 2px; }
+  .live-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    border-radius: 6px;
+    color: #34d399;
+    font-size: 10px;
+    font-weight: 500;
+  }
+  .live-indicator::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #34d399;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .top-summary {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .kpi {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .kpi-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #71717a;
+    margin-bottom: 6px;
+  }
+  .kpi-value {
+    font-size: 24px;
+    font-weight: 700;
+    color: #fafafa;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi-sub { font-size: 10px; color: #52525b; margin-top: 4px; }
+  .kpi-delta { color: #34d399; font-weight: 600; }
+
+  .card {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .card-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #71717a;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .card-title-right {
+    font-size: 10px;
+    color: #52525b;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  /* Horizontal bar for hydration per source */
+  .hbar-row {
+    display: grid;
+    grid-template-columns: 140px 1fr 110px 60px;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid #27272a;
+  }
+  .hbar-row:last-child { border-bottom: none; }
+  .hbar-label {
+    color: #e4e4e7;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .hbar-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .hbar-track {
+    position: relative;
+    height: 22px;
+    background: #0a0a0a;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid #27272a;
+  }
+  .hbar-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 8px;
+    color: #fafafa;
+    font-size: 10px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    transition: width 0.5s ease;
+  }
+  .hbar-count {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: #fafafa;
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .hbar-pct {
+    text-align: right;
+    color: #a1a1aa;
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+  }
+  .hbar-health {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .health-good { background: rgba(16, 185, 129, 0.1); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+  .health-warn { background: rgba(245, 158, 11, 0.1); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+  .health-bad  { background: rgba(244, 63, 94,  0.1); color: #fb7185; border: 1px solid rgba(244, 63, 94,  0.3); }
+
+  /* Side-by-side layout */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+
+  /* Density histogram */
+  .density-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 70px;
+    gap: 10px;
+    align-items: center;
+    padding: 6px 0;
+  }
+  .density-label {
+    color: #a1a1aa;
+    font-size: 11px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .density-bar {
+    height: 20px;
+    background: #0a0a0a;
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+    border: 1px solid #27272a;
+  }
+  .density-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #8b5cf6, #a78bfa);
+    border-radius: 4px;
+  }
+  .density-count {
+    text-align: right;
+    color: #e4e4e7;
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  /* Snapshot age stacked bar */
+  .age-bar-wrapper { margin-bottom: 12px; }
+  .age-bar-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .age-bar-platform {
+    color: #e4e4e7;
+    font-weight: 500;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .age-bar-total {
+    color: #71717a;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .age-bar-stack {
+    height: 16px;
+    display: flex;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #0a0a0a;
+    border: 1px solid #27272a;
+  }
+  .age-seg {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 600;
+    color: #fafafa;
+  }
+  .age-seg-1w    { background: #a78bfa; }  /* purple — freshest */
+  .age-seg-1mo   { background: #8b5cf6; }
+  .age-seg-3mo   { background: #7c3aed; }
+  .age-seg-9mo   { background: #6d28d9; }
+  .age-seg-older { background: #4c1d95; }
+  .age-legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #27272a;
+    font-size: 10px;
+    color: #71717a;
+  }
+  .age-legend-item { display: flex; align-items: center; gap: 6px; }
+  .age-legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
+
+  /* Dot colors per platform */
+  .dot-spotify     { background: #1db954; }
+  .dot-apple_music { background: #fa586a; }
+  .dot-shazam      { background: #0066ff; }
+  .dot-tiktok      { background: #ff0050; }
+  .dot-youtube     { background: #ff0000; }
+  .dot-itunes      { background: #ff4081; }
+  .dot-deezer      { background: #a238ff; }
+  .dot-amazon      { background: #ff9900; }
+  .dot-soundcloud  { background: #ff7700; }
+  .dot-beatport    { background: #01ff95; }
+  .dot-radio       { background: #fde047; }
+  .dot-orphan      { background: #52525b; }
+
+  .fill-spotify     { background: linear-gradient(90deg, rgba(29,185,84,0.2),  #1db954); }
+  .fill-apple_music { background: linear-gradient(90deg, rgba(250,88,106,0.2), #fa586a); }
+  .fill-shazam      { background: linear-gradient(90deg, rgba(0,102,255,0.2),  #0066ff); }
+  .fill-tiktok      { background: linear-gradient(90deg, rgba(255,0,80,0.2),   #ff0050); }
+  .fill-youtube     { background: linear-gradient(90deg, rgba(255,0,0,0.2),    #ff0000); }
+  .fill-itunes      { background: linear-gradient(90deg, rgba(255,64,129,0.2), #ff4081); }
+  .fill-deezer      { background: linear-gradient(90deg, rgba(162,56,255,0.2), #a238ff); }
+  .fill-amazon      { background: linear-gradient(90deg, rgba(255,153,0,0.2),  #ff9900); }
+  .fill-soundcloud  { background: linear-gradient(90deg, rgba(255,119,0,0.2),  #ff7700); }
+  .fill-beatport    { background: linear-gradient(90deg, rgba(1,255,149,0.2),  #01ff95); }
+  .fill-radio       { background: linear-gradient(90deg, rgba(253,224,71,0.2), #fde047); }
+  .fill-orphan      { background: linear-gradient(90deg, rgba(82,82,91,0.2),   #71717a); }
+
+  /* Time-series chart */
+  .chart-wrap {
+    position: relative;
+    width: 100%;
+    height: 340px;
+    margin-top: 8px;
+  }
+  .chart-svg { width: 100%; height: 100%; display: block; }
+  .chart-grid line { stroke: #27272a; stroke-width: 1; }
+  .chart-axis-label {
+    fill: #71717a;
+    font-size: 10px;
+    font-family: -apple-system, sans-serif;
+  }
+  .chart-total-line { stroke: #fafafa; stroke-width: 2.5; fill: none; }
+  .chart-total-area { fill: rgba(255,255,255,0.04); }
+  .chart-source-line { fill: none; stroke-width: 1.8; opacity: 0.9; }
+  .chart-source-line:hover { stroke-width: 3; opacity: 1; }
+  .chart-legend {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px 16px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid #27272a;
+    font-size: 11px;
+  }
+  .chart-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #a1a1aa;
+  }
+  .chart-legend-item strong {
+    color: #e4e4e7;
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+  }
+  .chart-legend-swatch {
+    width: 14px;
+    height: 3px;
+    border-radius: 2px;
+  }
+  .chart-legend-swatch.total { height: 3px; background: #fafafa; }
+
+  .chart-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .chart-btn {
+    background: #27272a;
+    color: #a1a1aa;
+    border: 1px solid #3f3f46;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 10px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .chart-btn.active {
+    background: rgba(139, 92, 246, 0.2);
+    color: #c4b5fd;
+    border-color: rgba(139, 92, 246, 0.4);
+  }
+
+  /* Overlap matrix */
+  .matrix {
+    display: grid;
+    grid-template-columns: 100px repeat(6, 1fr);
+    gap: 2px;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .matrix-header { padding: 6px 4px; color: #71717a; text-align: center; text-transform: uppercase; letter-spacing: 0.03em; font-size: 9px; }
+  .matrix-row-label { padding: 6px 8px; color: #a1a1aa; font-weight: 500; text-align: right; }
+  .matrix-cell {
+    padding: 8px 4px;
+    text-align: center;
+    border-radius: 3px;
+    color: #e4e4e7;
+  }
+  /* Cell background varies with intensity (mocked) */
+  .mc-0   { background: #0a0a0a; color: #3f3f46; }
+  .mc-10  { background: rgba(139, 92, 246, 0.08); }
+  .mc-25  { background: rgba(139, 92, 246, 0.18); }
+  .mc-50  { background: rgba(139, 92, 246, 0.35); }
+  .mc-75  { background: rgba(139, 92, 246, 0.55); }
+  .mc-100 { background: rgba(139, 92, 246, 0.80); color: #fff; font-weight: 600; }
+
+  .note {
+    margin-top: 16px;
+    padding: 10px 14px;
+    background: rgba(139, 92, 246, 0.06);
+    border-left: 3px solid #8b5cf6;
+    border-radius: 4px;
+    color: #a1a1aa;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <h1>Hydration Coverage</h1>
+      <div class="subtitle">Cross-source data coverage across the track corpus · <span class="live-indicator">LIVE · updated 8s ago</span></div>
+    </div>
+    <div style="color:#52525b;font-size:10px;">MOCK — not connected to real data</div>
+  </div>
+
+  <!-- Top KPIs -->
+  <div class="top-summary">
+    <div class="kpi">
+      <div class="kpi-label">Total tracks</div>
+      <div class="kpi-value">8,734</div>
+      <div class="kpi-sub"><span class="kpi-delta">+142</span> since last minute</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Hydrated (≥1 source)</div>
+      <div class="kpi-value">8,562 <span style="font-size:14px;color:#71717a;font-weight:500;">98%</span></div>
+      <div class="kpi-sub">172 orphans</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Multi-source (≥2)</div>
+      <div class="kpi-value">5,814 <span style="font-size:14px;color:#71717a;font-weight:500;">67%</span></div>
+      <div class="kpi-sub">Entity resolution is working</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Deeply covered (≥4)</div>
+      <div class="kpi-value">1,923 <span style="font-size:14px;color:#71717a;font-weight:500;">22%</span></div>
+      <div class="kpi-sub">Chart-mainstream tracks</div>
+    </div>
+  </div>
+
+  <!-- Section 1: LIVE time-series — total tracks + per-source hydration %
+       (moved to top per user feedback — auto-refreshes every 10s, no reload needed) -->
+  <div class="card">
+    <div class="card-title">
+      <span>
+        Live hydration growth
+        <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;margin-left:8px;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:4px;color:#34d399;font-size:9px;font-weight:500;text-transform:none;letter-spacing:0.01em;">
+          <span style="width:5px;height:5px;border-radius:50%;background:#34d399;animation:pulse 2s infinite;"></span>
+          LIVE · auto-refresh 10s · no page reload
+        </span>
+      </span>
+      <div class="chart-controls">
+        <button class="chart-btn">1h</button>
+        <button class="chart-btn active">24h</button>
+        <button class="chart-btn">7d</button>
+        <button class="chart-btn">30d</button>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <!--
+        Dual-axis chart:
+          Left Y (white ticks):  absolute track count (0 → 5,500)
+          Right Y (colored):     per-source hydration % (0 → 100)
+          X: time (-24h → now), hourly buckets
+          Bold WHITE line + soft fill = total tracks
+          Colored lines             = % of corpus hydrated by each source
+        Lines are mocked polylines; real version will use recharts/d3
+        with live data from GET /api/v1/admin/db-stats/hydration/history.
+      -->
+      <svg class="chart-svg" viewBox="0 0 800 340" preserveAspectRatio="none">
+        <!-- Grid + axes -->
+        <g class="chart-grid">
+          <!-- Horizontal grid lines (left axis = tracks) -->
+          <line x1="50" y1="30"  x2="760" y2="30" />
+          <line x1="50" y1="92"  x2="760" y2="92" />
+          <line x1="50" y1="154" x2="760" y2="154" />
+          <line x1="50" y1="216" x2="760" y2="216" />
+          <line x1="50" y1="278" x2="760" y2="278" />
+          <!-- Vertical grid lines (time ticks every 4h) -->
+          <line x1="168" y1="30" x2="168" y2="278" stroke-dasharray="2 3" />
+          <line x1="286" y1="30" x2="286" y2="278" stroke-dasharray="2 3" />
+          <line x1="404" y1="30" x2="404" y2="278" stroke-dasharray="2 3" />
+          <line x1="522" y1="30" x2="522" y2="278" stroke-dasharray="2 3" />
+          <line x1="640" y1="30" x2="640" y2="278" stroke-dasharray="2 3" />
+        </g>
+        <!-- Left Y axis labels (tracks) -->
+        <text class="chart-axis-label" x="42" y="34" text-anchor="end">5.5k</text>
+        <text class="chart-axis-label" x="42" y="96" text-anchor="end">4.1k</text>
+        <text class="chart-axis-label" x="42" y="158" text-anchor="end">2.8k</text>
+        <text class="chart-axis-label" x="42" y="220" text-anchor="end">1.4k</text>
+        <text class="chart-axis-label" x="42" y="282" text-anchor="end">0</text>
+        <text class="chart-axis-label" x="42" y="18" text-anchor="end" fill="#fafafa">tracks</text>
+        <!-- Right Y axis labels (%) -->
+        <text class="chart-axis-label" x="768" y="34"  text-anchor="start">100%</text>
+        <text class="chart-axis-label" x="768" y="96"  text-anchor="start">75%</text>
+        <text class="chart-axis-label" x="768" y="158" text-anchor="start">50%</text>
+        <text class="chart-axis-label" x="768" y="220" text-anchor="start">25%</text>
+        <text class="chart-axis-label" x="768" y="282" text-anchor="start">0%</text>
+        <text class="chart-axis-label" x="768" y="18"  text-anchor="start">coverage</text>
+        <!-- X axis labels -->
+        <text class="chart-axis-label" x="50"  y="298" text-anchor="start">-24h</text>
+        <text class="chart-axis-label" x="168" y="298" text-anchor="middle">-20h</text>
+        <text class="chart-axis-label" x="286" y="298" text-anchor="middle">-16h</text>
+        <text class="chart-axis-label" x="404" y="298" text-anchor="middle">-12h</text>
+        <text class="chart-axis-label" x="522" y="298" text-anchor="middle">-8h</text>
+        <text class="chart-axis-label" x="640" y="298" text-anchor="middle">-4h</text>
+        <text class="chart-axis-label" x="760" y="298" text-anchor="end">now</text>
+
+        <!--
+          TOTAL TRACKS LINE (bold white, primary)
+          Mocked: 2200 → 4900 over 24h, sigmoid growth during backfill window
+          Left Y scale: 0..5500 → y = 278 - (tracks / 5500) * 248
+          X scale: 24 hourly points from x=50 to x=760 (step 29.58)
+        -->
+        <!-- fill area under total line -->
+        <path class="chart-total-area" d="
+          M 50,179
+          L 79,177 L 109,175 L 138,173 L 168,171
+          L 197,168 L 227,164 L 256,158 L 286,150
+          L 315,140 L 345,128 L 374,114 L 404,100
+          L 434,88  L 463,80  L 493,74  L 522,68
+          L 552,62  L 581,56  L 611,52  L 640,48
+          L 670,44  L 699,42  L 729,40  L 760,38
+          L 760,278 L 50,278 Z
+        "/>
+        <polyline class="chart-total-line" points="
+          50,179 79,177 109,175 138,173 168,171
+          197,168 227,164 256,158 286,150
+          315,140 345,128 374,114 404,100
+          434,88  463,80  493,74  522,68
+          552,62  581,56  611,52  640,48
+          670,44  699,42  729,40  760,38
+        "/>
+
+        <!--
+          Per-source % lines (right axis). Right Y scale: 0..100 → y = 278 - (pct/100)*248
+          shazam:  75% → 85% (was already high)
+        -->
+        <polyline class="chart-source-line" stroke="#0066ff" points="
+          50,92 79,91 109,90 138,89 168,88 197,86 227,85 256,83 286,81
+          315,79 345,77 374,75 404,73 434,71 463,69 493,67 522,65 552,63
+          581,61 611,59 640,58 670,57 699,56 729,55 760,54
+        "/>
+        <!-- spotify: 55% → 71% -->
+        <polyline class="chart-source-line" stroke="#1db954" points="
+          50,142 79,140 109,138 138,136 168,133 197,130 227,126 256,121 286,116
+          315,111 345,105 374,100 404,96 434,92 463,90 493,88 522,86 552,84
+          581,82 611,80 640,79 670,77 699,76 729,75 760,74
+        "/>
+        <!-- apple_music: 45% → 64% -->
+        <polyline class="chart-source-line" stroke="#fa586a" points="
+          50,167 79,165 109,163 138,160 168,156 197,152 227,147 256,141 286,133
+          315,125 345,118 374,111 404,105 434,101 463,97 493,94 522,92 552,90
+          581,88 611,87 640,86 670,85 699,84 729,83 760,82
+        "/>
+        <!-- itunes: 20% → 41% -->
+        <polyline class="chart-source-line" stroke="#ff4081" points="
+          50,229 79,228 109,226 138,223 168,220 197,216 227,210 256,203 286,196
+          315,188 345,180 374,172 404,164 434,157 463,152 493,148 522,144 552,141
+          581,138 611,135 640,132 670,130 699,128 729,127 760,126
+        "/>
+        <!-- tiktok: 8% → 28% (jumps when backfill hits tiktok endpoints mid-run) -->
+        <polyline class="chart-source-line" stroke="#ff0050" points="
+          50,258 79,258 109,258 138,257 168,257 197,256 227,255 256,253 286,250
+          315,240 345,225 374,210 404,200 434,193 463,188 493,184 522,181 552,178
+          581,176 611,174 640,172 670,171 699,170 729,169 760,168
+        "/>
+        <!-- youtube: 5% → 19% -->
+        <polyline class="chart-source-line" stroke="#ff0000" points="
+          50,266 79,266 109,266 138,265 168,265 197,264 227,263 256,262 286,260
+          315,254 345,246 374,238 404,230 434,224 463,220 493,216 522,213 552,210
+          581,208 611,206 640,204 670,203 699,202 729,201 760,201
+        "/>
+        <!-- beatport: 3% → 14% -->
+        <polyline class="chart-source-line" stroke="#01ff95" points="
+          50,271 79,271 109,271 138,270 168,270 197,269 227,268 256,267 286,265
+          315,261 345,256 374,251 404,246 434,241 463,237 493,233 522,230 552,228
+          581,226 611,224 640,222 670,221 699,220 729,219 760,218
+        "/>
+        <!-- radio (airplay): 0% → 12% (new!) — shows a delayed start reflecting tier-gated endpoint -->
+        <polyline class="chart-source-line" stroke="#fde047" stroke-dasharray="4 2" points="
+          50,278 79,278 109,278 138,278 168,278 197,278 227,278 256,278 286,276
+          315,272 345,266 374,260 404,253 434,247 463,243 493,239 522,235 552,232
+          581,230 611,228 640,226 670,225 699,224 729,223 760,222
+        "/>
+        <!-- deezer: 2% → 9% -->
+        <polyline class="chart-source-line" stroke="#a238ff" points="
+          50,273 79,273 109,273 138,273 168,272 197,272 227,271 256,271 286,270
+          315,268 345,265 374,262 404,260 434,257 463,255 493,253 522,251 552,249
+          581,248 611,247 640,246 670,245 699,244 729,244 760,243
+        "/>
+        <!-- amazon: 1% → 6% -->
+        <polyline class="chart-source-line" stroke="#ff9900" points="
+          50,276 79,276 109,276 138,276 168,275 197,275 227,275 256,274 286,274
+          315,273 345,272 374,270 404,269 434,267 463,265 493,263 522,261 552,259
+          581,257 611,256 640,255 670,254 699,253 729,252 760,251
+        "/>
+        <!-- soundcloud: 0% → 4% -->
+        <polyline class="chart-source-line" stroke="#ff7700" points="
+          50,278 79,278 109,278 138,278 168,278 197,277 227,277 256,277 286,276
+          315,276 345,275 374,274 404,273 434,272 463,271 493,270 522,269 552,268
+          581,267 611,266 640,265 670,264 699,263 729,262 760,261
+        "/>
+
+        <!-- "now" dot on total line -->
+        <circle cx="760" cy="38" r="4" fill="#fafafa" />
+      </svg>
+    </div>
+
+    <!-- Legend showing current values -->
+    <div class="chart-legend">
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch total"></span>total tracks
+        <strong>4,924</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#0066ff;"></span>shazam
+        <strong>85%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#1db954;"></span>spotify
+        <strong>71%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#fa586a;"></span>apple_music
+        <strong>64%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#ff4081;"></span>itunes
+        <strong>41%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#ff0050;"></span>tiktok
+        <strong>28%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#ff0000;"></span>youtube
+        <strong>19%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#01ff95;"></span>beatport
+        <strong>14%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#fde047;"></span>radio (airplay)
+        <strong>12%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#a238ff;"></span>deezer
+        <strong>9%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#ff9900;"></span>amazon
+        <strong>6%</strong>
+      </div>
+      <div class="chart-legend-item">
+        <span class="chart-legend-swatch" style="background:#ff7700;"></span>soundcloud
+        <strong>4%</strong>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>How to read this:</b> the bold <b>white line + soft fill</b> = total tracks (left axis, 0 → 5.5k). The
+      colored lines = % of the corpus hydrated by each source (right axis, 0 → 100%). As the backfill runs,
+      the total line climbs AND the source lines climb together — because every new track gets multi-source
+      hydration from the deep matrix. When a source line <i>diverges upward</i> while total is flat, it means
+      entity resolution just matched a bunch of existing tracks to that source (e.g. the tiktok line jumping
+      between -10h and -6h = when the backfill hit the TikTok endpoints). The dashed <b>radio (airplay) line</b>
+      starts late because its endpoint is gated behind a Chartmetric sub-resource we only just unlocked.
+      The real version will have toggle buttons in the top-right (1h / 24h / 7d / 30d) to zoom the time window,
+      and hover tooltips with exact values per bucket.
+    </div>
+  </div>
+
+  <!-- Section 2: Per-source hydration bars (the snapshot view — complements the time-series above) -->
+  <div class="card">
+    <div class="card-title">
+      <span>
+        Tracks hydrated per source
+        <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;margin-left:8px;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:4px;color:#34d399;font-size:9px;font-weight:500;text-transform:none;letter-spacing:0.01em;">
+          <span style="width:5px;height:5px;border-radius:50%;background:#34d399;animation:pulse 2s infinite;"></span>
+          LIVE
+        </span>
+      </span>
+      <span class="card-title-right">bar length = % of total tracks · sorted by count</span>
+    </div>
+
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-shazam"></span>shazam</div>
+      <div class="hbar-track"><div class="hbar-fill fill-shazam" style="width: 82%;">82%</div></div>
+      <div class="hbar-count">7,162</div>
+      <div><span class="hbar-health health-good">good</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-spotify"></span>spotify</div>
+      <div class="hbar-track"><div class="hbar-fill fill-spotify" style="width: 71%;">71%</div></div>
+      <div class="hbar-count">6,201</div>
+      <div><span class="hbar-health health-good">good</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-apple_music"></span>apple_music</div>
+      <div class="hbar-track"><div class="hbar-fill fill-apple_music" style="width: 64%;">64%</div></div>
+      <div class="hbar-count">5,590</div>
+      <div><span class="hbar-health health-good">good</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-itunes"></span>itunes</div>
+      <div class="hbar-track"><div class="hbar-fill fill-itunes" style="width: 41%;">41%</div></div>
+      <div class="hbar-count">3,581</div>
+      <div><span class="hbar-health health-warn">fair</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-tiktok"></span>tiktok</div>
+      <div class="hbar-track"><div class="hbar-fill fill-tiktok" style="width: 28%;">28%</div></div>
+      <div class="hbar-count">2,446</div>
+      <div><span class="hbar-health health-warn">fair</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-youtube"></span>youtube</div>
+      <div class="hbar-track"><div class="hbar-fill fill-youtube" style="width: 19%;">19%</div></div>
+      <div class="hbar-count">1,660</div>
+      <div><span class="hbar-health health-warn">fair</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-beatport"></span>beatport</div>
+      <div class="hbar-track"><div class="hbar-fill fill-beatport" style="width: 14%;">14%</div></div>
+      <div class="hbar-count">1,223</div>
+      <div><span class="hbar-health health-warn">fair</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-radio"></span>radio (airplay)</div>
+      <div class="hbar-track"><div class="hbar-fill fill-radio" style="width: 12%;">12%</div></div>
+      <div class="hbar-count">1,048</div>
+      <div><span class="hbar-health health-warn">fair</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-deezer"></span>deezer</div>
+      <div class="hbar-track"><div class="hbar-fill fill-deezer" style="width: 9%;">9%</div></div>
+      <div class="hbar-count">786</div>
+      <div><span class="hbar-health health-bad">weak</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-amazon"></span>amazon</div>
+      <div class="hbar-track"><div class="hbar-fill fill-amazon" style="width: 6%;">6%</div></div>
+      <div class="hbar-count">524</div>
+      <div><span class="hbar-health health-bad">weak</span></div>
+    </div>
+    <div class="hbar-row">
+      <div class="hbar-label"><span class="hbar-dot dot-soundcloud"></span>soundcloud</div>
+      <div class="hbar-track"><div class="hbar-fill fill-soundcloud" style="width: 4%;">4%</div></div>
+      <div class="hbar-count">349</div>
+      <div><span class="hbar-health health-bad">weak</span></div>
+    </div>
+    <div class="hbar-row" style="border-top: 1px solid #27272a; padding-top: 12px; margin-top: 6px;">
+      <div class="hbar-label"><span class="hbar-dot dot-orphan"></span>NO hydration</div>
+      <div class="hbar-track"><div class="hbar-fill fill-orphan" style="width: 2%;">2%</div></div>
+      <div class="hbar-count">172</div>
+      <div><span class="hbar-health health-bad">orphan</span></div>
+    </div>
+
+    <div class="note">
+      <b>Health thresholds:</b> good ≥60%, fair 10-60%, weak &lt;10%. The 2% orphan tracks (172) are likely entity-resolution failures —
+      tracks created by one scraper but never matched against any chart. These deserve a follow-up to either re-classify or prune.
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
