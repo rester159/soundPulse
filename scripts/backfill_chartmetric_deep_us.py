@@ -90,7 +90,14 @@ async def main() -> None:
         deep_mod.ENDPOINT_MATRIX = ENDPOINT_MATRIX
 
     days = (end - start).days + 1
-    n_endpoints = len([e for e in ENDPOINT_MATRIX if not e.requires_city])
+    # L007: previous version filtered by `e.requires_city` which was a field
+    # I removed when rewriting the ChartEndpoint dataclass. The dead attribute
+    # reference caused the subprocess to crash silently at startup with
+    # AttributeError, producing zero ingest on the first real backfill attempt.
+    # Now we just count all endpoints (the scraper itself skips unconfirmed
+    # ones via --confirmed-only). Per-genre fan-outs multiply this number at
+    # runtime.
+    n_endpoints = len(ENDPOINT_MATRIX)
     est_calls = days * n_endpoints
     est_minutes = est_calls * 0.55 / 60
 
