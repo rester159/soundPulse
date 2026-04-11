@@ -272,6 +272,25 @@ export function useTriggerCompositeSweep() {
   })
 }
 
+// Hydration dashboard hooks
+export function useHydrationSnapshot() {
+  return useQuery({
+    queryKey: ['admin', 'hydration'],
+    queryFn: () => makeRequest('GET', '/admin/db-stats/hydration'),
+    refetchInterval: 10_000,  // auto-refresh every 10s, no page reload
+    staleTime: 5_000,
+  })
+}
+
+export function useHydrationHistory(hours = 24) {
+  return useQuery({
+    queryKey: ['admin', 'hydration', 'history', hours],
+    queryFn: () => makeRequest('GET', '/admin/db-stats/hydration/history', { hours }),
+    refetchInterval: 10_000,
+    staleTime: 5_000,
+  })
+}
+
 // Version badge — displays deploy identity in the Layout top-right
 export function useVersion() {
   return useQuery({

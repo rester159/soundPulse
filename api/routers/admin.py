@@ -1065,6 +1065,51 @@ async def merge_artist_metadata(
     return {"artist_id": artist_id, "merged_keys": list(body.keys())}
 
 
+@router.post("/api/v1/admin/artists/backfill-chartmetric-id")
+async def backfill_artists_chartmetric_id(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    One-shot: backfill artists.chartmetric_id from signals_json.cm_artist_id
+    in existing trending_snapshots rows.
+
+    Joins snapshots to tracks to artists and patches the first non-null
+    cm_artist_id found per artist. Idempotent — only updates artists
+    whose chartmetric_id is still NULL.
+
+    Needed because before the forward-fix, the bulk endpoint never
+    propagated cm_artist_id from track-level signals onto the artist row,
+    leaving Phase 2b/4 scrapers with zero input.
+    """
+    from sqlalchemy import text as sa_text
+    result = await db.execute(sa_text("""
+        WITH artist_cm_ids AS (
+            SELECT DISTINCT ON (t.artist_id)
+                t.artist_id,
+                (ts.signals_json->>'cm_artist_id')::bigint AS cm_artist_id
+            FROM trending_snapshots ts
+            JOIN tracks t ON t.id = ts.entity_id
+            WHERE ts.entity_type = 'track'
+              AND ts.signals_json->>'cm_artist_id' IS NOT NULL
+              AND ts.signals_json->>'cm_artist_id' ~ '^[0-9]+$'
+            ORDER BY t.artist_id, ts.created_at DESC
+        )
+        UPDATE artists a
+        SET chartmetric_id = aci.cm_artist_id
+        FROM artist_cm_ids aci
+        WHERE a.id = aci.artist_id
+          AND a.chartmetric_id IS NULL
+        RETURNING a.id
+    """))
+    updated_ids = result.fetchall()
+    await db.commit()
+    return {
+        "artists_updated": len(updated_ids),
+        "detail": "Backfilled chartmetric_id on artists from signals_json.cm_artist_id",
+    }
+
+
 @router.get("/api/v1/admin/artists/with-chartmetric-id")
 async def get_artists_with_chartmetric_id(
     limit: int = 500,
@@ -1194,6 +1239,40 @@ async def get_db_stats_history(
     """Daily new-row counts per table for the last N days (cap 365)."""
     from api.services.db_stats import get_history
     return await get_history(db, days=days)
+
+
+@router.get("/api/v1/admin/db-stats/hydration")
+async def get_db_stats_hydration(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Hydration dashboard — current snapshot of cross-source coverage.
+
+    Returns per-source track counts (distinct tracks that have ≥1 snapshot
+    from that source_platform), totals, and derived KPIs (orphan count,
+    multi-source count, deep-source count). Powers the top bar chart in
+    the hydration dashboard page.
+    """
+    from api.services.db_stats import get_hydration_snapshot
+    return await get_hydration_snapshot(db)
+
+
+@router.get("/api/v1/admin/db-stats/hydration/history")
+async def get_db_stats_hydration_history(
+    hours: int = 24,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Hydration dashboard — live time series of total tracks + per-source %.
+
+    Bucketed by hour (or 6h / 1d for longer ranges). Each bucket is a
+    point-in-time cumulative snapshot of the corpus. Powers the dual-axis
+    live chart at the top of the hydration dashboard.
+    """
+    from api.services.db_stats import get_hydration_history
+    return await get_hydration_history(db, hours=hours)
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import SongLab from './pages/SongLab'
 import Assistant from './pages/Assistant'
 import DataFlow from './pages/DataFlow'
 import DbStats from './pages/DbStats'
+import HydrationDashboard from './pages/HydrationDashboard'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -58,6 +59,7 @@ function App() {
             <Route path="/assistant" element={<ErrorBoundary><Assistant /></ErrorBoundary>} />
             <Route path="/data-flow" element={<ErrorBoundary><DataFlow /></ErrorBoundary>} />
             <Route path="/db-stats" element={<ErrorBoundary><DbStats /></ErrorBoundary>} />
+            <Route path="/hydration" element={<ErrorBoundary><HydrationDashboard /></ErrorBoundary>} />
           </Route>
         </Routes>
       </BrowserRouter>

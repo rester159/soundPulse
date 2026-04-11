@@ -265,6 +265,28 @@ async def ingest_trending_bulk(
             # Merge classification-relevant signals into metadata so the deferred
             # sweep has them available
             sig = item.signals or {}
+
+            # Phase 2b/4 fix: when a track's signals include cm_artist_id
+            # (Chartmetric's artist ID), propagate it onto the resolved
+            # artist row so the artist-based scrapers can find it. Before
+            # this fix, cm_artist_id lived only in signals_json and
+            # artists.chartmetric_id was never populated — causing the
+            # Phase 2b (per-artist tracks) and Phase 4 (artist stats)
+            # scrapers to walk an empty result set.
+            if item.entity_type == "track" and sig.get("cm_artist_id"):
+                try:
+                    cm_artist_int = int(sig["cm_artist_id"])
+                    artist_id_fk = getattr(entity, "artist_id", None)
+                    if artist_id_fk is not None:
+                        # Load the artist and set chartmetric_id if missing
+                        artist_result = await db.execute(
+                            select(Artist).where(Artist.id == artist_id_fk)
+                        )
+                        artist_row = artist_result.scalar_one_or_none()
+                        if artist_row is not None and artist_row.chartmetric_id is None:
+                            artist_row.chartmetric_id = cm_artist_int
+                except (ValueError, TypeError):
+                    pass
             meta_updates: dict[str, Any] = {}
             for key in ("spotify_genres", "apple_music_genres", "musicbrainz_tags",
                         "chartmetric_genres", "tiktok_hashtags", "playlist_genres", "genres"):

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import {
   BarChart3, Search, Terminal, FlaskConical, Music, Settings, AudioLines,
-  GitBranch, Database, MessageSquare, ChevronRight,
+  GitBranch, Database, MessageSquare, ChevronRight, Activity,
 } from 'lucide-react'
 import AssistantPanel from './AssistantPanel'
 import SettingsDrawer from './SettingsDrawer'
@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { to: '/model-validation',label: 'Model Validation',icon: FlaskConical },
   { to: '/data-flow',       label: 'Data Pipeline',   icon: GitBranch },
   { to: '/db-stats',        label: 'DB Stats',        icon: Database },
+  { to: '/hydration',       label: 'Hydration',       icon: Activity },
   { to: '/api-tester',      label: 'API Tester',      icon: Terminal },
 ]
 
