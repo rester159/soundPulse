@@ -103,34 +103,33 @@ async def init_scheduler(database_url: str):
     # pass — full ENDPOINT_MATRIX (~281 calls/day) hitting the bulk endpoint.
     # The existing `chartmetric` scraper above keeps its 4h cadence on the
     # small confirmed endpoint set for freshness; the deep one runs once a day.
+    # Chartmetric quota budget: 172,800 calls/day. Previous cadences used
+    # ~4% of it. New cadences (below) total ~10% — still well inside the
+    # envelope while delivering 2-3.5x fresher data on every scraper.
+    # NOTE: DEFAULT_CONFIGS only seeds new rows. Live-DB intervals must be
+    # updated with a direct UPDATE (see commit notes for the SQL).
     DEFAULT_CONFIGS = {
         "spotify": {"interval_hours": 6, "enabled": True},
         "chartmetric": {"interval_hours": 4, "enabled": True},
-        # Phase 1 L4: 24h → 6h. 4x refresh rate. Each run is ~250 API calls
-        # (expanded per-genre), 6h cadence = ~1,000 calls/day = 0.6% of the
-        # 172,800/day Chartmetric quota. Captures intraday rank changes and
-        # shortens the "data freshness" window on the live dashboard.
-        # NOTE: seeded-only — existing DB rows must be PATCHed separately
-        # (see commit instructions).
-        "chartmetric_deep_us": {"interval_hours": 6, "enabled": True},
-        # Phase 2a: long-tail playlist crawler. Weekly cadence. Enumerates
-        # top US playlists on Spotify/AppleMusic/Deezer, then fetches each
-        # playlist's tracks. ~15K calls per full run = ~2K/day amortized.
-        "chartmetric_playlist_crawler": {"interval_hours": 168, "enabled": True},
-        # Phase 2b: per-artist track catalog enrichment. Weekly cadence.
-        # Iterates every artist in our DB with a chartmetric_id and calls
-        # /api/artist/{id}/tracks to harvest deep catalog. ~2.5K calls per
-        # full run = ~350/day amortized.
-        "chartmetric_artist_tracks": {"interval_hours": 168, "enabled": True},
-        # Phase 3: per-city US Apple Music top tracks. Daily cadence.
-        # Top 20 US cities × 7 genres = 140 calls per run. Captures
-        # regionally-popular tracks the national charts miss.
-        "chartmetric_us_cities": {"interval_hours": 24, "enabled": True},
-        # Phase 4: per-artist platform stats enrichment. Weekly cadence.
-        # ~2.5K artists × 6 platforms = ~15K calls per full run = ~2.1K/day
-        # amortized. Merges latest follower/listener/stream counts into
-        # artists.metadata_json.chartmetric_stats for ML feature depth.
-        "chartmetric_artist_stats": {"interval_hours": 168, "enabled": True},
+        # Comprehensive US pass — ~281 API calls fanning out across the
+        # ENDPOINT_MATRIX. 3h cadence → ~2.2k/day. Captures intraday
+        # rank changes on every confirmed platform × chart × genre combo.
+        "chartmetric_deep_us": {"interval_hours": 3, "enabled": True},
+        # Long-tail playlist crawler. ~15k calls per full run, 72h cadence
+        # → ~5k/day amortized.
+        "chartmetric_playlist_crawler": {"interval_hours": 72, "enabled": True},
+        # Per-artist track catalog enrichment. Iterates every artist with
+        # a chartmetric_id and calls /api/artist/{id}/tracks. ~2.5k calls
+        # per full run × twice-weekly (48h) → ~1.25k/day.
+        "chartmetric_artist_tracks": {"interval_hours": 48, "enabled": True},
+        # Per-city US Apple Music top tracks. Top 20 cities × 7 genres =
+        # 140 calls per run × 12h cadence → ~280/day. Captures regionally-
+        # popular tracks the national charts miss.
+        "chartmetric_us_cities": {"interval_hours": 12, "enabled": True},
+        # Per-artist platform stats enrichment. ~2.5k artists × 6 platforms
+        # = ~15k calls per full run × 48h cadence → ~7.5k/day. Merges
+        # latest follower/listener/stream counts into artists.metadata_json.
+        "chartmetric_artist_stats": {"interval_hours": 48, "enabled": True},
         "shazam": {"interval_hours": 4, "enabled": True},
         "apple_music": {"interval_hours": 6, "enabled": False},
         "musicbrainz": {"interval_hours": 12, "enabled": False},
