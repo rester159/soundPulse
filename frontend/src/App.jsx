@@ -1,6 +1,7 @@
 import { Component } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AssistantVisibilityProvider } from './contexts/AssistantVisibilityContext'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import Explore from './pages/Explore'
@@ -45,6 +46,7 @@ class ErrorBoundary extends Component {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
+     <AssistantVisibilityProvider>
       <BrowserRouter>
         <Routes>
           <Route element={<Layout />}>
@@ -59,6 +61,7 @@ function App() {
           </Route>
         </Routes>
       </BrowserRouter>
+     </AssistantVisibilityProvider>
     </QueryClientProvider>
   )
 }

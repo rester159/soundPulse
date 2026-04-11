@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import { Bot, User, Send, Loader2, MessageSquare } from 'lucide-react'
+import { Bot, User, Send, Loader2, MessageSquare, ChevronRight } from 'lucide-react'
 import { useAssistantChat } from '../hooks/useSoundPulse'
+import { useAssistantVisibility } from '../contexts/AssistantVisibilityContext'
 
 function Bubble({ role, content }) {
   const isBot = role === 'assistant'
@@ -37,6 +38,7 @@ export default function AssistantPanel() {
   const [input, setInput] = useState('')
   const chatMutation = useAssistantChat()
   const scrollRef = useRef(null)
+  const { hide } = useAssistantVisibility()
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -78,6 +80,13 @@ export default function AssistantPanel() {
         <MessageSquare size={14} className="text-violet-400" />
         <span className="text-sm font-semibold text-zinc-200">Assistant</span>
         <span className="ml-auto text-xs text-zinc-600">Groq · Llama 3</span>
+        <button
+          onClick={hide}
+          title="Hide Assistant (Cmd/Ctrl + .)"
+          className="p-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+        >
+          <ChevronRight size={14} />
+        </button>
       </div>
 
       {/* Messages */}

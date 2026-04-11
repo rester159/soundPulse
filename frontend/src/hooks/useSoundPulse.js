@@ -271,3 +271,15 @@ export function useTriggerCompositeSweep() {
       makeRequest('POST', '/admin/sweeps/composite', { batch_size: batchSize }),
   })
 }
+
+// Version badge — displays deploy identity in the Layout top-right
+export function useVersion() {
+  return useQuery({
+    queryKey: ['version'],
+    queryFn: () => makeRequest('GET', '/version'),
+    // Refetch every 60s so the badge catches a Railway redeploy even on
+    // pages the user keeps open for a while
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+}

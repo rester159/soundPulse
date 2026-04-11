@@ -1,4 +1,6 @@
+import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +9,9 @@ from fastapi.responses import JSONResponse
 from api.middleware.rate_limiter import RateLimitMiddleware
 from api.config import get_settings
 from api.routers import admin, assistant, backtesting, blueprint, genres, predictions, search, trending
+
+# Record when this process started — proxy for "when was this code deployed"
+_PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 
 @asynccontextmanager
@@ -68,6 +73,29 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/v1/version")
+async def version():
+    """
+    Deployment identity for the running process.
+
+    Railway sets RAILWAY_GIT_COMMIT_SHA automatically on every deploy.
+    `deployed_at` is the UTC timestamp when this API process started —
+    close-enough proxy for "when was this version deployed".
+    Frontend displays the short commit + timestamp in the top-right badge
+    so deploy staleness is visible at a glance.
+    """
+    commit_full = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "")
+    return {
+        "commit": commit_full[:12] if commit_full else "dev",
+        "commit_full": commit_full or "dev",
+        "deployed_at": _PROCESS_STARTED_AT,
+        "environment": os.environ.get("ENVIRONMENT", "development"),
+        "deploy_id": os.environ.get("RAILWAY_DEPLOYMENT_ID", "")[:12],
+        "branch": os.environ.get("RAILWAY_GIT_BRANCH", "main"),
+        "service": os.environ.get("RAILWAY_SERVICE_NAME", "local"),
+    }
 
 
 @app.exception_handler(Exception)
