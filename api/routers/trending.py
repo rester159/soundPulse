@@ -275,7 +275,12 @@ async def ingest_trending_bulk(
             # scrapers to walk an empty result set.
             if item.entity_type == "track" and sig.get("cm_artist_id"):
                 try:
-                    cm_artist_int = int(sig["cm_artist_id"])
+                    # Chartmetric ships cm_artist as a list for multi-artist
+                    # tracks; take the primary so we never try to int() a list.
+                    cm_raw = sig["cm_artist_id"]
+                    if isinstance(cm_raw, list):
+                        cm_raw = cm_raw[0] if cm_raw else None
+                    cm_artist_int = int(cm_raw) if cm_raw is not None else None
                     artist_id_fk = getattr(entity, "artist_id", None)
                     if artist_id_fk is not None:
                         # Load the artist and set chartmetric_id if missing
@@ -283,7 +288,11 @@ async def ingest_trending_bulk(
                             select(Artist).where(Artist.id == artist_id_fk)
                         )
                         artist_row = artist_result.scalar_one_or_none()
-                        if artist_row is not None and artist_row.chartmetric_id is None:
+                        if (
+                            artist_row is not None
+                            and artist_row.chartmetric_id is None
+                            and cm_artist_int is not None
+                        ):
                             artist_row.chartmetric_id = cm_artist_int
                 except (ValueError, TypeError):
                     pass

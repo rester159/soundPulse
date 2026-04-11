@@ -1160,17 +1160,29 @@ async def backfill_artists_chartmetric_id(
     propagated cm_artist_id from track-level signals onto the artist row,
     leaving Phase 2b/4 scrapers with zero input.
     """
+    # Chartmetric returns cm_artist as a list for multi-artist tracks, so
+    # signals_json->'cm_artist_id' can be a scalar, a number, or a JSON
+    # array. Handle all three shapes and take the primary (first) ID.
     from sqlalchemy import text as sa_text
     result = await db.execute(sa_text("""
         WITH artist_cm_ids AS (
             SELECT DISTINCT ON (t.artist_id)
                 t.artist_id,
-                (ts.signals_json->>'cm_artist_id')::bigint AS cm_artist_id
+                CASE
+                    WHEN jsonb_typeof((ts.signals_json::jsonb)->'cm_artist_id') = 'array'
+                        THEN ((ts.signals_json::jsonb)->'cm_artist_id'->>0)::bigint
+                    WHEN jsonb_typeof((ts.signals_json::jsonb)->'cm_artist_id') = 'number'
+                        THEN ((ts.signals_json::jsonb)->>'cm_artist_id')::bigint
+                    WHEN jsonb_typeof((ts.signals_json::jsonb)->'cm_artist_id') = 'string'
+                         AND ((ts.signals_json::jsonb)->>'cm_artist_id') ~ '^[0-9]+$'
+                        THEN ((ts.signals_json::jsonb)->>'cm_artist_id')::bigint
+                    ELSE NULL
+                END AS cm_artist_id
             FROM trending_snapshots ts
             JOIN tracks t ON t.id = ts.entity_id
             WHERE ts.entity_type = 'track'
-              AND ts.signals_json->>'cm_artist_id' IS NOT NULL
-              AND ts.signals_json->>'cm_artist_id' ~ '^[0-9]+$'
+              AND (ts.signals_json::jsonb) ? 'cm_artist_id'
+              AND t.artist_id IS NOT NULL
             ORDER BY t.artist_id, ts.created_at DESC
         )
         UPDATE artists a
@@ -1178,12 +1190,13 @@ async def backfill_artists_chartmetric_id(
         FROM artist_cm_ids aci
         WHERE a.id = aci.artist_id
           AND a.chartmetric_id IS NULL
-        RETURNING a.id
+          AND aci.cm_artist_id IS NOT NULL
+        RETURNING 1
     """))
-    updated_ids = result.fetchall()
+    updated_count = len(result.fetchall())
     await db.commit()
     return {
-        "artists_updated": len(updated_ids),
+        "artists_updated": updated_count,
         "detail": "Backfilled chartmetric_id on artists from signals_json.cm_artist_id",
     }
 

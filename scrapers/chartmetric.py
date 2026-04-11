@@ -248,6 +248,10 @@ class ChartmetricScraper(BaseScraper):
         #   id, name, isrc, spotify_track_id, cm_track, artist_names,
         #   rank, velocity, current_plays, spotify_popularity, etc.
         cm_track_id = entry.get("cm_track") or entry.get("cm_track_id") or entry.get("id")
+        # Primary-artist ID — Chartmetric returns a list for tracks with
+        # multiple artists; we keep only the first to match the artist_id FK.
+        from scrapers.chartmetric_deep_us import _primary_cm_artist_id
+        cm_artist_id = _primary_cm_artist_id(entry.get("cm_artist") or entry.get("cm_artist_id"))
         name = entry.get("name") or entry.get("title") or entry.get("track_name")
 
         # artist_names can be a list or string
@@ -305,6 +309,7 @@ class ChartmetricScraper(BaseScraper):
                 "chart_type": chart_type,
                 "source_platform": source_platform,
                 "cm_track_id": cm_track_id,
+                "cm_artist_id": cm_artist_id,
                 "source_rank": rank_int,
                 "spotify_popularity": spotify_popularity,
                 "velocity": velocity,

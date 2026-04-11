@@ -44,6 +44,28 @@ import httpx
 
 from scrapers.base import AuthenticationError, BaseScraper, RawDataPoint
 
+
+def _primary_cm_artist_id(value: Any) -> int | None:
+    """
+    Normalize Chartmetric's cm_artist field to a single integer ID.
+
+    Chartmetric returns `cm_artist` as a list when a track has multiple
+    artists (featured artists, etc.). Downstream code, SQL casts
+    (`::bigint`), and artist-level stats lookups all expect a scalar, so
+    we take the primary (first) ID. Accepts scalar int, scalar str,
+    list, or None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        if not value:
+            return None
+        value = value[0]
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -584,7 +606,10 @@ class ChartmetricDeepUSScraper(BaseScraper):
     ) -> dict[str, Any] | None:
         """Convert a Chartmetric entry into a TrendingIngest-shaped dict."""
         cm_track_id = entry.get("cm_track") or entry.get("cm_track_id") or entry.get("id")
-        cm_artist_id = entry.get("cm_artist") or entry.get("cm_artist_id")
+        # Chartmetric returns cm_artist as a list when a track has multiple
+        # artists (featured artists). Normalize to the primary (first) ID so
+        # downstream code and SQL casts never see a JSON array.
+        cm_artist_id = _primary_cm_artist_id(entry.get("cm_artist") or entry.get("cm_artist_id"))
 
         # Track or artist?
         if ep.entity_type == "artist":
