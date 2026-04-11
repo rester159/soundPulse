@@ -1028,6 +1028,82 @@ async def put_model_config(
 
 
 # ---------------------------------------------------------------------------
+# Artists with chartmetric_id (feed for Phase 2b artist-tracks crawler)
+# ---------------------------------------------------------------------------
+#
+# Returns artists that have a chartmetric_id set — these are the ones the
+# playlist + chart backfill identified and for which we can call
+# /api/artist/{id}/tracks to harvest their full catalog from Chartmetric.
+
+@router.post("/api/v1/admin/artists/{artist_id}/merge-metadata")
+async def merge_artist_metadata(
+    artist_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Merge a patch into an artist's metadata_json. Used by the Phase 4
+    artist-enrichment scraper to upsert per-platform stats without needing
+    a dedicated time-series table. Shallow merge at the top level.
+    """
+    from api.models.artist import Artist
+    import uuid as uuid_mod
+    try:
+        aid = uuid_mod.UUID(artist_id)
+    except ValueError:
+        raise HTTPException(400, detail={"error": {"code": "BAD_UUID", "message": "invalid UUID"}})
+
+    result = await db.execute(select(Artist).where(Artist.id == aid))
+    artist = result.scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(404, detail={"error": {"code": "NOT_FOUND", "message": "artist not found"}})
+
+    existing = artist.metadata_json or {}
+    artist.metadata_json = {**existing, **body}
+    await db.commit()
+    return {"artist_id": artist_id, "merged_keys": list(body.keys())}
+
+
+@router.get("/api/v1/admin/artists/with-chartmetric-id")
+async def get_artists_with_chartmetric_id(
+    limit: int = 500,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Artists with a known chartmetric_id, for per-artist /tracks crawls."""
+    from api.models.artist import Artist
+
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
+
+    result = await db.execute(
+        select(Artist.id, Artist.name, Artist.chartmetric_id, Artist.spotify_id)
+        .where(Artist.chartmetric_id.isnot(None))
+        .order_by(Artist.chartmetric_id)
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = result.all()
+
+    return {
+        "data": [
+            {
+                "artist_id": str(r.id),
+                "name": r.name,
+                "chartmetric_id": r.chartmetric_id,
+                "spotify_id": r.spotify_id,
+            }
+            for r in rows
+        ],
+        "limit": limit,
+        "offset": offset,
+        "returned": len(rows),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tracks needing audio feature enrichment (AUD-011 fix)
 # ---------------------------------------------------------------------------
 #

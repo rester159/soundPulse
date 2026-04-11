@@ -87,6 +87,54 @@ async def _run_scraper_job(scraper_id: str):
                 },
                 api_base_url=api_url, admin_key=admin_key,
             )
+        elif scraper_id == "chartmetric_playlist_crawler":
+            # Phase 2a: paginate top US playlists on Spotify/AppleMusic/Deezer,
+            # then fetch each playlist's tracks. Weekly cadence. Captures the
+            # long-tail tracks that live in playlists but never chart.
+            from scrapers.chartmetric_playlist_crawler import ChartmetricPlaylistCrawler
+            scraper = ChartmetricPlaylistCrawler(
+                credentials={
+                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
+                },
+                api_base_url=api_url, admin_key=admin_key,
+            )
+        elif scraper_id == "chartmetric_artist_tracks":
+            # Phase 2b: for every artist in our DB with a chartmetric_id,
+            # call /api/artist/{id}/tracks and harvest their full catalog.
+            # Weekly cadence. Captures deep catalog tracks that never chart.
+            from scrapers.chartmetric_artist_tracks import ChartmetricArtistTracksScraper
+            scraper = ChartmetricArtistTracksScraper(
+                credentials={
+                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
+                },
+                api_base_url=api_url, admin_key=admin_key,
+            )
+        elif scraper_id == "chartmetric_us_cities":
+            # Phase 3: top US cities × Apple Music tracks per city.
+            # Auto-discovers top 20 US cities by population each run via
+            # /api/cities?country_code=US, then pulls /charts/applemusic/tracks
+            # with city_id + 7 top genres per city = 140 calls per run.
+            # Captures regionally-popular tracks the national charts miss.
+            from scrapers.chartmetric_us_cities import ChartmetricUSCitiesScraper
+            scraper = ChartmetricUSCitiesScraper(
+                credentials={
+                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
+                },
+                api_base_url=api_url, admin_key=admin_key,
+            )
+        elif scraper_id == "chartmetric_artist_stats":
+            # Phase 4: per-artist platform stats enrichment. Iterates every
+            # artist with a chartmetric_id and calls /api/artist/{id}/stat/
+            # {platform} for 6 platforms (spotify, instagram, tiktok, youtube,
+            # twitter, shazam). Merges latest values into
+            # artists.metadata_json.chartmetric_stats. Weekly cadence.
+            from scrapers.chartmetric_artist_stats import ChartmetricArtistStatsScraper
+            scraper = ChartmetricArtistStatsScraper(
+                credentials={
+                    "api_key": os.environ.get("CHARTMETRIC_API_KEY", ""),
+                },
+                api_base_url=api_url, admin_key=admin_key,
+            )
         elif scraper_id == "shazam":
             from scrapers.shazam import ShazamScraper
             scraper = ShazamScraper(
@@ -200,6 +248,24 @@ async def init_scheduler(database_url: str):
         # NOTE: seeded-only — existing DB rows must be PATCHed separately
         # (see commit instructions).
         "chartmetric_deep_us": {"interval_hours": 6, "enabled": True},
+        # Phase 2a: long-tail playlist crawler. Weekly cadence. Enumerates
+        # top US playlists on Spotify/AppleMusic/Deezer, then fetches each
+        # playlist's tracks. ~15K calls per full run = ~2K/day amortized.
+        "chartmetric_playlist_crawler": {"interval_hours": 168, "enabled": True},
+        # Phase 2b: per-artist track catalog enrichment. Weekly cadence.
+        # Iterates every artist in our DB with a chartmetric_id and calls
+        # /api/artist/{id}/tracks to harvest deep catalog. ~2.5K calls per
+        # full run = ~350/day amortized.
+        "chartmetric_artist_tracks": {"interval_hours": 168, "enabled": True},
+        # Phase 3: per-city US Apple Music top tracks. Daily cadence.
+        # Top 20 US cities × 7 genres = 140 calls per run. Captures
+        # regionally-popular tracks the national charts miss.
+        "chartmetric_us_cities": {"interval_hours": 24, "enabled": True},
+        # Phase 4: per-artist platform stats enrichment. Weekly cadence.
+        # ~2.5K artists × 6 platforms = ~15K calls per full run = ~2.1K/day
+        # amortized. Merges latest follower/listener/stream counts into
+        # artists.metadata_json.chartmetric_stats for ML feature depth.
+        "chartmetric_artist_stats": {"interval_hours": 168, "enabled": True},
         "shazam": {"interval_hours": 4, "enabled": True},
         "apple_music": {"interval_hours": 6, "enabled": False},
         "musicbrainz": {"interval_hours": 12, "enabled": False},
