@@ -1143,6 +1143,41 @@ async def merge_artist_metadata(
     return {"artist_id": artist_id, "merged_keys": list(body.keys())}
 
 
+@router.post("/api/v1/admin/artists/flag-for-classification")
+async def flag_artists_for_classification(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    One-shot: mark every artist without classification as
+    `needs_classification = true` so the next sweep picks them up.
+
+    Needed because resolve_artist used to create artists with no
+    metadata_json at all, leaving them invisible to the sweep's
+    pending-work query. Paired with the track_rollup signal, this
+    unblocks artist genre classification for all pre-existing artists.
+    """
+    from sqlalchemy import text as sa_text
+    result = await db.execute(sa_text("""
+        UPDATE artists
+        SET metadata_json =
+            COALESCE(metadata_json::jsonb, '{}'::jsonb) || '{"needs_classification": true}'::jsonb
+        WHERE (genres IS NULL OR array_length(genres, 1) IS NULL)
+          AND (
+            metadata_json IS NULL
+            OR NOT ((metadata_json::jsonb) ? 'needs_classification')
+            OR (metadata_json::jsonb)->>'needs_classification' NOT IN ('true', 'skipped')
+          )
+        RETURNING 1
+    """))
+    flagged = len(result.fetchall())
+    await db.commit()
+    return {
+        "artists_flagged": flagged,
+        "detail": "Flagged artists for classification sweep",
+    }
+
+
 @router.post("/api/v1/admin/artists/backfill-chartmetric-id")
 async def backfill_artists_chartmetric_id(
     db: AsyncSession = Depends(get_db),

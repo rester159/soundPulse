@@ -146,6 +146,12 @@ class GenreClassifier:
         "playlist_context": 0.15,
         "social_tags": 0.10,
         "neighbor_inference": 0.10,
+        # Artist-only signal: roll up genres from the artist's classified
+        # tracks. A high weight (0.40) makes this the strongest signal
+        # for artists, because "what genre are this artist's tracks in"
+        # is the most reliable direct answer. For tracks this signal is
+        # always {}.
+        "track_rollup": 0.40,
     }
 
     def __init__(self, db: AsyncSession) -> None:
@@ -210,6 +216,11 @@ class GenreClassifier:
         signal_results["social_tags"] = self._signal_social_tags(entity)
         signal_results["neighbor_inference"] = await self._signal_neighbor_inference(
             entity, is_track
+        )
+        signal_results["track_rollup"] = (
+            {}
+            if is_track
+            else await self._signal_track_rollup(entity)
         )
 
         # Merge into weighted candidate map
@@ -550,6 +561,56 @@ class GenreClassifier:
     # ------------------------------------------------------------------
     # Signal 6: Neighbor Inference (weight 0.10)
     # ------------------------------------------------------------------
+
+    async def _signal_track_rollup(self, entity: Artist) -> dict[str, float]:
+        """
+        Artist-only: infer genres from the artist's classified tracks.
+
+        Queries all tracks where tracks.artist_id = artist.id, extracts
+        their `genres` arrays, and returns a frequency map normalized to
+        the highest-frequency genre = 1.0. Tracks with empty genres are
+        ignored; if the artist has no classified tracks yet, returns {}.
+
+        This is the single strongest signal for artists — "what do this
+        artist's songs sound like" is the most direct evidence of their
+        genre. Plugs the hole that left 2,715 of 2,716 artists unclassified.
+        """
+        artist_id = getattr(entity, "id", None)
+        if artist_id is None:
+            return {}
+
+        try:
+            result = await self.db.execute(
+                text(
+                    "SELECT genres FROM tracks "
+                    "WHERE artist_id = :aid "
+                    "  AND genres IS NOT NULL "
+                    "  AND array_length(genres, 1) > 0"
+                ),
+                {"aid": str(artist_id)},
+            )
+            rows = result.fetchall()
+        except Exception as exc:
+            logger.warning(
+                "[genre-classifier] track rollup query failed for artist %s: %s",
+                artist_id, exc,
+            )
+            return {}
+
+        if not rows:
+            return {}
+
+        counts: dict[str, int] = {}
+        for row in rows:
+            for g in (row[0] or []):
+                if g and g in self.taxonomy:
+                    counts[g] = counts.get(g, 0) + 1
+
+        if not counts:
+            return {}
+
+        max_count = max(counts.values())
+        return {gid: count / max_count for gid, count in counts.items()}
 
     async def _signal_neighbor_inference(
         self,

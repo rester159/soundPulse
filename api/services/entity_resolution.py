@@ -174,6 +174,7 @@ async def resolve_artist(
         id=uuid.uuid4(),
         name=identifier.artist_name or "Unknown Artist",
         spotify_id=identifier.artist_spotify_id or identifier.spotify_id,
+        metadata_json={"needs_classification": True},
     )
     db.add(artist)
     await db.flush()
@@ -205,6 +206,7 @@ async def _resolve_or_create_artist(
         id=uuid.uuid4(),
         name=identifier.artist_name or "Unknown Artist",
         spotify_id=spotify_id,
+        metadata_json={"needs_classification": True},
     )
     db.add(artist)
     await db.flush()
