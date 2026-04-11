@@ -92,6 +92,14 @@ class ChartEndpoint:
     genre_loop: list[str] | None = None  # if set, fan out across these genre strings
     genre_param: str | None = None       # param name for the genre value
     confirmed: bool = True        # False = speculative; failures are silent
+    # Phase 1 lever 3: offset pagination. Chartmetric chart endpoints return
+    # a fixed page size (typically 50 for Spotify, 100-200 for others).
+    # Setting depth_pages > 1 makes _fetch_one iterate offset=0, 50, 100, ...
+    # to reach deeper into the chart. Only Spotify regional/viral support
+    # this — other platforms cap their own depth below what pagination
+    # can reach. Set to 4 on spotify regional charts → top 200 instead of top 50.
+    depth_pages: int = 1
+    page_size: int = 50           # items per page (used for offset increment)
     notes: str = ""
 
 
@@ -99,14 +107,18 @@ class ChartEndpoint:
 
 ENDPOINT_MATRIX: list[ChartEndpoint] = [
     # ========== Spotify tracks (daily) ==========
+    # Phase 1 L3: regional charts paginate to depth 4 (top 200 items total
+    # via offset=0,50,100,150). Viral caps at 50 by Spotify's own design.
     ChartEndpoint("spotify", "regional_daily", "/api/charts/spotify",
-                  params={"type": "regional", "interval": "daily"}),
+                  params={"type": "regional", "interval": "daily"},
+                  depth_pages=4),
     ChartEndpoint("spotify", "viral_daily",    "/api/charts/spotify",
                   params={"type": "viral",    "interval": "daily"}),
 
     # ========== Spotify tracks (weekly) ==========
     ChartEndpoint("spotify", "regional_weekly", "/api/charts/spotify",
-                  params={"type": "regional", "interval": "weekly"}),
+                  params={"type": "regional", "interval": "weekly"},
+                  depth_pages=4),
     ChartEndpoint("spotify", "viral_weekly",    "/api/charts/spotify",
                   params={"type": "viral",    "interval": "weekly"}),
 
@@ -437,7 +449,12 @@ class ChartmetricDeepUSScraper(BaseScraper):
     async def _fetch_one(
         self, ep: ChartEndpoint, target: date, genre_value: str | None = None
     ) -> None:
-        """Fetch a single chart slice and buffer the parsed records."""
+        """Fetch a single chart slice and buffer the parsed records.
+
+        Phase 1 L3: if ep.depth_pages > 1, paginate within a successful date
+        by calling the endpoint repeatedly with offset=0, page_size, 2*page_size, ...
+        Stops early on a partial page or empty response.
+        """
         key = f"{ep.source_platform}/{ep.chart_type}" + (f"/{genre_value}" if genre_value else "")
         stats = self._stats.setdefault(key, {"calls": 0, "entries": 0, "empty": 0, "errors": 0})
 
@@ -448,39 +465,75 @@ class ChartmetricDeepUSScraper(BaseScraper):
             attempt_dates = [target.isoformat()]
         else:
             attempt_dates = [
-                (target - timedelta(days=offset)).isoformat()
-                for offset in range(self.DATE_LOOKBACK_DAYS)
+                (target - timedelta(days=d)).isoformat()
+                for d in range(self.DATE_LOOKBACK_DAYS)
             ]
 
         for attempt_date in attempt_dates:
+            # First call at offset=0 to see if this date has data
             stats["calls"] += 1
-            entries = await self._request_chart(ep, attempt_date, genre_value=genre_value)
-            if entries is None:  # 401/403/404 — endpoint not available, give up
+            first_entries = await self._request_chart(
+                ep, attempt_date, offset=0, genre_value=genre_value
+            )
+            if first_entries is None:  # 401/403/404 — endpoint not available, give up
                 stats["errors"] += 1
                 return
-            if entries:
-                buffered = 0
-                for entry in entries:
-                    point = self._parse_entry(entry, ep, target, genre_value=genre_value)
-                    if point:
-                        self._buffer.append(point)
-                        buffered += 1
-                stats["entries"] += buffered
-                if len(self._buffer) >= self.BULK_BATCH_SIZE:
-                    await self._flush_buffer()
-                return  # success on this date — done
+            if not first_entries:
+                continue  # try next date in the fallback list
+
+            # We have data for this date — parse the first page and paginate if needed
+            all_entries = list(first_entries)
+
+            # Paginate additional pages (if the endpoint supports depth and we got
+            # a full first page — partial first page means the chart was shorter
+            # than page_size and there's nothing more).
+            if ep.depth_pages > 1 and len(first_entries) >= ep.page_size:
+                for page_num in range(1, ep.depth_pages):
+                    stats["calls"] += 1
+                    offset_val = page_num * ep.page_size
+                    page_entries = await self._request_chart(
+                        ep, attempt_date, offset=offset_val, genre_value=genre_value
+                    )
+                    if page_entries is None or not page_entries:
+                        break  # no more pages
+                    all_entries.extend(page_entries)
+                    if len(page_entries) < ep.page_size:
+                        break  # partial page = end of chart
+
+            buffered = 0
+            for entry in all_entries:
+                point = self._parse_entry(entry, ep, target, genre_value=genre_value)
+                if point:
+                    self._buffer.append(point)
+                    buffered += 1
+            stats["entries"] += buffered
+            if len(self._buffer) >= self.BULK_BATCH_SIZE:
+                await self._flush_buffer()
+            return  # success on this date — done
         stats["empty"] += 1
 
     async def _request_chart(
-        self, ep: ChartEndpoint, chart_date: str, genre_value: str | None = None
+        self,
+        ep: ChartEndpoint,
+        chart_date: str,
+        *,
+        offset: int = 0,
+        genre_value: str | None = None,
     ) -> list[dict[str, Any]] | None:
-        """Returns parsed list, [] if no data, or None on auth/permission failure."""
+        """Returns parsed list, [] if no data, or None on auth/permission failure.
+
+        Phase 1 L3: `offset` is passed to Chartmetric for pagination. 0 is
+        the first page; 50/100/150 reach deeper into Spotify's top-200 on
+        the regional charts.
+        """
         url = f"{self.API_BASE}{ep.path}"
         params: dict[str, Any] = {"date": chart_date}
         if ep.country_param:
             params[ep.country_param] = ep.country_value
         if genre_value and ep.genre_param:
             params[ep.genre_param] = genre_value
+        if offset > 0:
+            params["offset"] = offset
         params.update(ep.params or {})
 
         async with self._semaphore:

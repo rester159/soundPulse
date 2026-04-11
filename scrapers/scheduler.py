@@ -193,7 +193,13 @@ async def init_scheduler(database_url: str):
     DEFAULT_CONFIGS = {
         "spotify": {"interval_hours": 6, "enabled": True},
         "chartmetric": {"interval_hours": 4, "enabled": True},
-        "chartmetric_deep_us": {"interval_hours": 24, "enabled": True},
+        # Phase 1 L4: 24h → 6h. 4x refresh rate. Each run is ~250 API calls
+        # (expanded per-genre), 6h cadence = ~1,000 calls/day = 0.6% of the
+        # 172,800/day Chartmetric quota. Captures intraday rank changes and
+        # shortens the "data freshness" window on the live dashboard.
+        # NOTE: seeded-only — existing DB rows must be PATCHed separately
+        # (see commit instructions).
+        "chartmetric_deep_us": {"interval_hours": 6, "enabled": True},
         "shazam": {"interval_hours": 4, "enabled": True},
         "apple_music": {"interval_hours": 6, "enabled": False},
         "musicbrainz": {"interval_hours": 12, "enabled": False},
