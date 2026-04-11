@@ -937,7 +937,15 @@ async def start_backfill(
     request: BackfillRequest,
     _admin: ApiKey = Depends(require_admin),
 ):
-    """Start a deep historical backfill from Chartmetric in the background."""
+    """Start a deep historical backfill from Chartmetric in the background.
+
+    Routes to the new `backfill_chartmetric_deep_us.py` script which pulls the
+    full ENDPOINT_MATRIX (32 confirmed endpoints, ~250 expanded calls per
+    snapshot date) via the bulk ingest endpoint. Defaults to --confirmed-only
+    so only endpoints verified against the user's Chartmetric tier are
+    pulled. Runs as a detached subprocess on the Railway API container;
+    logs stream to /tmp/soundpulse_backfill.log.
+    """
     import os
     import subprocess
     import sys
@@ -945,8 +953,8 @@ async def start_backfill(
     # AUD-003: use absolute path so this works regardless of CWD in the Railway
     # container. Same fix pattern as the train_model task.
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    script_path = os.path.join(project_root, "scripts", "backfill_deep.py")
-    cmd = [sys.executable, script_path, "--days", str(request.days)]
+    script_path = os.path.join(project_root, "scripts", "backfill_chartmetric_deep_us.py")
+    cmd = [sys.executable, script_path, "--confirmed-only", "--days", str(request.days)]
     if request.start_date:
         cmd.extend(["--start", request.start_date])
     if request.end_date:
