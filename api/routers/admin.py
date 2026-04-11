@@ -964,7 +964,13 @@ async def start_backfill(
     # (`open("/tmp/backfill.log", "w")` inline → never closed → after ~1024
     # backfill calls the OS file descriptor table exhausts). Use a context
     # manager and dup the FD into the child so we can close ours immediately.
-    log_path = os.path.join("/tmp", "soundpulse_backfill.log")
+    #
+    # Generality principle: use tempfile.gettempdir() instead of hardcoded
+    # "/tmp" so this works on Windows, macOS, and Linux containers. On
+    # Railway's Linux container it resolves to /tmp; on a Windows dev
+    # machine it resolves to %LOCALAPPDATA%\Temp or similar.
+    import tempfile
+    log_path = os.path.join(tempfile.gettempdir(), "soundpulse_backfill.log")
     log_file = open(log_path, "w")
     try:
         subprocess.Popen(

@@ -135,9 +135,12 @@ class ChartmetricUSCitiesScraper(BaseScraper):
     # ----- Discovery -----
 
     async def _discover_top_cities(self) -> list[CityRef]:
-        """Fetch /api/cities?country_code=US and return top N by population."""
+        """Fetch /api/cities and return top N by population."""
+        from shared.country_codes import country_param as _country_param
         url = f"{self.API_BASE}/api/cities"
-        params = {"country_code": "US"}
+        # /api/cities wants country_code=US (uppercase) per live probing
+        k, v = _country_param("chartmetric_cities", "US")
+        params = {k: v}
         async with self._semaphore:
             await asyncio.sleep(self.REQUEST_DELAY)
             self._stats["calls"] += 1
@@ -226,10 +229,12 @@ class ChartmetricUSCitiesScraper(BaseScraper):
     async def _fetch_and_buffer_city_chart(
         self, city: CityRef, genre: str, target: date
     ) -> None:
+        from shared.country_codes import country_param as _country_param
         url = f"{self.API_BASE}/api/charts/applemusic/tracks"
+        k, v = _country_param("chartmetric_applemusic", "US")
         params: dict[str, Any] = {
             "date": target.isoformat(),
-            "country_code": "us",
+            k: v,
             "type": "top",
             "city_id": city.city_id,
             "genre": genre,

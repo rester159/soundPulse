@@ -28,10 +28,15 @@ async def main(dry_run: bool = False):
     client_id = os.environ.get("SPOTIFY_CLIENT_ID", "")
     client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
     api_url = os.environ.get("SOUNDPULSE_API_URL", "http://localhost:8000")
-    admin_key = os.environ.get("API_ADMIN_KEY", "sp_admin_0000000000000000000000000000dead")
+    # Generality principle: do NOT fall back to the documented default
+    # admin key. Require it via env var. If missing, fail loudly.
+    admin_key = os.environ.get("API_ADMIN_KEY", "")
 
     if not client_id or not client_secret:
         logger.error("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be set")
+        sys.exit(1)
+    if not admin_key:
+        logger.error("API_ADMIN_KEY env var is required; refusing to use a hardcoded default")
         sys.exit(1)
 
     from scrapers.spotify import SpotifyScraper

@@ -2,8 +2,12 @@ import { useState, useEffect, useRef } from 'react'
 import { X, Key, Globe, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 
-const PROD_API = 'https://soundpulse-production-5266.up.railway.app/api/v1'
-const PROD_KEY = 'sp_admin_0000000000000000000000000000dead'
+// Generality principle: NO hardcoded production URL or admin key in the
+// frontend bundle. The API base URL is read from the Vite build-time env
+// var VITE_API_BASE_URL (baked into the bundle at build time), overridable
+// by localStorage 'soundpulse_base_url' at runtime for the user's personal
+// override. API key comes from the user — we never ship one.
+const VITE_DEFAULT_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
 export default function SettingsDrawer({ isOpen, onClose }) {
   const [apiKey, setApiKey] = useState('')
@@ -38,9 +42,9 @@ export default function SettingsDrawer({ isOpen, onClose }) {
     onClose?.()
   }
 
-  function applyProdDefaults() {
-    setBaseUrl(PROD_API)
-    setApiKey(PROD_KEY)
+  function applyDefaults() {
+    setBaseUrl(VITE_DEFAULT_BASE)
+    // Deliberately do NOT prefill the API key — it must come from the user.
   }
 
   function handleBackdropClick(e) {
@@ -82,10 +86,10 @@ export default function SettingsDrawer({ isOpen, onClose }) {
                   Set your API URL and key to load data.
                 </p>
                 <button
-                  onClick={applyProdDefaults}
+                  onClick={applyDefaults}
                   className="mt-2 text-xs text-amber-300 underline hover:text-amber-200"
                 >
-                  Use production defaults →
+                  Use build-time default URL →
                 </button>
               </div>
             </div>
@@ -99,10 +103,10 @@ export default function SettingsDrawer({ isOpen, onClose }) {
           {/* Quick-fill button */}
           {isConfigured && (
             <button
-              onClick={applyProdDefaults}
+              onClick={applyDefaults}
               className="w-full text-xs text-zinc-500 hover:text-zinc-300 underline text-left"
             >
-              Reset to production defaults
+              Reset to build-time default URL
             </button>
           )}
 
@@ -135,7 +139,7 @@ export default function SettingsDrawer({ isOpen, onClose }) {
               className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500 transition-all"
             />
             <p className="mt-1.5 text-xs text-zinc-500 break-all">
-              Production: {PROD_API}
+              Build-time default: {VITE_DEFAULT_BASE}
             </p>
           </div>
         </div>

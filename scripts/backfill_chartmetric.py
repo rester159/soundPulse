@@ -34,7 +34,10 @@ logger = logging.getLogger(__name__)
 # --- Config ---
 CHARTMETRIC_API_BASE = "https://api.chartmetric.com"
 SOUNDPULSE_API_BASE = os.environ.get("SOUNDPULSE_API_URL", "http://localhost:8000")
-ADMIN_KEY = os.environ.get("API_ADMIN_KEY", "sp_admin_0000000000000000000000000000dead")
+ADMIN_KEY = os.environ.get("API_ADMIN_KEY", "")
+if not ADMIN_KEY:
+    logger.error("API_ADMIN_KEY env var is required; refusing to fall back to a hardcoded default")
+    sys.exit(1)
 CHARTMETRIC_API_KEY = os.environ.get("CHARTMETRIC_API_KEY", "")
 
 BACKFILL_DAYS = 90

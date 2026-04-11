@@ -48,6 +48,12 @@
 - **No laziness** — find root causes, no temporary fixes, senior developer standards
 - **Minimal impact** — changes should only touch what's necessary, avoid introducing bugs
 
+### Generality principles (always follow these)
+- **When building features, never build for a specific instance, model, or OS.** Features must work across all instances, all models (LLM providers + Suno/Udio/MusicGen, Spotify/Apple/TikTok, etc), all operating systems. If a feature has a "default value" that's instance-specific, it's a bug waiting to happen.
+- **When fixing issues, never hardcode a solution specific to the test use case, instance, model, or OS.** If a bug report says "Drake's audio features are wrong", the fix is never "special-case Drake" — it's to find the class of inputs that trigger the bug and make it work for all of them. If the fix involves the string "Drake" or the ID `1932`, you've done it wrong.
+- **Think systemically.** Hyper-generalized features work in any combination of variables. Hyper-generalized fixes work on any instance that matches the class of problem. Parameterize the variables that change. Treat every hardcoded constant that references a specific real-world entity (artist name, track ID, platform name in a comparison, file path, hostname, country code, genre label, OS, CPU arch) as a code smell that needs justification.
+- **The only acceptable hardcoded values** are: (1) the canonical source-of-truth config files (`config/*.json`, `shared/constants.py`, `shared/genre_taxonomy.py`), (2) API endpoint paths that are part of the external API contract, (3) test fixtures in `tests/`, and (4) short-lived diagnostic probes clearly flagged as such in the code.
+
 ---
 
 ## LLM usage principle (always follow these)
