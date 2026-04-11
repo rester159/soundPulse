@@ -274,7 +274,11 @@ async def _reap_stale_running_scrapers():
             for cfg in stuck:
                 if cfg.last_run_at is None:
                     continue
-                grace_hours = max(2.0, (cfg.interval_hours or 1.0) * 2.0)
+                # Absolute 90-minute grace: no legitimate scraper takes
+                # longer than this (deep_us tops out around ~15 min for
+                # ~280 endpoints at 2 req/s). Previous `2x interval_hours`
+                # formula was effectively infinite for 168h weekly jobs.
+                grace_hours = 1.5
                 last_run = cfg.last_run_at
                 # Normalize naive timestamps from older rows
                 if last_run.tzinfo is None:

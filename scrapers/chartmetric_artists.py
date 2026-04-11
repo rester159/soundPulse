@@ -180,45 +180,65 @@ class ChartmetricArtistsScraper(BaseScraper):
         return all_points
 
     async def _fetch_artists_from_db(self) -> list[dict[str, Any]]:
-        """Query SoundPulse API for artist entities that have a chartmetric_id."""
-        url = f"{self.api_base_url}/api/v1/trending"
-        params = {"entity_type": "artist"}
+        """
+        Query SoundPulse's /admin/artists/with-chartmetric-id (paginated).
 
-        try:
-            resp = await self.client.get(
-                url,
-                params=params,
-                headers={"X-API-Key": self.admin_key},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.error("[%s] Failed to fetch artists from DB: %s", self.PLATFORM, exc)
-            return []
-
-        # Extract artists that have a chartmetric_id in their entity_identifier
+        Previously hit /api/v1/trending?entity_type=artist which returns
+        trending snapshots (no entity_identifier), so the scraper always
+        collected 0 artists. The fix mirrors chartmetric_artist_stats —
+        the canonical source for artists with a cm_id is the admin route.
+        """
+        url = f"{self.api_base_url}/api/v1/admin/artists/with-chartmetric-id"
+        page_size = 500
+        offset = 0
         artists: list[dict[str, Any]] = []
-        items = data if isinstance(data, list) else data.get("items", data.get("data", []))
+        seen: set[str] = set()
 
-        for item in items:
-            eid = item.get("entity_identifier", {})
-            cm_id = eid.get("chartmetric_id")
-            if cm_id:
+        while True:
+            try:
+                resp = await self.client.get(
+                    url,
+                    params={"offset": offset, "limit": page_size},
+                    headers={"X-API-Key": self.admin_key},
+                    timeout=60.0,
+                )
+                if resp.status_code != 200:
+                    logger.error(
+                        "[%s] /with-chartmetric-id returned HTTP %d",
+                        self.PLATFORM, resp.status_code,
+                    )
+                    break
+                page = resp.json().get("data", [])
+            except Exception as exc:
+                logger.error("[%s] Failed to fetch artists page: %s", self.PLATFORM, exc)
+                break
+
+            if not page:
+                break
+
+            for row in page:
+                cm_id = row.get("chartmetric_id")
+                if cm_id is None:
+                    continue
+                cm_id_str = str(cm_id)
+                if cm_id_str in seen:
+                    continue
+                seen.add(cm_id_str)
                 artists.append({
-                    "chartmetric_id": str(cm_id),
-                    "name": eid.get("artist_name") or eid.get("name") or "Unknown",
-                    "entity_identifier": eid,
+                    "chartmetric_id": cm_id_str,
+                    "name": row.get("name") or "Unknown",
+                    "entity_identifier": {
+                        "chartmetric_id": cm_id,
+                        "artist_name": row.get("name"),
+                    },
                 })
 
-        # Deduplicate by chartmetric_id
-        seen: set[str] = set()
-        unique: list[dict[str, Any]] = []
-        for a in artists:
-            if a["chartmetric_id"] not in seen:
-                seen.add(a["chartmetric_id"])
-                unique.append(a)
+            if len(page) < page_size:
+                break
+            offset += page_size
 
-        return unique
+        logger.info("[%s] Loaded %d artists from DB", self.PLATFORM, len(artists))
+        return artists
 
     # ------------------------------------------------------------------
     # Per-artist stat fetching
