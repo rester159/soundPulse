@@ -131,10 +131,18 @@ async def init_scheduler(database_url: str):
         # latest follower/listener/stream counts into artists.metadata_json.
         "chartmetric_artist_stats": {"interval_hours": 48, "enabled": True},
         "shazam": {"interval_hours": 4, "enabled": True},
+        # Apple Music (developer API) needs team_id + key_id + private key
+        # path — complex setup, leave disabled until creds are configured.
         "apple_music": {"interval_hours": 6, "enabled": False},
-        "musicbrainz": {"interval_hours": 12, "enabled": False},
-        "radio": {"interval_hours": 24, "enabled": False},
-        "kworb": {"interval_hours": 24, "enabled": False},
+        # MusicBrainz: free public API, no credentials. Enriches tracks
+        # with ISRCs + musicbrainz tags that feed platform_labels.
+        "musicbrainz": {"interval_hours": 12, "enabled": True},
+        # Radio airplay: scrapes public charts, no credentials. Contributes
+        # airplay signal to the composite score.
+        "radio": {"interval_hours": 24, "enabled": True},
+        # Kworb: scrapes free public charts from kworb.net, no credentials.
+        # Provides redundant cross-platform rank signals for free.
+        "kworb": {"interval_hours": 24, "enabled": True},
         "chartmetric_artists": {"interval_hours": 12, "enabled": True},
         "spotify_audio": {"interval_hours": 24, "enabled": True},
         "genius_lyrics": {"interval_hours": 24, "enabled": False},
