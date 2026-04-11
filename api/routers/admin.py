@@ -1034,6 +1034,78 @@ async def put_model_config(
 
 
 # ---------------------------------------------------------------------------
+# LLM usage aggregates (Batch B — CLAUDE.md "every LLM call must be logged")
+# ---------------------------------------------------------------------------
+
+@router.get("/api/v1/admin/llm-usage")
+async def get_llm_usage(
+    days: int = 30,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Aggregated LLM usage stats for the last N days.
+
+    Returns totals by action_type (e.g. "assistant_chat") and by model,
+    with call counts, total tokens, total cost in cents, and median
+    latency. Powers a cost/usage dashboard section the frontend can
+    surface later.
+    """
+    from sqlalchemy import text as sa_text
+    days = max(1, min(days, 365))
+
+    by_action = (await db.execute(sa_text("""
+        SELECT
+            action_type,
+            COUNT(*) AS call_count,
+            SUM(input_tokens)  AS total_input_tokens,
+            SUM(output_tokens) AS total_output_tokens,
+            SUM(cost_cents)    AS total_cost_cents,
+            SUM(CASE WHEN success THEN 0 ELSE 1 END) AS error_count,
+            ROUND(AVG(latency_ms)) AS avg_latency_ms
+        FROM llm_calls
+        WHERE created_at >= NOW() - make_interval(days => :days)
+        GROUP BY action_type
+        ORDER BY total_cost_cents DESC NULLS LAST
+    """), {"days": days})).mappings().all()
+
+    by_model = (await db.execute(sa_text("""
+        SELECT
+            model,
+            provider,
+            COUNT(*) AS call_count,
+            SUM(input_tokens)  AS total_input_tokens,
+            SUM(output_tokens) AS total_output_tokens,
+            SUM(cost_cents)    AS total_cost_cents
+        FROM llm_calls
+        WHERE created_at >= NOW() - make_interval(days => :days)
+        GROUP BY model, provider
+        ORDER BY total_cost_cents DESC NULLS LAST
+    """), {"days": days})).mappings().all()
+
+    totals = (await db.execute(sa_text("""
+        SELECT
+            COUNT(*) AS total_calls,
+            SUM(cost_cents) AS total_cost_cents,
+            SUM(CASE WHEN success THEN 0 ELSE 1 END) AS error_count
+        FROM llm_calls
+        WHERE created_at >= NOW() - make_interval(days => :days)
+    """), {"days": days})).mappings().one()
+
+    return {
+        "days": days,
+        "totals": {
+            "total_calls": int(totals["total_calls"] or 0),
+            "total_cost_cents": int(totals["total_cost_cents"] or 0),
+            "total_cost_usd": round((int(totals["total_cost_cents"] or 0)) / 100, 2),
+            "error_count": int(totals["error_count"] or 0),
+        },
+        "by_action": [dict(r) for r in by_action],
+        "by_model": [dict(r) for r in by_model],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Artists with chartmetric_id (feed for Phase 2b artist-tracks crawler)
 # ---------------------------------------------------------------------------
 #

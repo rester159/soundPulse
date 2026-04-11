@@ -11,7 +11,7 @@ import os
 from datetime import date, timedelta
 from typing import Any
 
-import httpx
+import httpx  # still used by gather_context — leave import
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,8 +21,10 @@ from api.models.artist import Artist
 
 logger = logging.getLogger(__name__)
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# Generality principle: no hardcoded LLM vendor / model / URL here.
+# Provider + model + pricing are loaded from config/llm.json through
+# api.services.llm_client.llm_chat. To switch to OpenAI / Claude / a
+# different Llama variant, edit config/llm.json — no code change needed.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PRD Knowledge Base — always present in system prompt (condensed)
@@ -364,10 +366,15 @@ async def ask_assistant(
     question: str,
     conversation_history: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Ask the AI assistant a question about SoundPulse data and product."""
-    groq_api_key = os.environ.get("GROQ_API_KEY", "")
-    if not groq_api_key:
-        return {"answer": "Groq API key not configured. Add GROQ_API_KEY to environment variables.", "error": True}
+    """
+    Ask the AI assistant a question about SoundPulse data and product.
+
+    Routes through api.services.llm_client.llm_chat which:
+      - Resolves provider/model/API URL from config/llm.json (action="assistant_chat")
+      - Makes the HTTP call in the right format (OpenAI-compat, Anthropic, etc)
+      - Logs one row to `llm_calls` with tokens + cost + latency
+    """
+    from api.services.llm_client import llm_chat
 
     # Gather live DB context
     db_context = await gather_context(db, question)
@@ -396,7 +403,7 @@ async def ask_assistant(
     if prd_context:
         system_content += "\n\n=== RELEVANT PRD DETAIL FOR THIS QUESTION ===\n" + prd_context
 
-    messages = [{"role": "system", "content": system_content}]
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
 
     if conversation_history:
         for msg in conversation_history[-6:]:
@@ -404,36 +411,37 @@ async def ask_assistant(
 
     messages.append({"role": "user", "content": question})
 
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                GROQ_API_URL,
-                headers={
-                    "Authorization": f"Bearer {groq_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": GROQ_MODEL,
-                    "messages": messages,
-                    "temperature": 0.3,
-                    "max_tokens": 1024,
-                },
-            )
+    result = await llm_chat(
+        db=db,
+        action="assistant_chat",
+        messages=messages,
+        caller="assistant_service.ask_assistant",
+        metadata={
+            "question_length": len(question),
+            "history_length": len(conversation_history or []),
+            "prd_topics_injected": topics,
+        },
+    )
 
-            if resp.status_code != 200:
-                return {"answer": f"Groq API error: {resp.status_code} — {resp.text[:200]}", "error": True}
+    if not result.get("success"):
+        return {
+            "answer": f"Assistant error: {result.get('error') or 'unknown'}",
+            "error": True,
+            "model": result.get("model", ""),
+            "provider": result.get("provider", ""),
+        }
 
-            data = resp.json()
-            answer = data["choices"][0]["message"]["content"]
-
-            return {
-                "answer": answer,
-                "model": GROQ_MODEL,
-                "usage": data.get("usage", {}),
-                "context_length": len(system_content),
-                "prd_topics_injected": topics,
-            }
-
-    except Exception as e:
-        logger.error("Assistant error: %s", e)
-        return {"answer": f"Error: {str(e)}", "error": True}
+    return {
+        "answer": result["content"],
+        "model": result["model"],
+        "provider": result["provider"],
+        "usage": {
+            "prompt_tokens": result["input_tokens"],
+            "completion_tokens": result["output_tokens"],
+            "total_tokens": result["total_tokens"],
+        },
+        "cost_cents": result["cost_cents"],
+        "latency_ms": result["latency_ms"],
+        "context_length": len(system_content),
+        "prd_topics_injected": topics,
+    }
