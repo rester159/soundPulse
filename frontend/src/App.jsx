@@ -11,6 +11,7 @@ import SongLab from './pages/SongLab'
 import Assistant from './pages/Assistant'
 import DataFlow from './pages/DataFlow'
 import DbStats from './pages/DbStats'
+import Settings from './pages/Settings'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -58,6 +59,7 @@ function App() {
             <Route path="/assistant" element={<ErrorBoundary><Assistant /></ErrorBoundary>} />
             <Route path="/data-flow" element={<ErrorBoundary><DataFlow /></ErrorBoundary>} />
             <Route path="/db-stats" element={<ErrorBoundary><DbStats /></ErrorBoundary>} />
+            <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
           </Route>
         </Routes>
       </BrowserRouter>

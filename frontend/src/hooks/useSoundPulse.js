@@ -213,12 +213,64 @@ export function useGenerateBlueprint() {
   })
 }
 
-export function useTopOpportunities(n = 5, model = 'suno') {
+export function useTopOpportunities(n = 10, model = 'suno', sortBy = 'opportunity') {
   return useQuery({
-    queryKey: ['blueprint', 'top-opportunities', n, model],
-    queryFn: () => makeRequest('GET', '/blueprint/top-opportunities', { n, model }),
+    queryKey: ['blueprint', 'top-opportunities', n, model, sortBy],
+    queryFn: () => makeRequest('GET', '/blueprint/top-opportunities', { n, model, sort_by: sortBy }),
     staleTime: 5 * 60_000,  // 5 min — LLM calls are expensive
     refetchOnWindowFocus: false,
+  })
+}
+
+// Settings hooks
+export function useCeoProfile() {
+  return useQuery({
+    queryKey: ['admin', 'ceo-profile'],
+    queryFn: () => makeRequest('GET', '/admin/ceo-profile'),
+    staleTime: 60_000,
+  })
+}
+
+export function useUpdateCeoProfile() {
+  return useMutation({
+    mutationFn: ({ body }) => makeRequest('PUT', '/admin/ceo-profile', {}, body),
+  })
+}
+
+export function useAgents() {
+  return useQuery({
+    queryKey: ['admin', 'agents'],
+    queryFn: () => makeRequest('GET', '/admin/agents'),
+    staleTime: 5 * 60_000,
+  })
+}
+
+export function useTools() {
+  return useQuery({
+    queryKey: ['admin', 'tools'],
+    queryFn: () => makeRequest('GET', '/admin/tools'),
+    staleTime: 60_000,
+  })
+}
+
+export function useAgentToolGrants(pivot = 'by_tool') {
+  return useQuery({
+    queryKey: ['admin', 'agent-tool-grants', pivot],
+    queryFn: () => makeRequest('GET', '/admin/agent-tool-grants', { pivot }),
+    staleTime: 30_000,
+  })
+}
+
+export function useCreateGrant() {
+  return useMutation({
+    mutationFn: ({ body }) => makeRequest('POST', '/admin/agent-tool-grants', {}, body),
+  })
+}
+
+export function useDeleteGrant() {
+  return useMutation({
+    mutationFn: ({ agent_id, tool_id }) =>
+      makeRequest('DELETE', '/admin/agent-tool-grants', { agent_id, tool_id }),
   })
 }
 

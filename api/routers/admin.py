@@ -1680,6 +1680,192 @@ async def get_feature_deltas(
     }
 
 
+# ─── Settings → Agents + Tools registry ──────────────────────────────────
+
+@router.get("/api/v1/admin/agents")
+async def list_agents(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """List all agents in the registry."""
+    from api.models.agents_tools import AgentRegistry
+    result = await db.execute(
+        select(AgentRegistry).order_by(AgentRegistry.code_letter, AgentRegistry.name)
+    )
+    agents = result.scalars().all()
+    return {
+        "agents": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "code_letter": a.code_letter,
+                "purpose": a.purpose,
+                "instructions": a.instructions,
+                "skills": a.skills or [],
+                "actions": a.actions or [],
+                "interdependencies": a.interdependencies or [],
+                "enabled": a.enabled,
+            }
+            for a in agents
+        ],
+        "count": len(agents),
+    }
+
+
+@router.get("/api/v1/admin/tools")
+async def list_tools(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    List all tools in the registry, with credential availability detected
+    by checking if all required env vars are set on this process.
+    """
+    import os
+    from api.models.agents_tools import ToolsRegistry
+    result = await db.execute(
+        select(ToolsRegistry).order_by(ToolsRegistry.category, ToolsRegistry.display_name)
+    )
+    tools = result.scalars().all()
+    out = []
+    for t in tools:
+        env_vars = t.credential_env_vars or []
+        missing = [v for v in env_vars if not os.environ.get(v)]
+        out.append({
+            "id": t.id,
+            "display_name": t.display_name,
+            "category": t.category,
+            "description": t.description,
+            "api_kind": t.api_kind,
+            "auth_kind": t.auth_kind,
+            "credential_env_vars": env_vars,
+            "credentials_configured": len(missing) == 0 if env_vars else True,
+            "missing_env_vars": missing,
+            "documentation_url": t.documentation_url,
+            "cost_model": t.cost_model,
+            "automation_class": t.automation_class,
+            "status": t.status,
+            "capabilities": t.capabilities or [],
+            "notes": t.notes,
+        })
+    return {"tools": out, "count": len(out)}
+
+
+@router.get("/api/v1/admin/agent-tool-grants")
+async def list_grants(
+    pivot: str = "by_tool",
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Return the agent↔tool grants in two pivots:
+      - pivot=by_tool  → for each tool, the list of agents granted access
+      - pivot=by_agent → for each agent, the list of tools granted access
+    Same data, two views.
+    """
+    from sqlalchemy import text as sa_text
+    result = await db.execute(sa_text("""
+        SELECT
+            atg.agent_id,
+            ar.name AS agent_name,
+            ar.code_letter,
+            atg.tool_id,
+            tr.display_name AS tool_name,
+            tr.category AS tool_category,
+            tr.status AS tool_status,
+            tr.automation_class
+        FROM agent_tool_grants atg
+        JOIN agent_registry ar ON ar.id = atg.agent_id
+        JOIN tools_registry tr ON tr.id = atg.tool_id
+        ORDER BY ar.code_letter, tr.category, tr.display_name
+    """))
+    rows = result.fetchall()
+
+    if pivot == "by_agent":
+        by_agent: dict[str, dict] = {}
+        for r in rows:
+            if r[0] not in by_agent:
+                by_agent[r[0]] = {
+                    "agent_id": r[0],
+                    "agent_name": r[1],
+                    "code_letter": r[2],
+                    "tools": [],
+                }
+            by_agent[r[0]]["tools"].append({
+                "tool_id": r[3],
+                "tool_name": r[4],
+                "category": r[5],
+                "status": r[6],
+                "automation_class": r[7],
+            })
+        return {"pivot": "by_agent", "data": list(by_agent.values())}
+
+    by_tool: dict[str, dict] = {}
+    for r in rows:
+        if r[3] not in by_tool:
+            by_tool[r[3]] = {
+                "tool_id": r[3],
+                "tool_name": r[4],
+                "category": r[5],
+                "status": r[6],
+                "automation_class": r[7],
+                "agents": [],
+            }
+        by_tool[r[3]]["agents"].append({
+            "agent_id": r[0],
+            "agent_name": r[1],
+            "code_letter": r[2],
+        })
+    return {"pivot": "by_tool", "data": list(by_tool.values())}
+
+
+@router.post("/api/v1/admin/agent-tool-grants")
+async def create_grant(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Grant a tool to an agent. Body: {agent_id, tool_id, scope?}."""
+    from api.models.agents_tools import AgentToolGrant
+    import uuid as uuid_mod
+    agent_id = body.get("agent_id")
+    tool_id = body.get("tool_id")
+    if not agent_id or not tool_id:
+        raise HTTPException(400, "agent_id and tool_id are required")
+    grant = AgentToolGrant(
+        id=uuid_mod.uuid4(),
+        agent_id=agent_id,
+        tool_id=tool_id,
+        scope=body.get("scope"),
+        granted_by="admin_ui",
+    )
+    db.add(grant)
+    try:
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(409, f"grant exists or invalid: {exc}")
+    return {"detail": "granted", "id": str(grant.id)}
+
+
+@router.delete("/api/v1/admin/agent-tool-grants")
+async def delete_grant(
+    agent_id: str,
+    tool_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Revoke a tool from an agent."""
+    from sqlalchemy import text as sa_text
+    result = await db.execute(
+        sa_text("DELETE FROM agent_tool_grants WHERE agent_id = :a AND tool_id = :t RETURNING id"),
+        {"a": agent_id, "t": tool_id},
+    )
+    deleted = result.fetchall()
+    await db.commit()
+    return {"detail": "revoked", "count": len(deleted)}
+
+
 @router.get("/api/v1/admin/ceo-profile")
 async def get_ceo_profile(
     db: AsyncSession = Depends(get_db),

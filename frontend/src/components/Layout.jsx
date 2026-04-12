@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import {
-  BarChart3, Search, Terminal, FlaskConical, Music, Settings, AudioLines,
+  BarChart3, Search, Terminal, FlaskConical, Music, Settings as SettingsIcon, AudioLines,
   GitBranch, Database, MessageSquare, ChevronRight,
 } from 'lucide-react'
 import AssistantPanel from './AssistantPanel'
@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { to: '/data-flow',       label: 'Data Pipeline',   icon: GitBranch },
   { to: '/db-stats',        label: 'DB Stats',        icon: Database },
   { to: '/api-tester',      label: 'API Tester',      icon: Terminal },
+  { to: '/settings',        label: 'Settings',        icon: SettingsIcon },
 ]
 
 function formatDeployTime(iso) {
