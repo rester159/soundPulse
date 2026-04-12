@@ -9,9 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir .
 
+# Cache bust BEFORE COPY . . so Docker invalidates the file copy layer.
+# Change this value to force a fresh copy of all source files.
+RUN echo "cache-bust-2026-04-12-v2" > /dev/null
 COPY . .
-# Force fresh COPY: change this value to invalidate Docker layer cache
-RUN echo "cache-bust-2026-04-12-v1" > /dev/null
 
 EXPOSE 8000
 
