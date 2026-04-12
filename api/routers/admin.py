@@ -1143,6 +1143,128 @@ async def merge_artist_metadata(
     return {"artist_id": artist_id, "merged_keys": list(body.keys())}
 
 
+@router.post("/api/v1/admin/artists/backfill-spotify-ids-from-chartmetric")
+async def backfill_spotify_ids_from_chartmetric(
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Backfill artists.spotify_id using Chartmetric's /api/artist/{id}
+    endpoint as the source. Chartmetric stores the Spotify artist ID
+    as part of artist metadata, so we can pull it without touching
+    Spotify's API at all — zero rate-limit risk.
+
+    Target rows: artists WHERE chartmetric_id IS NOT NULL AND spotify_id IS NULL
+    (only artists we already have a Chartmetric handle for).
+
+    Called iteratively — pass `limit` up to 500 per call. The 1,732
+    artists currently missing a spotify_id can be processed in ~4 calls.
+    """
+    import os
+    import httpx
+    from api.models.artist import Artist
+
+    api_key = os.environ.get("CHARTMETRIC_API_KEY", "")
+    if not api_key:
+        return {"error": "CHARTMETRIC_API_KEY not set"}
+
+    limit = max(1, min(limit, 500))
+
+    result = await db.execute(
+        select(Artist)
+        .where(Artist.chartmetric_id.isnot(None))
+        .where(Artist.spotify_id.is_(None))
+        .order_by(Artist.id)
+        .limit(limit)
+    )
+    candidates = result.scalars().all()
+    if not candidates:
+        return {"checked": 0, "matched": 0, "skipped": 0, "detail": "no artists need backfill"}
+
+    matched = 0
+    skipped = 0
+    errors = 0
+    status_counts: dict[int, int] = {}
+    last_error_sample: str | None = None
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Refresh-token -> bearer token exchange (same as Chartmetric scrapers).
+        try:
+            auth_resp = await client.post(
+                "https://api.chartmetric.com/api/token",
+                json={"refreshtoken": api_key},
+            )
+            auth_resp.raise_for_status()
+            token = auth_resp.json().get("token") or auth_resp.json().get("access_token")
+            if not token:
+                return {"error": f"Chartmetric auth response missing token: {list(auth_resp.json().keys())}"}
+        except Exception as exc:
+            return {"error": f"Chartmetric auth failed: {exc}"}
+
+        headers = {"Authorization": f"Bearer {token}"}
+
+        for artist in candidates:
+            cm_id = artist.chartmetric_id
+            try:
+                resp = await client.get(
+                    f"https://api.chartmetric.com/api/artist/{cm_id}",
+                    headers=headers,
+                )
+                if resp.status_code != 200:
+                    errors += 1
+                    status_counts[resp.status_code] = status_counts.get(resp.status_code, 0) + 1
+                    if last_error_sample is None:
+                        last_error_sample = f"HTTP {resp.status_code}: {(resp.text or '')[:200]}"
+                    continue
+                payload = resp.json()
+                # Chartmetric wraps artist data under `obj`. The spotify
+                # artist ID has been observed as both `sp_artist_id` and
+                # `spotify_artist_id` depending on the tier / endpoint.
+                obj = payload.get("obj") if isinstance(payload, dict) else None
+                if not isinstance(obj, dict):
+                    skipped += 1
+                    continue
+                sp_id = (
+                    obj.get("sp_artist_id")
+                    or obj.get("spotify_artist_id")
+                    or obj.get("spotify_id")
+                )
+                if not sp_id:
+                    skipped += 1
+                    continue
+                artist.spotify_id = str(sp_id)
+                # Chartmetric also often carries genre tags here — pull
+                # them in as a free classifier signal.
+                cm_genres = obj.get("genres") or obj.get("tags") or []
+                if cm_genres:
+                    existing = artist.metadata_json or {}
+                    artist.metadata_json = {
+                        **existing,
+                        "chartmetric_genres": cm_genres,
+                        "needs_classification": True,
+                    }
+                matched += 1
+            except httpx.HTTPError as exc:
+                errors += 1
+                if last_error_sample is None:
+                    last_error_sample = f"network: {exc}"
+            # Chartmetric rate limit is 2 req/s; we run at ~1.8/s to be safe.
+            await asyncio.sleep(0.55)
+
+        await db.commit()
+
+    return {
+        "checked": len(candidates),
+        "matched": matched,
+        "skipped": skipped,
+        "errors": errors,
+        "status_counts": status_counts,
+        "last_error_sample": last_error_sample,
+        "detail": "paged: call again until matched=0 (Artist.chartmetric_id IS NOT NULL AND spotify_id IS NULL)",
+    }
+
+
 @router.get("/api/v1/admin/spotify/cooldown")
 async def get_spotify_cooldown(
     _admin: ApiKey = Depends(require_admin),
