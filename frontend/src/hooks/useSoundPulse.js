@@ -354,6 +354,36 @@ export function useHydrationHistory(hours = 24) {
   })
 }
 
+// Music generation provider hooks (§24, §56)
+export function useMusicProviders() {
+  return useQuery({
+    queryKey: ['admin', 'music', 'providers'],
+    queryFn: () => makeRequest('GET', '/admin/music/providers'),
+    staleTime: 60_000,
+  })
+}
+
+export function useMusicGenerate() {
+  return useMutation({
+    mutationFn: ({ body }) => makeRequest('POST', '/admin/music/generate', {}, body),
+  })
+}
+
+export function useMusicPoll(provider, taskId, { enabled = true } = {}) {
+  return useQuery({
+    queryKey: ['admin', 'music', 'poll', provider, taskId],
+    queryFn: () => makeRequest('GET', `/admin/music/generate/${provider}/${taskId}`),
+    enabled: enabled && !!provider && !!taskId,
+    refetchInterval: (q) => {
+      const status = q.state.data?.data?.status
+      // Stop polling once terminal
+      if (status === 'succeeded' || status === 'failed') return false
+      return 3_000
+    },
+    staleTime: 0,
+  })
+}
+
 // Version badge — displays deploy identity in the Layout top-right
 export function useVersion() {
   return useQuery({

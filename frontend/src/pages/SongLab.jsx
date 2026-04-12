@@ -1,16 +1,37 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import {
   Music, Sparkles, Copy, Check, TrendingUp, Zap, Target,
   Activity, RefreshCw, Loader2, ChevronDown, ChevronUp,
+  Play, AlertTriangle,
 } from 'lucide-react'
-import { useTopOpportunities } from '../hooks/useSoundPulse'
+import {
+  useTopOpportunities, useMusicProviders, useMusicGenerate, useMusicPoll,
+} from '../hooks/useSoundPulse'
 
-const MODELS = [
-  { id: 'suno', name: 'Suno' },
-  { id: 'udio', name: 'Udio' },
-  { id: 'soundraw', name: 'SOUNDRAW' },
-  { id: 'musicgen', name: 'MusicGen' },
-]
+// Display mapping from generation provider id → prompt-style id used by
+// /blueprint/top-opportunities. Suno and EvoLink-wrapped Suno share the
+// same prompt format; MusicGen takes the STYLE block stripped of LYRICS.
+const PROVIDER_TO_PROMPT_STYLE = {
+  musicgen: 'musicgen',
+  suno_evolink: 'suno',
+  udio: 'suno',  // fall back to Suno-format until Udio re-launches
+}
+
+const PROVIDER_DISPLAY = {
+  musicgen: 'MusicGen',
+  suno_evolink: 'Suno',
+  udio: 'Udio',
+  soundraw: 'SOUNDRAW',
+}
+
+// MusicGen is text-to-instrumental — strip the LYRICS section so the
+// model isn't confused by verse/chorus markup it can't act on.
+function stripLyricsForMusicgen(prompt) {
+  if (!prompt) return prompt
+  const idx = prompt.indexOf('LYRICS:')
+  if (idx < 0) return prompt
+  return prompt.slice(0, idx).replace(/^STYLE:\s*/i, '').trim()
+}
 
 function ConfidenceBadge({ confidence }) {
   const map = {
@@ -38,7 +59,130 @@ function MomentumBadge({ momentum }) {
   )
 }
 
-function BlueprintCard({ blueprint, index }) {
+function GenerationPanel({ blueprint, providerId, providerLive }) {
+  const [taskId, setTaskId] = useState(null)
+  const generate = useMusicGenerate()
+  const poll = useMusicPoll(providerId, taskId, { enabled: !!taskId })
+
+  const result = poll.data?.data
+  const status = result?.status
+  const audioUrl = result?.audio_url
+  const pollError = result?.error
+  const submitError = generate.error?.response?.data?.detail || generate.error?.message
+
+  const buildGenerateBody = () => {
+    let prompt = blueprint.prompt
+    if (providerId === 'musicgen') {
+      prompt = stripLyricsForMusicgen(prompt)
+    }
+    return {
+      provider: providerId,
+      prompt,
+      duration_seconds: providerId === 'musicgen' ? 30 : 90,
+      genre_hint: blueprint.genre,
+      mood_tags: [],
+    }
+  }
+
+  const handleGenerate = async () => {
+    setTaskId(null)
+    try {
+      const res = await generate.mutateAsync({ body: buildGenerateBody() })
+      const newTaskId = res?.data?.task_id
+      if (newTaskId) setTaskId(newTaskId)
+    } catch (_) {
+      // error surfaced via generate.error
+    }
+  }
+
+  const handleReset = () => {
+    setTaskId(null)
+    generate.reset()
+  }
+
+  const estCost = providerId === 'musicgen' ? '$0.06' : '~$0.11'
+
+  return (
+    <div className="space-y-3 border-t border-zinc-800 pt-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-zinc-400 text-xs font-semibold uppercase tracking-wider">
+          <Play size={12} /> Generate
+        </div>
+        <div className="text-[10px] text-zinc-500">
+          via {PROVIDER_DISPLAY[providerId] || providerId} · {estCost}
+        </div>
+      </div>
+
+      {!providerLive && (
+        <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 rounded p-2.5 text-[11px] text-amber-300">
+          <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+          <div>
+            <strong>{PROVIDER_DISPLAY[providerId] || providerId}</strong> is not configured.
+            Add the credential in Railway env vars to enable live generation.
+          </div>
+        </div>
+      )}
+
+      {providerLive && !taskId && !generate.isPending && (
+        <button
+          onClick={handleGenerate}
+          className="flex items-center gap-2 px-4 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-sm font-medium rounded-lg transition-colors"
+        >
+          <Sparkles size={14} /> Generate song ({estCost})
+        </button>
+      )}
+
+      {(generate.isPending || (taskId && (status === 'pending' || status === 'processing'))) && (
+        <div className="flex items-center gap-2 text-violet-300 text-xs">
+          <Loader2 size={14} className="animate-spin" />
+          {generate.isPending
+            ? 'Submitting to provider...'
+            : status === 'pending'
+              ? 'Queued at provider...'
+              : 'Generating — 30s classical audio typically takes 60-90s...'}
+        </div>
+      )}
+
+      {submitError && !taskId && (
+        <div className="bg-rose-500/10 border border-rose-500/30 rounded p-2.5 text-[11px] text-rose-300">
+          <strong>Submission failed:</strong> {String(submitError)}
+          <button onClick={handleReset} className="ml-2 underline">dismiss</button>
+        </div>
+      )}
+
+      {status === 'failed' && (
+        <div className="bg-rose-500/10 border border-rose-500/30 rounded p-2.5 text-[11px] text-rose-300">
+          <strong>Generation failed:</strong> {pollError || 'unknown error'}
+          <button onClick={handleReset} className="ml-2 underline">retry</button>
+        </div>
+      )}
+
+      {status === 'succeeded' && audioUrl && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-emerald-300 text-xs">
+            <Check size={14} /> Ready — {result.duration_seconds?.toFixed(1)}s · ${result.actual_cost_usd?.toFixed(3)}
+          </div>
+          <audio
+            controls
+            src={audioUrl}
+            className="w-full"
+            style={{ filter: 'invert(0.9) hue-rotate(180deg)' }}
+          />
+          <div className="flex items-center gap-3 text-[10px] text-zinc-500">
+            <a href={audioUrl} target="_blank" rel="noreferrer" className="underline hover:text-zinc-300">
+              open in new tab
+            </a>
+            <button onClick={handleReset} className="underline hover:text-zinc-300">
+              generate another
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BlueprintCard({ blueprint, index, providerId, providerLive }) {
   const [copied, setCopied] = useState(false)
   const [expanded, setExpanded] = useState(index === 0)  // first card open by default
 
@@ -163,6 +307,15 @@ function BlueprintCard({ blueprint, index }) {
               {blueprint.based_on.lyrical_analysis_present ? 'lyrical intel ✓' : 'lyrical intel pending'}
             </div>
           )}
+
+          {/* Live generation */}
+          {providerId && (
+            <GenerationPanel
+              blueprint={blueprint}
+              providerId={providerId}
+              providerLive={providerLive}
+            />
+          )}
         </div>
       )}
     </div>
@@ -170,8 +323,27 @@ function BlueprintCard({ blueprint, index }) {
 }
 
 export default function SongLab() {
-  const [model, setModel] = useState('suno')
-  const { data, isLoading, isError, error, refetch, isFetching } = useTopOpportunities(5, model)
+  const { data: providersData } = useMusicProviders()
+  const providers = providersData?.data?.providers || []
+
+  // Prefer the first live provider. If none are live, still show the
+  // picker (disabled) so the user can see what's configured.
+  const defaultProviderId = useMemo(() => {
+    const live = providers.find(p => p.live)
+    return live?.id || providers[0]?.id || 'musicgen'
+  }, [providers])
+
+  const [providerId, setProviderId] = useState(null)
+  const activeProviderId = providerId || defaultProviderId
+  const activeProvider = providers.find(p => p.id === activeProviderId)
+  const providerLive = !!activeProvider?.live
+
+  // Map provider id → the "model" param the /top-opportunities endpoint
+  // expects when building prompts.
+  const promptStyle = PROVIDER_TO_PROMPT_STYLE[activeProviderId] || 'suno'
+
+  const { data, isLoading, isError, error, refetch, isFetching } =
+    useTopOpportunities(5, promptStyle)
 
   const blueprints = data?.data?.data?.blueprints || []
   const generatedAt = data?.data?.data?.generated_at
@@ -186,24 +358,26 @@ export default function SongLab() {
             <h1 className="text-2xl font-bold text-zinc-100">Song Lab</h1>
           </div>
           <p className="text-sm text-zinc-500">
-            Top 5 breakout opportunities right now — each with a ready-to-use prompt for {model}.
+            Top 5 breakout opportunities right now — each ready to generate via {PROVIDER_DISPLAY[activeProviderId] || activeProviderId}.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Model picker */}
+          {/* Provider picker — driven by live registry */}
           <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
-            {MODELS.map(m => (
+            {providers.map(p => (
               <button
-                key={m.id}
-                onClick={() => setModel(m.id)}
-                className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
-                  model === m.id
+                key={p.id}
+                onClick={() => setProviderId(p.id)}
+                title={p.live ? `${p.display_name} — live` : `${p.display_name} — not configured`}
+                className={`px-3 py-1 text-xs rounded font-medium transition-colors flex items-center gap-1.5 ${
+                  activeProviderId === p.id
                     ? 'bg-violet-600/30 text-violet-200 border border-violet-500/50'
                     : 'text-zinc-500 hover:text-zinc-300'
                 }`}
               >
-                {m.name}
+                <span className={`w-1.5 h-1.5 rounded-full ${p.live ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+                {PROVIDER_DISPLAY[p.id] || p.display_name}
               </button>
             ))}
           </div>
@@ -252,7 +426,13 @@ export default function SongLab() {
         <>
           <div className="space-y-4">
             {blueprints.map((bp, i) => (
-              <BlueprintCard key={bp.genre} blueprint={bp} index={i} />
+              <BlueprintCard
+                key={bp.genre}
+                blueprint={bp}
+                index={i}
+                providerId={activeProviderId}
+                providerLive={providerLive}
+              />
             ))}
           </div>
 
