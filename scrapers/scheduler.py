@@ -140,7 +140,12 @@ async def init_scheduler(database_url: str):
         # = ~15k calls per full run × 48h cadence → ~7.5k/day. Merges
         # latest follower/listener/stream counts into artists.metadata_json.
         "chartmetric_artist_stats": {"interval_hours": 48, "enabled": True},
-        "shazam": {"interval_hours": 4, "enabled": True},
+        # Shazam: disabled. Public API endpoints (shazam.com/services/*,
+        # amp-api.shazam.com, cdn.shazam.com) are all dead (404/204/DNS
+        # failure as of 2026-04-12). RapidAPI shazam-core free tier was
+        # too rate-limited before that. Shazam data already flows via
+        # chartmetric_deep_us pipeline (8,952 rows from /api/charts/shazam).
+        "shazam": {"interval_hours": 24, "enabled": False},
         # Apple Music (developer API) needs team_id + key_id + private key
         # path — complex setup, leave disabled until creds are configured.
         "apple_music": {"interval_hours": 6, "enabled": False},
