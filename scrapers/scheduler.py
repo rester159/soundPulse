@@ -73,16 +73,26 @@ async def _run_scraper_job(scraper_id: str):
         error_msg = str(e)[:2000]
         logger.exception("Scraper %s failed", scraper_id)
 
-    # Update status in DB
-    async with _get_session_factory()() as db:
-        result = await db.execute(select(ScraperConfig).where(ScraperConfig.id == scraper_id))
-        config = result.scalar_one_or_none()
-        if config:
-            config.last_status = "error" if error_msg else "success"
-            config.last_error = error_msg
-            config.last_run_at = datetime.now(timezone.utc)
-            config.last_record_count = stats.get("total", 0) if stats else None
-            await db.commit()
+    # Update status in DB. Wrapped in try/except so a commit failure
+    # surfaces in the logs instead of silently leaving last_status='running'.
+    # Previously a Neon connection blip here would leave rows stuck and
+    # only the reaper (1.5h grace) could clear them.
+    try:
+        async with _get_session_factory()() as db:
+            result = await db.execute(select(ScraperConfig).where(ScraperConfig.id == scraper_id))
+            config = result.scalar_one_or_none()
+            if config:
+                config.last_status = "error" if error_msg else "success"
+                config.last_error = error_msg
+                config.last_run_at = datetime.now(timezone.utc)
+                config.last_record_count = stats.get("total", 0) if stats else None
+                await db.commit()
+    except Exception:
+        logger.exception(
+            "[scheduler] CRITICAL: failed to persist status for %s — "
+            "row will stay at 'running' until the reaper catches it",
+            scraper_id,
+        )
 
     logger.info("Scraper %s finished: status=%s stats=%s", scraper_id, "error" if error_msg else "success", stats)
 

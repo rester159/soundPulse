@@ -110,11 +110,17 @@ class ChartmetricArtistTracksScraper(BaseScraper):
     async def _crawl_all_artists(self) -> None:
         offset = 0
         processed_total = 0
+        logger.info("[artist-tracks] starting crawl (max=%d, page_size=%d)", MAX_ARTISTS, PAGE_SIZE)
         while processed_total < MAX_ARTISTS:
             artists_page = await self._fetch_artist_page(offset=offset, limit=PAGE_SIZE)
             if not artists_page:
+                logger.info("[artist-tracks] page empty at offset=%d, stopping", offset)
                 break
             self._stats["artists_discovered"] += len(artists_page)
+            logger.info(
+                "[artist-tracks] page offset=%d size=%d total_processed=%d",
+                offset, len(artists_page), processed_total,
+            )
             for i, artist in enumerate(artists_page):
                 cm_id = artist.get("chartmetric_id")
                 sp_artist_id = artist.get("artist_id")  # UUID string
@@ -137,13 +143,23 @@ class ChartmetricArtistTracksScraper(BaseScraper):
                     self._stats["artists_skipped"] += 1
                 if len(self._buffer) >= self.BULK_BATCH_SIZE:
                     await self._flush_buffer()
-                if (processed_total + i + 1) % 100 == 0:
+                # Tightened from every 100 to every 10 so Railway logs show
+                # scraper liveness and expose any hang immediately.
+                if (processed_total + i + 1) % 10 == 0:
                     logger.info(
-                        "[artist-tracks] processed %d artists, tracks buffered=%d",
-                        processed_total + i + 1, self._stats["tracks_buffered"],
+                        "[artist-tracks] progress: %d artists processed, "
+                        "tracks buffered=%d, calls=%d, errors=%d",
+                        processed_total + i + 1,
+                        self._stats["tracks_buffered"],
+                        self._stats["calls"],
+                        self._stats["errors"],
                     )
             processed_total += len(artists_page)
             if len(artists_page) < PAGE_SIZE:
+                logger.info(
+                    "[artist-tracks] partial page (%d < %d), stopping at %d artists",
+                    len(artists_page), PAGE_SIZE, processed_total,
+                )
                 break  # partial page = no more artists
             offset += PAGE_SIZE
 

@@ -142,6 +142,12 @@ class BaseScraper(ABC):
 
         raise IngestionError(f"Failed after {self.MAX_RETRIES} retries")
 
+    # Cap on Retry-After sleeps to prevent a single 429 with a large
+    # header value from silently hanging a run for 30+ minutes. If the
+    # upstream wants a longer wait, better to fail loudly and let the
+    # scheduler surface the error than to sit idle with last_status=running.
+    MAX_RETRY_AFTER_SECONDS: int = 120
+
     async def _rate_limited_request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Make an upstream request with retry and rate limit handling."""
         for attempt in range(self.MAX_RETRIES):
@@ -149,9 +155,20 @@ class BaseScraper(ABC):
                 resp = await self.client.request(method, url, **kwargs)
                 if resp.status_code == 429:
                     try:
-                        retry_after = max(1, int(float(resp.headers.get("Retry-After", 5))))
+                        raw_retry = int(float(resp.headers.get("Retry-After", 5)))
                     except (ValueError, TypeError):
-                        retry_after = 5
+                        raw_retry = 5
+                    if raw_retry > self.MAX_RETRY_AFTER_SECONDS:
+                        logger.error(
+                            "[%s] Upstream 429 Retry-After=%ds exceeds cap %ds, "
+                            "failing fast: %s",
+                            self.PLATFORM, raw_retry, self.MAX_RETRY_AFTER_SECONDS, url,
+                        )
+                        raise RateLimitError(
+                            f"Upstream requested Retry-After={raw_retry}s "
+                            f"(cap={self.MAX_RETRY_AFTER_SECONDS}s) — refusing to hang"
+                        )
+                    retry_after = max(1, raw_retry)
                     logger.warning("[%s] Upstream rate limited, waiting %ds: %s", self.PLATFORM, retry_after, url)
                     await asyncio.sleep(retry_after)
                     continue
