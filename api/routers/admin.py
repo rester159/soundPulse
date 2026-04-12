@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["admin"])
 
 
+@router.get("/api/v1/admin/deploy-check")
+async def deploy_check():
+    """Returns the deploy timestamp. If this changes, the code is fresh."""
+    return {"deployed_code": "2026-04-12T00:15:00Z", "routes_file": "admin.py"}
+
+
 # ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
