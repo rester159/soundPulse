@@ -10,8 +10,9 @@ COPY pyproject.toml ./
 RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir .
 
 COPY . .
-# Ensure latest code is included (bust cache: 2026-04-03-v2)
-RUN echo "build-version: 2026-04-03-v2" > /app/.build-version
+# Ensure latest code is included (bust cache on every deploy)
+ARG CACHE_BUST=1
+RUN echo "build-version: ${CACHE_BUST}" > /app/.build-version
 
 EXPOSE 8000
 
