@@ -31,9 +31,18 @@ if (!API_KEY) {
 }
 
 // ---- Feature extraction JS (runs inside browser context) ----
+// Extract ALL useful metadata from a Tunebat track page.
+// Tunebat's layout: value appears on the line BEFORE its label.
+// Stop at "Recommendations" to avoid the harmonic-mixing table
+// which reuses the same label words.
+// Also grab release_date, explicit, album from the mid-section text.
 const EXTRACT_FEATURES_JS = `
 (() => {
-  const lines = (document.body.innerText || '').split('\\n').map(l => l.trim()).filter(Boolean);
+  const text = document.body.innerText || '';
+  const cutoff = text.indexOf('Recommendations');
+  const relevant = cutoff > 0 ? text.substring(0, cutoff) : text;
+  const lines = relevant.split('\\n').map(l => l.trim()).filter(Boolean);
+
   const features = {};
   const labels = new Set([
     'key','bpm','energy','danceability','happiness','acousticness',
@@ -42,10 +51,19 @@ const EXTRACT_FEATURES_JS = `
   ]);
   for (let i = 1; i < lines.length; i++) {
     const label = lines[i].toLowerCase();
-    if (labels.has(label)) {
+    if (labels.has(label) && !(label in features)) {
       features[label] = lines[i - 1];
     }
   }
+
+  // Release date, explicit, album — appear as "Release Date: X", "Explicit: Y", "Album: Z"
+  const rdMatch = relevant.match(/Release Date:\\s*(.+?)(?:\\n|$)/i);
+  if (rdMatch) features.release_date = rdMatch[1].trim();
+  const exMatch = relevant.match(/Explicit:\\s*(Yes|No)/i);
+  if (exMatch) features.explicit = exMatch[1].trim();
+  const alMatch = relevant.match(/Album:\\s*(.+?)(?:\\n|$)/i);
+  if (alMatch) features.album = alMatch[1].trim();
+
   return features;
 })()
 `;
@@ -61,34 +79,48 @@ function slugify(title, artist) {
 }
 
 function normalizeFeatures(raw) {
-  const out = {};
-  if (raw.bpm) out.tempo = parseFloat(raw.bpm);
-  if (raw.energy) out.energy = parseInt(raw.energy, 10) / 100;
-  if (raw.danceability) out.danceability = parseInt(raw.danceability, 10) / 100;
-  if (raw.happiness) out.valence = parseInt(raw.happiness, 10) / 100;
-  if (raw.acousticness) out.acousticness = parseInt(raw.acousticness, 10) / 100;
-  if (raw.instrumentalness) out.instrumentalness = parseInt(raw.instrumentalness, 10) / 100;
-  if (raw.liveness) out.liveness = parseInt(raw.liveness, 10) / 100;
-  if (raw.speechiness) out.speechiness = parseInt(raw.speechiness, 10) / 100;
-  if (raw.loudness) out.loudness = parseFloat(raw.loudness);
+  // audio_features: the canonical Spotify shape (0-1 scale for most fields)
+  const audio = {};
+  if (raw.bpm) audio.tempo = parseFloat(raw.bpm);
+  if (raw.energy) audio.energy = parseInt(raw.energy, 10) / 100;
+  if (raw.danceability) audio.danceability = parseInt(raw.danceability, 10) / 100;
+  if (raw.happiness) audio.valence = parseInt(raw.happiness, 10) / 100;
+  if (raw.acousticness) audio.acousticness = parseInt(raw.acousticness, 10) / 100;
+  if (raw.instrumentalness) audio.instrumentalness = parseInt(raw.instrumentalness, 10) / 100;
+  if (raw.liveness) audio.liveness = parseInt(raw.liveness, 10) / 100;
+  if (raw.speechiness) audio.speechiness = parseInt(raw.speechiness, 10) / 100;
+  if (raw.loudness) audio.loudness = parseFloat(raw.loudness);
   if (raw.key) {
-    const keyMatch = raw.key.match(/^([A-G][#b]?)\s*(Major|Minor|maj|min)/i);
+    // Tunebat uses Unicode ♯ (U+266F) and ♭ (U+266D) instead of # and b
+    const normalized = raw.key.replace(/♯/g, '#').replace(/♭/g, 'b');
+    const keyMatch = normalized.match(/^([A-G][#b]?)\s*(Major|Minor|maj|min)/i);
     if (keyMatch) {
       const keyMap = {
         C: 0, 'C#': 1, Db: 1, D: 2, 'D#': 3, Eb: 3, E: 4,
         F: 5, 'F#': 6, Gb: 6, G: 7, 'G#': 8, Ab: 8, A: 9,
         'A#': 10, Bb: 10, B: 11,
       };
-      out.key = keyMap[keyMatch[1]] ?? null;
-      out.mode = /maj/i.test(keyMatch[2]) ? 1 : 0;
+      audio.key = keyMap[keyMatch[1]] ?? null;
+      audio.mode = /maj/i.test(keyMatch[2]) ? 1 : 0;
     }
   }
   if (raw.duration) {
     const parts = raw.duration.split(':').map(Number);
-    if (parts.length === 2) out.duration_ms = (parts[0] * 60 + parts[1]) * 1000;
-    if (parts.length === 3) out.duration_ms = (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
+    if (parts.length === 2) audio.duration_ms = (parts[0] * 60 + parts[1]) * 1000;
+    if (parts.length === 3) audio.duration_ms = (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
   }
-  return out;
+
+  // Extra metadata beyond audio_features — stored in signals alongside
+  // audio_features so the ingest path can route them appropriately.
+  const meta = {};
+  if (raw.key) meta.key_display = raw.key;  // human-readable "C# Major"
+  if (raw.camelot) meta.camelot = raw.camelot;
+  if (raw.popularity) meta.tunebat_popularity = parseInt(raw.popularity, 10);
+  if (raw.release_date) meta.release_date = raw.release_date;
+  if (raw.explicit) meta.explicit = raw.explicit.toLowerCase() === 'yes';
+  if (raw.album) meta.album = raw.album;
+
+  return { audio, meta };
 }
 
 async function fetchQueue() {
@@ -171,22 +203,27 @@ async function crawlBatch(bt, tracks) {
         continue;
       }
 
-      const features = normalizeFeatures(raw);
-      const count = Object.keys(features).length;
-      console.log(`  ✓ ${count} features: tempo=${features.tempo} energy=${features.energy} valence=${features.valence} key=${features.key}`);
+      const { audio, meta } = normalizeFeatures(raw);
+      const count = Object.keys(audio).length;
+      console.log(`  ✓ ${count} audio features + ${Object.keys(meta).length} meta: tempo=${audio.tempo} energy=${audio.energy} valence=${audio.valence} key=${meta.key_display} camelot=${meta.camelot}`);
       enriched++;
 
       buffer.push({
-        platform: 'tunebat',
+        platform: 'spotify',
         entity_type: 'track',
         entity_identifier: { spotify_id: spotifyId, title: title || '' },
-        raw_score: null,
-        rank: null,
         snapshot_date: today,
         signals: {
-          audio_features: features,
+          audio_features: audio,
           source_platform: 'tunebat',
           chart_type: 'audio_features_enrichment',
+          // Extra metadata alongside audio_features
+          tunebat_popularity: meta.tunebat_popularity,
+          camelot: meta.camelot,
+          key_display: meta.key_display,
+          release_date: meta.release_date,
+          explicit: meta.explicit,
+          album: meta.album,
         },
       });
 
