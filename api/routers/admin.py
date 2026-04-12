@@ -1214,6 +1214,9 @@ async def backfill_artists_spotify_ids(
         matched = 0
         skipped = 0
         errors = 0
+        status_counts: dict[int, int] = {}
+        last_error_sample: str | None = None
+        consecutive_429 = 0
         for artist in candidates:
             try:
                 search_resp = await client.get(
@@ -1221,9 +1224,27 @@ async def backfill_artists_spotify_ids(
                     params={"q": artist.name, "type": "artist", "limit": 1},
                     headers=headers,
                 )
-                if search_resp.status_code != 200:
+                sc = search_resp.status_code
+                if sc != 200:
                     errors += 1
+                    status_counts[sc] = status_counts.get(sc, 0) + 1
+                    if last_error_sample is None:
+                        last_error_sample = f"HTTP {sc}: {(search_resp.text or '')[:200]}"
+                    # Spotify 429 often signals a hard cooldown. Stop early
+                    # on sustained 429 so we don't waste the whole batch.
+                    if sc == 429:
+                        consecutive_429 += 1
+                        if consecutive_429 >= 5:
+                            last_error_sample = (
+                                f"stopped early after {consecutive_429} consecutive 429s "
+                                f"(Retry-After header: {search_resp.headers.get('Retry-After', '?')})"
+                            )
+                            break
+                    else:
+                        consecutive_429 = 0
+                    await asyncio.sleep(0.3)
                     continue
+                consecutive_429 = 0
                 items = (search_resp.json().get("artists") or {}).get("items") or []
                 if not items:
                     skipped += 1
@@ -1239,8 +1260,6 @@ async def backfill_artists_spotify_ids(
                     skipped += 1
                     continue
                 artist.spotify_id = top_id
-                # Capture Spotify-provided genre labels so the classifier
-                # sweep can use them on the next pass.
                 sp_genres = top.get("genres") or []
                 if sp_genres:
                     artist.metadata_json = {
@@ -1249,9 +1268,13 @@ async def backfill_artists_spotify_ids(
                         "needs_classification": True,
                     }
                 matched += 1
-            except Exception:
+            except Exception as exc:
                 errors += 1
-            await asyncio.sleep(0.1)  # light throttle, ~10/s
+                if last_error_sample is None:
+                    last_error_sample = f"exception: {type(exc).__name__}: {str(exc)[:200]}"
+            # Throttle: 0.2s -> 5 req/s. Spotify's soft limit is around
+            # 10-20/s for client-credential apps; 5/s leaves margin.
+            await asyncio.sleep(0.2)
 
         await db.commit()
 
@@ -1260,7 +1283,9 @@ async def backfill_artists_spotify_ids(
         "matched": matched,
         "skipped": skipped,
         "errors": errors,
-        "detail": f"paged: call again to continue (Artist.spotify_id IS NULL ordered by created_at DESC)",
+        "status_counts": status_counts,
+        "last_error_sample": last_error_sample,
+        "detail": "paged: call again to continue (Artist.spotify_id IS NULL ordered by created_at DESC)",
     }
 
 
