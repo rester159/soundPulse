@@ -1265,6 +1265,127 @@ async def backfill_spotify_ids_from_chartmetric(
     }
 
 
+@router.get("/api/v1/admin/chartmetric/probe")
+async def chartmetric_probe(
+    cm_track_id: int = 1,
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Synchronous diagnostic: authenticate with Chartmetric, call
+    /api/track/{cm_track_id}, and return a structured report. Tells us
+    in one ~5-second call whether:
+      - our Chartmetric token still works
+      - /api/track/{id} responds and how fast
+      - what response shape Chartmetric returns (top-level keys)
+      - whether audio features are present (and in which shape)
+      - whether sp_artist_id / spotify_id fields are present
+      - what Retry-After header (if any) is returned
+
+    Built 2026-04-12 to diagnose why chartmetric_audio_features and
+    chartmetric_artist_tracks both hang after their first flush with
+    no interim progress and no log signal we can access.
+    """
+    import os
+    import time as time_mod
+    import httpx
+
+    api_key = os.environ.get("CHARTMETRIC_API_KEY", "")
+    if not api_key:
+        return {"error": "CHARTMETRIC_API_KEY not set"}
+
+    report: dict[str, Any] = {
+        "cm_track_id": cm_track_id,
+        "auth": {},
+        "track_call": {},
+    }
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        # ---- Auth probe ----
+        t0 = time_mod.time()
+        try:
+            auth_resp = await client.post(
+                "https://api.chartmetric.com/api/token",
+                json={"refreshtoken": api_key},
+            )
+            report["auth"] = {
+                "elapsed_ms": int((time_mod.time() - t0) * 1000),
+                "status_code": auth_resp.status_code,
+                "retry_after": auth_resp.headers.get("Retry-After"),
+            }
+            if auth_resp.status_code != 200:
+                report["auth"]["body_sample"] = (auth_resp.text or "")[:300]
+                return report
+            token = auth_resp.json().get("token") or auth_resp.json().get("access_token")
+            if not token:
+                report["auth"]["error"] = f"no token key in response: {list(auth_resp.json().keys())}"
+                return report
+            report["auth"]["success"] = True
+        except Exception as exc:
+            report["auth"]["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+            report["auth"]["elapsed_ms"] = int((time_mod.time() - t0) * 1000)
+            return report
+
+        # ---- Track endpoint probe ----
+        t1 = time_mod.time()
+        try:
+            track_resp = await client.get(
+                f"https://api.chartmetric.com/api/track/{cm_track_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            elapsed_track = int((time_mod.time() - t1) * 1000)
+            report["track_call"] = {
+                "elapsed_ms": elapsed_track,
+                "status_code": track_resp.status_code,
+                "retry_after": track_resp.headers.get("Retry-After"),
+                "content_length": len(track_resp.content or b""),
+            }
+            if track_resp.status_code != 200:
+                report["track_call"]["body_sample"] = (track_resp.text or "")[:400]
+                return report
+
+            try:
+                payload = track_resp.json()
+            except Exception as exc:
+                report["track_call"]["parse_error"] = str(exc)[:200]
+                return report
+
+            report["track_call"]["top_level_keys"] = list(payload.keys()) if isinstance(payload, dict) else []
+            if isinstance(payload, dict) and isinstance(payload.get("obj"), dict):
+                obj = payload["obj"]
+                report["track_call"]["obj_keys"] = list(obj.keys())
+                # Look for audio feature fields in likely shapes
+                af_keys = [
+                    "tempo", "energy", "danceability", "valence",
+                    "acousticness", "instrumentalness", "liveness",
+                    "speechiness", "loudness", "key", "mode",
+                    "duration_ms", "time_signature",
+                ]
+                flat_present = {k: obj.get(k) for k in af_keys if obj.get(k) is not None}
+                nested_af = obj.get("audio_features") if isinstance(obj.get("audio_features"), dict) else None
+                nested_sp = obj.get("sp_audio_features") if isinstance(obj.get("sp_audio_features"), dict) else None
+                report["track_call"]["audio_features_flat"] = flat_present or None
+                report["track_call"]["audio_features_nested_audio_features"] = nested_af
+                report["track_call"]["audio_features_nested_sp_audio_features"] = nested_sp
+                # Use the scraper's own extractor to see what it would return
+                from scrapers.chartmetric_audio_features import _extract_audio_features
+                report["track_call"]["extracted_by_scraper"] = _extract_audio_features(payload)
+                # Spotify ID fields of interest
+                report["track_call"]["sp_track_id"] = (
+                    obj.get("spotify_track_id") or obj.get("spotify_id") or obj.get("sp_track_id")
+                )
+                report["track_call"]["sp_artist_id"] = (
+                    obj.get("spotify_artist_id") or obj.get("sp_artist_id")
+                )
+                report["track_call"]["isrc"] = obj.get("isrc")
+                report["track_call"]["title"] = obj.get("name") or obj.get("title")
+
+        except Exception as exc:
+            report["track_call"]["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+            report["track_call"]["elapsed_ms"] = int((time_mod.time() - t1) * 1000)
+
+    return report
+
+
 @router.get("/api/v1/admin/spotify/cooldown")
 async def get_spotify_cooldown(
     _admin: ApiKey = Depends(require_admin),
