@@ -1475,6 +1475,23 @@ async def chartmetric_probe(
     return report
 
 
+# Breakout Analysis Engine — Layer 4 (breakoutengine_prd.md)
+@router.get("/api/v1/admin/gap-finder")
+async def find_genre_gaps(
+    genre: str,
+    n_clusters: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Find underserved sonic zones in a genre via K-means clustering of
+    audio features. Returns clusters sorted by gap_score (highest =
+    biggest opportunity).
+    """
+    from api.services.gap_finder import find_gaps
+    return await find_gaps(db, genre, n_clusters=n_clusters)
+
+
 # Breakout Analysis Engine — Layer 2 (breakoutengine_prd.md)
 @router.post("/api/v1/admin/sweeps/feature-delta-analysis", status_code=202)
 async def trigger_feature_delta_analysis(
