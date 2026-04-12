@@ -1475,6 +1475,53 @@ async def chartmetric_probe(
     return report
 
 
+# Breakout Analysis Engine — Layer 2 (breakoutengine_prd.md)
+@router.post("/api/v1/admin/sweeps/feature-delta-analysis", status_code=202)
+async def trigger_feature_delta_analysis(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Trigger feature delta analysis for all genres with breakouts."""
+    from api.services.feature_delta_analysis import compute_all_feature_deltas
+    stats = await compute_all_feature_deltas(db)
+    return {"detail": "feature delta analysis complete", "stats": stats}
+
+
+@router.get("/api/v1/admin/feature-deltas")
+async def get_feature_deltas(
+    genre: str | None = None,
+    limit: int = 30,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Return cached genre feature delta analyses, optionally filtered."""
+    from api.models.genre_feature_delta import GenreFeatureDelta
+    stmt = (
+        select(GenreFeatureDelta)
+        .order_by(GenreFeatureDelta.window_end.desc(), GenreFeatureDelta.breakout_count.desc())
+        .limit(min(limit, 100))
+    )
+    if genre:
+        stmt = stmt.where(GenreFeatureDelta.genre_id == genre)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return {
+        "deltas": [
+            {
+                "genre": r.genre_id,
+                "window": [r.window_start.isoformat(), r.window_end.isoformat()],
+                "breakout_count": r.breakout_count,
+                "baseline_count": r.baseline_count,
+                "deltas": r.deltas_json,
+                "significance": r.significance_json,
+                "top_differentiators": r.top_differentiators or [],
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
 # Breakout Analysis Engine — Layer 1 (breakoutengine_prd.md)
 @router.post("/api/v1/admin/sweeps/breakout-detection", status_code=202)
 async def trigger_breakout_detection(

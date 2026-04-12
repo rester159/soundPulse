@@ -245,6 +245,17 @@ async def init_scheduler(database_url: str):
         name="breakout detection sweep",
     )
 
+    # Feature delta analysis — Layer 2. Runs daily after breakout detection.
+    # Compares each genre's breakout audio features vs the genre baseline
+    # using Welch's t-test, caching the deltas and significance scores.
+    _scheduler.add_job(
+        _run_feature_delta_analysis_job,
+        trigger=IntervalTrigger(hours=24),
+        id="sweep_feature_delta_analysis",
+        replace_existing=True,
+        name="feature delta analysis",
+    )
+
     # Stale-job reaper — clears scrapers whose last_status got stuck at
     # "running" because the process was killed mid-run (deploy, OOM, crash).
     # Without this, a scraper can sit in "running" forever until the next
@@ -304,6 +315,19 @@ async def _run_breakout_detection_job():
         logger.info("[scheduler] breakout detection: %s", stats)
     except Exception:
         logger.exception("[scheduler] breakout detection sweep failed")
+
+
+async def _run_feature_delta_analysis_job():
+    """APScheduler entry point for the feature delta analysis sweep."""
+    from api.services.feature_delta_analysis import compute_all_feature_deltas
+
+    factory = _get_session_factory()
+    try:
+        async with factory() as db:
+            stats = await compute_all_feature_deltas(db)
+        logger.info("[scheduler] feature delta analysis: %s", stats)
+    except Exception:
+        logger.exception("[scheduler] feature delta analysis failed")
 
 
 async def _reap_stale_running_scrapers():
