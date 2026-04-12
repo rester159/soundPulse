@@ -261,6 +261,17 @@ async def init_scheduler(database_url: str):
         name="feature delta analysis",
     )
 
+    # Lyrical analysis — Layer 6. Runs WEEKLY (lyrics don't change fast +
+    # LLM cost control). Per genre with sufficient lyrics, asks an LLM
+    # to compare breakout vs baseline lyrics and extract themes/tone.
+    _scheduler.add_job(
+        _run_lyrical_analysis_job,
+        trigger=IntervalTrigger(hours=168),
+        id="sweep_lyrical_analysis",
+        replace_existing=True,
+        name="lyrical analysis (weekly)",
+    )
+
     # Stale-job reaper — clears scrapers whose last_status got stuck at
     # "running" because the process was killed mid-run (deploy, OOM, crash).
     # Without this, a scraper can sit in "running" forever until the next
@@ -333,6 +344,19 @@ async def _run_feature_delta_analysis_job():
         logger.info("[scheduler] feature delta analysis: %s", stats)
     except Exception:
         logger.exception("[scheduler] feature delta analysis failed")
+
+
+async def _run_lyrical_analysis_job():
+    """APScheduler entry point for the LLM lyrical analysis sweep."""
+    from api.services.lyrical_analysis import analyze_all_genres
+
+    factory = _get_session_factory()
+    try:
+        async with factory() as db:
+            stats = await analyze_all_genres(db)
+        logger.info("[scheduler] lyrical analysis: %s", stats)
+    except Exception:
+        logger.exception("[scheduler] lyrical analysis failed")
 
 
 async def _reap_stale_running_scrapers():

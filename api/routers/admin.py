@@ -1475,6 +1475,52 @@ async def chartmetric_probe(
     return report
 
 
+# Breakout Analysis Engine — Layer 6 (breakoutengine_prd.md)
+@router.post("/api/v1/admin/sweeps/lyrical-analysis", status_code=202)
+async def trigger_lyrical_analysis(
+    only_genre: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Trigger LLM-powered lyrical analysis. Optionally limit to one genre."""
+    from api.services.lyrical_analysis import analyze_all_genres
+    stats = await analyze_all_genres(db, only_genre=only_genre)
+    return {"detail": "lyrical analysis complete", "stats": stats}
+
+
+@router.get("/api/v1/admin/lyrical-analyses")
+async def get_lyrical_analyses(
+    genre: str | None = None,
+    limit: int = 30,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Browse cached lyrical analyses."""
+    from api.models.genre_lyrical_analysis import GenreLyricalAnalysis
+    stmt = (
+        select(GenreLyricalAnalysis)
+        .order_by(GenreLyricalAnalysis.window_end.desc())
+        .limit(min(limit, 100))
+    )
+    if genre:
+        stmt = stmt.where(GenreLyricalAnalysis.genre_id == genre)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return {
+        "analyses": [
+            {
+                "genre": r.genre_id,
+                "window_end": r.window_end.isoformat(),
+                "breakout_count": r.breakout_count,
+                "baseline_count": r.baseline_count,
+                "analysis": r.analysis_json,
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
 # Breakout Analysis Engine — Layer 5 (breakoutengine_prd.md)
 @router.get("/api/v1/admin/tracks/needing-lyrics")
 async def get_tracks_needing_lyrics(
