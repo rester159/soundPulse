@@ -1,22 +1,31 @@
 """
-Chartmetric audio-features enrichment scraper.
+Chartmetric audio-features enrichment scraper (tempo + duration only).
 
-Replaces the broken spotify_audio scraper. Spotify's /v1/audio-features
-endpoint returns 403 for any app registered after 2024-11-27 (our case),
-but Chartmetric mirrors the same Spotify audio feature values in their
-own /api/track/{cm_track_id} response on the paid tier. This scraper
-walks every track with a chartmetric_id but no audio_features, hits
-Chartmetric's track endpoint, extracts whatever audio feature fields
-the response carries, and POSTs them back through /api/v1/trending/bulk
-so the existing ingest path copies them onto tracks.audio_features.
+HONEST SCOPE (verified 2026-04-12 via /admin/chartmetric/probe-sub-endpoints):
+Chartmetric's paid API `/api/track/{cm_track_id}` endpoint returns only
+`tempo` and `duration_ms` — not the full 13-field Spotify audio features
+set. The hidden sub-endpoints (/audio-features, /sp-audio-features,
+/audio-analysis, v2/track) all return 401 "Chartmetric internal API
+endpoint" — they're reserved for Chartmetric's own web UI and are not
+exposed to API subscribers. So we take the 2 fields we can get and
+move on.
 
-Response-shape tolerance: Chartmetric's `/api/track/{id}` response has
-varied historically (flat top-level fields vs a nested `audio_features`
-object vs an `sp_audio_features` wrapper). We try all of them and
-normalize to the 13-field set the rest of the system already expects.
+Why this still has value:
+- `tempo` is arguably the single most useful audio feature for
+  songwriting + blueprint generation.
+- `duration_ms` is trivially useful for song structure.
+- Partial audio features are infinitely better than zero, which is
+  what the broken Spotify /v1/audio-features pipeline produced.
 
-Rate limit: Chartmetric caps at 2 req/sec. We run at REQUEST_DELAY=0.55
-with a semaphore of 2, same as the other Chartmetric scrapers.
+For the other 11 features (energy, danceability, valence, etc.) we
+need a different data source — see planning/tasks.md for the follow-up
+options (AcousticBrainz, pre-2024 Spotify app, Cyanite.ai, local
+Essentia).
+
+Rate limit: Chartmetric documents "2 req/sec" but in practice /api/track/{id}
+starts returning 429 "Rate limit exceeded, retry in -X ms" much faster
+than that. We run conservatively at one call per 2.5 seconds (0.4 req/s)
+with a semaphore of 1 (serial) to stay comfortably under the real ceiling.
 """
 from __future__ import annotations
 
@@ -38,8 +47,9 @@ QUEUE_ENDPOINT = "/api/v1/admin/tracks/needing-audio-features-cm"
 # Page size when paging the queue endpoint
 PAGE_SIZE = 500
 
-# Hard cap per run so a runaway never burns the whole Chartmetric quota
-MAX_TRACKS_PER_RUN = 5000
+# Hard cap per run. At 2.5s per track = ~40 min to process 1000 tracks.
+# Runs every 6h so the full ~5,200-track backlog drains in ~32 hours.
+MAX_TRACKS_PER_RUN = 1000
 
 # Canonical audio feature field names (matches Spotify's /v1/audio-features
 # response shape and what the rest of SoundPulse expects to find in
@@ -101,13 +111,20 @@ class ChartmetricAudioFeaturesScraper(BaseScraper):
     PLATFORM = "chartmetric"  # we're writing rows under the chartmetric platform namespace
     API_BASE = "https://api.chartmetric.com"
     TOKEN_URL = "https://api.chartmetric.com/api/token"
-    REQUEST_DELAY = 0.55
-    BULK_BATCH_SIZE = 200
+    # Conservative 0.4 req/s. Chartmetric's documented 2 req/s limit
+    # doesn't apply to /api/track/{id} in practice — observed 429s with
+    # "retry in -436ms" at 2 req/s sustained. 2.5s gives comfortable margin.
+    REQUEST_DELAY = 2.5
+    # Smaller batches flush sooner, so progress shows up in DB quickly
+    # and a mid-run kill loses at most 50 tracks of work.
+    BULK_BATCH_SIZE = 50
 
     def __init__(self, credentials: dict, api_base_url: str, admin_key: str):
         super().__init__(credentials, api_base_url, admin_key)
         self.access_token: str | None = None
-        self._semaphore = asyncio.Semaphore(2)
+        # Serial (semaphore of 1) — parallelism was causing Chartmetric
+        # to return 429s before the first flush could land.
+        self._semaphore = asyncio.Semaphore(1)
         self._buffer: list[dict[str, Any]] = []
         self._stats: dict[str, int] = {
             "tracks_fetched": 0,
@@ -213,14 +230,17 @@ class ChartmetricAudioFeaturesScraper(BaseScraper):
                 if len(self._buffer) >= self.BULK_BATCH_SIZE:
                     await self._flush_buffer()
 
-                if (processed_total + i + 1) % 25 == 0:
+                # Verbose progress log every 10 tracks so Railway logs
+                # show liveness — critical for diagnosing future hangs.
+                if (processed_total + i + 1) % 10 == 0:
                     logger.info(
                         "[cm-audio-features] progress: fetched=%d with_features=%d "
-                        "without_features=%d errors=%d",
+                        "without_features=%d errors=%d bulk_flushes=%d",
                         self._stats["tracks_fetched"],
                         self._stats["tracks_with_features"],
                         self._stats["tracks_without_features"],
                         self._stats["errors"],
+                        self._stats["bulk_flushes"],
                     )
 
             processed_total += len(page)
