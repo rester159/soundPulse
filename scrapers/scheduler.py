@@ -154,7 +154,18 @@ async def init_scheduler(database_url: str):
         # Provides redundant cross-platform rank signals for free.
         "kworb": {"interval_hours": 24, "enabled": True},
         "chartmetric_artists": {"interval_hours": 12, "enabled": True},
-        "spotify_audio": {"interval_hours": 24, "enabled": True},
+        # spotify_audio: kept for history, permanently disabled. Spotify's
+        # /v1/audio-features endpoint returns 403 for any app created
+        # after 2024-11-27 (ours qualifies). Replaced by
+        # chartmetric_audio_features which pulls the same Spotify
+        # audio feature values from Chartmetric's paid API.
+        "spotify_audio": {"interval_hours": 24, "enabled": False},
+        # chartmetric_audio_features: pulls per-track audio features from
+        # /api/track/{cm_track_id} on Chartmetric. 12h cadence so the
+        # daily chart refresh cycle gets its features enriched within
+        # half a day. ~5,200 tracks * 1 API call each, bounded by
+        # MAX_TRACKS_PER_RUN=5000 per run — ~42 min at 2 req/s.
+        "chartmetric_audio_features": {"interval_hours": 12, "enabled": True},
         "genius_lyrics": {"interval_hours": 24, "enabled": False},
     }
 

@@ -1597,6 +1597,59 @@ async def get_artists_with_chartmetric_id(
 # different shape and doesn't include audio_features, so the scraper always
 # got 0 results and silently exited. See L001 / AUD-011 / P1-004.
 
+@router.get("/api/v1/admin/tracks/needing-audio-features-cm")
+async def get_tracks_needing_audio_features_cm(
+    limit: int = 500,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Return tracks with a chartmetric_id but no audio_features.
+
+    Paired with the chartmetric_audio_features scraper — after the
+    Spotify audio-features endpoint was confirmed 403 for this app,
+    we pivoted to pulling features from Chartmetric's /api/track/{cm_id}
+    response, which includes the same Spotify features inline.
+    """
+    from sqlalchemy import or_, text as sa_text
+    from api.models.track import Track
+
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
+
+    result = await db.execute(
+        select(Track.id, Track.chartmetric_id, Track.title, Track.artist_id, Track.isrc)
+        .where(
+            Track.chartmetric_id.isnot(None),
+            or_(
+                Track.audio_features.is_(None),
+                sa_text("tracks.audio_features::text = '{}'::text"),
+            ),
+        )
+        .order_by(Track.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = result.all()
+
+    return {
+        "data": [
+            {
+                "track_id": str(r.id),
+                "chartmetric_id": r.chartmetric_id,
+                "title": r.title,
+                "isrc": r.isrc,
+                "artist_id": str(r.artist_id) if r.artist_id else None,
+            }
+            for r in rows
+        ],
+        "limit": limit,
+        "offset": offset,
+        "returned": len(rows),
+    }
+
+
 @router.get("/api/v1/admin/tracks/needing-audio-features")
 async def get_tracks_needing_audio_features(
     limit: int = 500,

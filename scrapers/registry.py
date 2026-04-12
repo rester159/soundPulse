@@ -108,12 +108,23 @@ SCRAPER_REGISTRY: dict[str, dict] = {
         "class": "KworbScraper",
         "credentials": {},
     },
+    # spotify_audio is kept in the registry but seeded disabled — its
+    # upstream endpoint (Spotify /v1/audio-features) returns 403 for
+    # any app created after 2024-11-27. Replaced in production by
+    # chartmetric_audio_features below.
     "spotify_audio": {
         "module": "scrapers.spotify_audio",
         "class": "SpotifyAudioScraper",
         "credentials": {
             "client_id": "SPOTIFY_CLIENT_ID",
             "client_secret": "SPOTIFY_CLIENT_SECRET",
+        },
+    },
+    "chartmetric_audio_features": {
+        "module": "scrapers.chartmetric_audio_features",
+        "class": "ChartmetricAudioFeaturesScraper",
+        "credentials": {
+            "api_key": "CHARTMETRIC_API_KEY",
         },
     },
     "genius_lyrics": {
