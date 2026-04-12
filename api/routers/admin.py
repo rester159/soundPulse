@@ -1475,6 +1475,101 @@ async def chartmetric_probe(
     return report
 
 
+# Breakout Analysis Engine — Layer 5 (breakoutengine_prd.md)
+@router.get("/api/v1/admin/tracks/needing-lyrics")
+async def get_tracks_needing_lyrics(
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Return tracks that don't have lyrics in track_lyrics yet.
+    Prioritizes tracks that have appeared in breakout events
+    (since those are the ones we'll feed to LLM lyrical analysis).
+    """
+    from sqlalchemy import text as sa_text
+    limit = max(1, min(limit, 200))
+    result = await db.execute(sa_text("""
+        SELECT t.id AS track_id, t.title, t.spotify_id, t.isrc, a.name AS artist_name,
+               EXISTS(SELECT 1 FROM breakout_events be WHERE be.track_id = t.id) AS is_breakout
+        FROM tracks t
+        LEFT JOIN artists a ON a.id = t.artist_id
+        WHERE NOT EXISTS (SELECT 1 FROM track_lyrics tl WHERE tl.track_id = t.id)
+          AND t.title IS NOT NULL
+        ORDER BY is_breakout DESC, t.created_at DESC
+        LIMIT :lim OFFSET :off
+    """), {"lim": limit, "off": offset})
+    return {
+        "data": [
+            {
+                "track_id": str(r[0]),
+                "title": r[1],
+                "spotify_id": r[2],
+                "isrc": r[3],
+                "artist_name": r[4],
+                "is_breakout": bool(r[5]),
+            }
+            for r in result.fetchall()
+        ],
+    }
+
+
+@router.post("/api/v1/admin/lyrics/bulk", status_code=201)
+async def bulk_ingest_lyrics(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Bulk-ingest lyrics rows. Body shape:
+      {"items": [{"track_id": "...", "lyrics_text": "...", ...features...}]}
+    """
+    from api.models.track_lyrics import TrackLyrics
+    import uuid as uuid_mod
+    items = body.get("items") or []
+    inserted = 0
+    skipped = 0
+    errors = 0
+    for item in items:
+        track_id = item.get("track_id")
+        lyrics_text = item.get("lyrics_text")
+        if not track_id or not lyrics_text:
+            errors += 1
+            continue
+        # Skip if already exists
+        from sqlalchemy import select as sa_select
+        existing = await db.execute(
+            sa_select(TrackLyrics.id).where(TrackLyrics.track_id == track_id)
+        )
+        if existing.scalar_one_or_none() is not None:
+            skipped += 1
+            continue
+        try:
+            row = TrackLyrics(
+                id=uuid_mod.uuid4(),
+                track_id=uuid_mod.UUID(track_id),
+                lyrics_text=lyrics_text,
+                word_count=item.get("word_count"),
+                line_count=item.get("line_count"),
+                vocabulary_richness=item.get("vocabulary_richness"),
+                section_structure=item.get("section_structure"),
+                themes=item.get("themes"),
+                primary_theme=item.get("primary_theme"),
+                language=item.get("language"),
+                genius_url=item.get("genius_url"),
+                genius_song_id=item.get("genius_song_id"),
+                features_json=item.get("features_json"),
+            )
+            db.add(row)
+            inserted += 1
+        except Exception:
+            errors += 1
+    if inserted:
+        await db.commit()
+    return {"data": {"received": len(items), "inserted": inserted, "skipped": skipped, "errors": errors}}
+
+
 # Breakout Analysis Engine — Layer 4 (breakoutengine_prd.md)
 @router.get("/api/v1/admin/gap-finder")
 async def find_genre_gaps(

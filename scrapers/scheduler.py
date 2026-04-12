@@ -173,7 +173,12 @@ async def init_scheduler(database_url: str):
         # pass at 2.5s per call (0.4 req/s), so each run takes ~42 min
         # and the full ~5.2k-track backlog drains in ~32 hours.
         "chartmetric_audio_features": {"interval_hours": 6, "enabled": True},
-        "genius_lyrics": {"interval_hours": 24, "enabled": False},
+        # genius_lyrics: enabled for Layer 5 of the Breakout Engine.
+        # Pulls lyrics for tracks via the /admin/tracks/needing-lyrics
+        # queue (prioritized by breakout status). Needs GENIUS_API_KEY.
+        # 24h cadence × MAX_TRACKS_PER_RUN=1000 = drains a 5k backlog
+        # in ~5 days, then steady-state on new tracks.
+        "genius_lyrics": {"interval_hours": 24, "enabled": True},
     }
 
     # Seed default configs for scrapers that don't exist in DB yet
