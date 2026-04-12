@@ -106,8 +106,14 @@ class ReplicateMusicgenAdapter(ProviderAdapter):
             }
             r = await client.post("/predictions", json=payload)
             if r.status_code >= 400:
-                logger.error("[musicgen] create failed %s: %s", r.status_code, r.text[:500])
-                r.raise_for_status()
+                body_text = r.text[:1000]
+                logger.error("[musicgen] create failed %s: %s", r.status_code, body_text)
+                # Surface Replicate's actual error body to the caller — a bare
+                # httpx HTTPStatusError just says "402 Payment Required" without
+                # telling you WHY (no billing? spend limit? account locked?).
+                raise RuntimeError(
+                    f"Replicate returned {r.status_code}: {body_text}"
+                )
             body = r.json()
             task_id = body["id"]
             logger.info(
