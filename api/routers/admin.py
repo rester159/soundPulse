@@ -1265,6 +1265,89 @@ async def backfill_spotify_ids_from_chartmetric(
     }
 
 
+@router.get("/api/v1/admin/chartmetric/probe-sub-endpoints")
+async def chartmetric_probe_sub_endpoints(
+    cm_track_id: int = 118981138,  # Espresso by default — known-good popular track
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Probe several candidate Chartmetric sub-endpoints for audio features.
+    Built after /api/track/{id} was shown to return only `tempo` and
+    `duration_ms` — we need to know whether a sub-path carries the full
+    Spotify audio features set before rewriting the scraper.
+
+    Tries in order:
+      /api/track/{id}/audio-features
+      /api/track/{id}/sp-audio-features
+      /api/track/{id}/spotify-audio-features
+      /api/track/{id}/audio-analysis
+      /api/track/{id}?embed=audio_features
+      /api/v2/track/{id}  (in case there's a v2 with richer data)
+    """
+    import os
+    import time as time_mod
+    import httpx
+
+    api_key = os.environ.get("CHARTMETRIC_API_KEY", "")
+    if not api_key:
+        return {"error": "CHARTMETRIC_API_KEY not set"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        auth_resp = await client.post(
+            "https://api.chartmetric.com/api/token",
+            json={"refreshtoken": api_key},
+        )
+        if auth_resp.status_code != 200:
+            return {"auth_error": auth_resp.status_code}
+        token = auth_resp.json().get("token") or auth_resp.json().get("access_token")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        candidates = [
+            ("sub_audio_features", f"https://api.chartmetric.com/api/track/{cm_track_id}/audio-features"),
+            ("sub_sp_audio_features", f"https://api.chartmetric.com/api/track/{cm_track_id}/sp-audio-features"),
+            ("sub_spotify_audio_features", f"https://api.chartmetric.com/api/track/{cm_track_id}/spotify-audio-features"),
+            ("sub_audio_analysis", f"https://api.chartmetric.com/api/track/{cm_track_id}/audio-analysis"),
+            ("track_with_embed", f"https://api.chartmetric.com/api/track/{cm_track_id}?embed=audio_features"),
+            ("v2_track", f"https://api.chartmetric.com/api/v2/track/{cm_track_id}"),
+        ]
+
+        results: dict[str, dict] = {}
+        for name, url in candidates:
+            t0 = time_mod.time()
+            try:
+                resp = await client.get(url, headers=headers)
+                elapsed = int((time_mod.time() - t0) * 1000)
+                entry: dict[str, Any] = {
+                    "status_code": resp.status_code,
+                    "elapsed_ms": elapsed,
+                    "content_length": len(resp.content or b""),
+                }
+                if resp.status_code == 200:
+                    try:
+                        payload = resp.json()
+                        entry["top_level_keys"] = list(payload.keys()) if isinstance(payload, dict) else "not-a-dict"
+                        # If it has an obj wrapper, enumerate the inner keys
+                        obj = payload.get("obj") if isinstance(payload, dict) else None
+                        if isinstance(obj, dict):
+                            entry["obj_keys"] = list(obj.keys())[:50]
+                        # Feed the whole payload through the extractor
+                        from scrapers.chartmetric_audio_features import _extract_audio_features
+                        extracted = _extract_audio_features(payload)
+                        entry["extracted"] = extracted
+                    except Exception as exc:
+                        entry["parse_error"] = str(exc)[:200]
+                elif resp.status_code < 500:
+                    entry["body_sample"] = (resp.text or "")[:200]
+                results[name] = entry
+            except Exception as exc:
+                results[name] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+            # Small delay to avoid tripping Chartmetric's rate limit
+            # within a single probe burst
+            await asyncio.sleep(1.5)
+
+    return {"cm_track_id": cm_track_id, "results": results}
+
+
 @router.get("/api/v1/admin/chartmetric/probe")
 async def chartmetric_probe(
     cm_track_id: int = 1,
