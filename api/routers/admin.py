@@ -3811,3 +3811,316 @@ async def list_music_generations(
         ],
         "count": len(rows),
     }
+
+
+# ---------------------------------------------------------------------------
+# Artist spine — §18-23 (blueprints, ai_artists, assignment, CEO gate)
+# ---------------------------------------------------------------------------
+
+class BlueprintFromOpportunityRequest(BaseModel):
+    genre_id: str
+    primary_genre: str | None = None
+    adjacent_genres: list[str] = []
+    target_themes: list[str] = []
+    vocabulary_tone: str | None = None
+    target_audience_tags: list[str] = []
+    voice_requirements: dict | None = None
+    target_tempo: float | None = None
+    target_key: int | None = None
+    target_mode: int | None = None
+    target_energy: float | None = None
+    smart_prompt_text: str
+    smart_prompt_rationale: dict | None = None
+    predicted_success_score: float | None = None
+    quantification_snapshot: dict | None = None
+    breakout_event_ids: list[str] = []
+
+
+class AIArtistCreateRequest(BaseModel):
+    stage_name: str
+    legal_name: str
+    primary_genre: str
+    adjacent_genres: list[str] = []
+    voice_dna: dict
+    visual_dna: dict
+    lyrical_dna: dict | None = None
+    persona_dna: dict | None = None
+    social_dna: dict | None = None
+    audience_tags: list[str] = []
+    influences: list[str] = []
+    content_rating: str = "mild"
+
+
+@router.post("/api/v1/admin/blueprints")
+async def create_blueprint(
+    body: BlueprintFromOpportunityRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Persist a blueprint produced by the breakout + smart-prompt pipeline."""
+    import uuid as _uuid
+    from api.models.song_blueprint import SongBlueprint
+
+    row = SongBlueprint(
+        genre_id=body.genre_id,
+        primary_genre=body.primary_genre or body.genre_id,
+        adjacent_genres=body.adjacent_genres or None,
+        target_themes=body.target_themes or None,
+        vocabulary_tone=body.vocabulary_tone,
+        target_audience_tags=body.target_audience_tags or None,
+        voice_requirements=body.voice_requirements,
+        target_tempo=body.target_tempo,
+        target_key=body.target_key,
+        target_mode=body.target_mode,
+        target_energy=body.target_energy,
+        smart_prompt_text=body.smart_prompt_text,
+        smart_prompt_rationale=body.smart_prompt_rationale,
+        predicted_success_score=body.predicted_success_score,
+        quantification_snapshot=body.quantification_snapshot,
+        breakout_event_ids=[_uuid.UUID(x) for x in body.breakout_event_ids] or None,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {
+        "id": str(row.id),
+        "genre_id": row.genre_id,
+        "status": row.status,
+        "created_at": row.created_at.isoformat(),
+    }
+
+
+@router.get("/api/v1/admin/blueprints")
+async def list_blueprints(
+    limit: int = 50,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    from api.models.song_blueprint import SongBlueprint
+    stmt = select(SongBlueprint).order_by(SongBlueprint.created_at.desc()).limit(min(limit, 200))
+    if status:
+        stmt = stmt.where(SongBlueprint.status == status)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return {
+        "blueprints": [
+            {
+                "id": str(r.id),
+                "genre_id": r.genre_id,
+                "primary_genre": r.primary_genre,
+                "status": r.status,
+                "assigned_artist_id": str(r.assigned_artist_id) if r.assigned_artist_id else None,
+                "target_themes": r.target_themes,
+                "target_audience_tags": r.target_audience_tags,
+                "predicted_success_score": r.predicted_success_score,
+                "smart_prompt_text": r.smart_prompt_text,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.post("/api/v1/admin/artists")
+async def create_ai_artist(
+    body: AIArtistCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Manually create an AI artist. Full persona pipeline lands later."""
+    from api.models.ai_artist import AIArtist
+    row = AIArtist(
+        stage_name=body.stage_name,
+        legal_name=body.legal_name,
+        primary_genre=body.primary_genre,
+        adjacent_genres=body.adjacent_genres or None,
+        voice_dna=body.voice_dna,
+        visual_dna=body.visual_dna,
+        lyrical_dna=body.lyrical_dna,
+        persona_dna=body.persona_dna,
+        social_dna=body.social_dna,
+        audience_tags=body.audience_tags or None,
+        influences=body.influences or None,
+        content_rating=body.content_rating,
+    )
+    db.add(row)
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(409, detail=f"artist creation failed: {e}")
+    await db.refresh(row)
+    return {
+        "artist_id": str(row.artist_id),
+        "stage_name": row.stage_name,
+        "primary_genre": row.primary_genre,
+        "roster_status": row.roster_status,
+        "created_at": row.created_at.isoformat(),
+    }
+
+
+@router.get("/api/v1/admin/artists")
+async def list_ai_artists(
+    roster_status: str = "active",
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    from api.models.ai_artist import AIArtist
+    stmt = select(AIArtist).where(AIArtist.roster_status == roster_status).order_by(
+        AIArtist.created_at.desc()
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return {
+        "artists": [
+            {
+                "artist_id": str(r.artist_id),
+                "stage_name": r.stage_name,
+                "primary_genre": r.primary_genre,
+                "adjacent_genres": r.adjacent_genres,
+                "song_count": r.song_count,
+                "audience_tags": r.audience_tags,
+                "voice_dna": r.voice_dna,
+                "lyrical_dna": r.lyrical_dna,
+                "ceo_approved": r.ceo_approved,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.post("/api/v1/admin/blueprints/{blueprint_id}/assign")
+async def assign_blueprint(
+    blueprint_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Run the §22 assignment engine against the current roster. On a reuse
+    recommendation the decision is logged to ceo_decisions as pending. On
+    create_new it's also logged but with proposal='create_new' and no
+    proposed_artist_id.
+    """
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+    from api.models.ceo_decision import CEODecision
+    from api.models.song_blueprint import SongBlueprint
+    from api.services.assignment_engine import AssignmentEngine
+
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id")
+
+    bp = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if bp is None:
+        raise HTTPException(404, detail="blueprint not found")
+
+    roster_rows = (await db.execute(
+        select(AIArtist).where(AIArtist.roster_status == "active")
+    )).scalars().all()
+
+    bp_dict = {
+        "id": str(bp.id),
+        "primary_genre": bp.primary_genre or bp.genre_id,
+        "adjacent_genres": bp.adjacent_genres or [],
+        "target_themes": bp.target_themes or [],
+        "vocabulary_tone": bp.vocabulary_tone,
+        "target_audience_tags": bp.target_audience_tags or [],
+        "voice_requirements": bp.voice_requirements,
+    }
+    roster_dicts = [
+        {
+            "artist_id": str(a.artist_id),
+            "stage_name": a.stage_name,
+            "primary_genre": a.primary_genre,
+            "adjacent_genres": a.adjacent_genres or [],
+            "voice_dna": a.voice_dna,
+            "lyrical_dna": a.lyrical_dna or {},
+            "audience_tags": a.audience_tags or [],
+            "song_count": a.song_count,
+        }
+        for a in roster_rows
+    ]
+
+    engine = AssignmentEngine(reuse_threshold=0.68)
+    decision = engine.decide(blueprint=bp_dict, roster=roster_dicts)
+
+    # Persist a CEODecision row as the pending gate.
+    artist_name_map = {str(a.artist_id): a.stage_name for a in roster_rows}
+    decision_row = CEODecision(
+        decision_type="artist_assignment",
+        entity_type="song_blueprint",
+        entity_id=bp.id,
+        proposal=decision.proposal,
+        data={
+            "blueprint_id": str(bp.id),
+            "blueprint_genre": bp.genre_id,
+            "proposed_artist_id": decision.proposed_artist_id,
+            "proposed_artist_name": (
+                artist_name_map.get(decision.proposed_artist_id)
+                if decision.proposed_artist_id else None
+            ),
+            "scores": decision.scores,
+            "breakdown": decision.breakdown,
+            "threshold": decision.threshold,
+            "reason": decision.reason,
+            "roster_size": len(roster_dicts),
+        },
+        status="pending",
+    )
+    db.add(decision_row)
+    await db.commit()
+    await db.refresh(decision_row)
+
+    return {
+        "decision_id": str(decision_row.decision_id),
+        "proposal": decision.proposal,
+        "proposed_artist_id": decision.proposed_artist_id,
+        "proposed_artist_name": artist_name_map.get(decision.proposed_artist_id or ""),
+        "scores": decision.scores,
+        "breakdown": decision.breakdown,
+        "threshold": decision.threshold,
+        "reason": decision.reason,
+        "status": decision_row.status,
+    }
+
+
+@router.get("/api/v1/admin/ceo-decisions")
+async def list_ceo_decisions(
+    status: str | None = None,
+    decision_type: str | None = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    from api.models.ceo_decision import CEODecision
+    stmt = select(CEODecision).order_by(CEODecision.created_at.desc()).limit(min(limit, 200))
+    if status:
+        stmt = stmt.where(CEODecision.status == status)
+    if decision_type:
+        stmt = stmt.where(CEODecision.decision_type == decision_type)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return {
+        "decisions": [
+            {
+                "decision_id": str(r.decision_id),
+                "decision_type": r.decision_type,
+                "entity_type": r.entity_type,
+                "entity_id": str(r.entity_id) if r.entity_id else None,
+                "proposal": r.proposal,
+                "data": r.data,
+                "status": r.status,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
