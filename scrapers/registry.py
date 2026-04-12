@@ -77,12 +77,13 @@ SCRAPER_REGISTRY: dict[str, dict] = {
             "api_key": "CHARTMETRIC_API_KEY",
         },
     },
+    # Shazam now uses the public web API at shazam.com/services/ — no
+    # API key required. The RapidAPI dependency was dropped after the
+    # free tier proved too restrictive for any sustained cadence.
     "shazam": {
         "module": "scrapers.shazam",
         "class": "ShazamScraper",
-        "credentials": {
-            "rapidapi_key": "SHAZAM_RAPIDAPI_KEY",
-        },
+        "credentials": {},
     },
     "apple_music": {
         "module": "scrapers.apple_music",
