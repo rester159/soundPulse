@@ -384,6 +384,15 @@ export function useMusicPoll(provider, taskId, { enabled = true } = {}) {
   })
 }
 
+export function useMusicGenerations(limit = 20) {
+  return useQuery({
+    queryKey: ['admin', 'music', 'generations', limit],
+    queryFn: () => makeRequest('GET', '/admin/music/generations', { limit }),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  })
+}
+
 // Version badge — displays deploy identity in the Layout top-right
 export function useVersion() {
   return useQuery({

@@ -3646,9 +3646,11 @@ async def list_music_providers(_admin: ApiKey = Depends(require_admin)):
 @router.post("/api/v1/admin/music/generate")
 async def music_generate(
     body: MusicGenerateRequest,
+    db: AsyncSession = Depends(get_db),
     _admin: ApiKey = Depends(require_admin),
 ):
     """Submit a music generation request. Returns a task handle to poll."""
+    from api.models.music_generation_call import MusicGenerationCall
     from api.services.music_providers import (
         GenerateParams,
         ProviderError,
@@ -3678,6 +3680,29 @@ async def music_generate(
         logger.exception("[music] %s generate failed", body.provider)
         raise HTTPException(502, detail=f"provider call failed: {e}")
 
+    # Persist the call. A UNIQUE (provider, task_id) conflict means we
+    # already logged this one — rare but possible on retry, so upsert.
+    row = MusicGenerationCall(
+        provider=task.provider,
+        task_id=task.task_id,
+        status="pending",
+        prompt=body.prompt,
+        params_json=task.params_echo,
+        model_variant=body.model_variant,
+        duration_seconds_requested=body.duration_seconds,
+        genre_hint=body.genre_hint,
+        estimated_cost_usd=task.estimated_cost_usd,
+        submitted_at=task.submitted_at,
+    )
+    db.add(row)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("[music] failed to persist generation call %s", task.task_id)
+        # Don't fail the request — the task is live at the provider even
+        # if persistence is broken. Surface in logs and move on.
+
     return {
         "provider": task.provider,
         "task_id": task.task_id,
@@ -3691,9 +3716,11 @@ async def music_generate(
 async def music_poll(
     provider: str,
     task_id: str,
+    db: AsyncSession = Depends(get_db),
     _admin: ApiKey = Depends(require_admin),
 ):
     """Poll a generation task. Returns the latest status + audio URL on success."""
+    from api.models.music_generation_call import MusicGenerationCall
     from api.services.music_providers import ProviderError, get_provider
     try:
         adapter = get_provider(provider)
@@ -3708,6 +3735,33 @@ async def music_poll(
         logger.exception("[music] %s poll failed for %s", provider, task_id)
         raise HTTPException(502, detail=f"provider poll failed: {e}")
 
+    # Update the persisted row if it exists.
+    row_result = await db.execute(
+        select(MusicGenerationCall).where(
+            MusicGenerationCall.provider == provider,
+            MusicGenerationCall.task_id == task_id,
+        )
+    )
+    row = row_result.scalar_one_or_none()
+    if row is not None:
+        row.status = result.status.value
+        if result.audio_url is not None:
+            row.audio_url = result.audio_url
+        if result.duration_seconds is not None:
+            row.audio_duration_seconds = result.duration_seconds
+        if result.actual_cost_usd is not None:
+            row.actual_cost_usd = result.actual_cost_usd
+        if result.error:
+            row.error_message = result.error
+        row.raw_response = result.raw_payload
+        if result.status.value in ("succeeded", "failed") and row.completed_at is None:
+            row.completed_at = datetime.now(timezone.utc)
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("[music] failed to update persisted call %s", task_id)
+
     return {
         "provider": result.provider,
         "task_id": result.task_id,
@@ -3716,4 +3770,44 @@ async def music_poll(
         "duration_seconds": result.duration_seconds,
         "error": result.error,
         "actual_cost_usd": result.actual_cost_usd,
+    }
+
+
+@router.get("/api/v1/admin/music/generations")
+async def list_music_generations(
+    limit: int = 50,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """List recent music generation calls, newest first."""
+    from api.models.music_generation_call import MusicGenerationCall
+    stmt = select(MusicGenerationCall).order_by(
+        MusicGenerationCall.submitted_at.desc()
+    ).limit(min(limit, 200))
+    if status:
+        stmt = stmt.where(MusicGenerationCall.status == status)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return {
+        "generations": [
+            {
+                "id": str(row.id),
+                "provider": row.provider,
+                "task_id": row.task_id,
+                "status": row.status,
+                "prompt": row.prompt,
+                "genre_hint": row.genre_hint,
+                "duration_seconds_requested": row.duration_seconds_requested,
+                "audio_url": row.audio_url,
+                "audio_duration_seconds": row.audio_duration_seconds,
+                "estimated_cost_usd": row.estimated_cost_usd,
+                "actual_cost_usd": row.actual_cost_usd,
+                "error_message": row.error_message,
+                "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
+                "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+            }
+            for row in rows
+        ],
+        "count": len(rows),
     }

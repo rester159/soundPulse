@@ -7,5 +7,9 @@ from api.models.feedback import Feedback
 from api.models.api_key import ApiKey
 from api.models.scraper_config import ScraperConfig
 from api.models.backtest_result import BacktestResult
+from api.models.music_generation_call import MusicGenerationCall
 
-__all__ = ["Artist", "Track", "Genre", "TrendingSnapshot", "Prediction", "Feedback", "ApiKey", "ScraperConfig", "BacktestResult"]
+__all__ = [
+    "Artist", "Track", "Genre", "TrendingSnapshot", "Prediction", "Feedback",
+    "ApiKey", "ScraperConfig", "BacktestResult", "MusicGenerationCall",
+]

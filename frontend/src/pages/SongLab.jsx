@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import {
   useTopOpportunities, useMusicProviders, useMusicGenerate, useMusicPoll,
+  useMusicGenerations,
 } from '../hooks/useSoundPulse'
 
 // Display mapping from generation provider id → prompt-style id used by
@@ -56,6 +57,66 @@ function MomentumBadge({ momentum }) {
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-semibold uppercase tracking-wider ${cls}`}>
       <TrendingUp size={9} /> {momentum}
     </span>
+  )
+}
+
+function RecentGenerationCard({ gen }) {
+  const submitted = gen.submitted_at ? new Date(gen.submitted_at) : null
+  const ago = submitted
+    ? (() => {
+        const mins = Math.floor((Date.now() - submitted.getTime()) / 60_000)
+        if (mins < 1) return 'just now'
+        if (mins < 60) return `${mins}m ago`
+        const hrs = Math.floor(mins / 60)
+        if (hrs < 24) return `${hrs}h ago`
+        return `${Math.floor(hrs / 24)}d ago`
+      })()
+    : ''
+  const statusCls =
+    gen.status === 'succeeded' ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30'
+    : gen.status === 'failed' ? 'text-rose-300 bg-rose-500/10 border-rose-500/30'
+    : 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+  return (
+    <div className="flex-shrink-0 w-72 bg-zinc-900 border border-zinc-800 rounded-lg p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+          {gen.genre_hint || 'unknown'} · {PROVIDER_DISPLAY[gen.provider] || gen.provider}
+        </span>
+        <span className={`text-[9px] px-1.5 py-0.5 rounded border uppercase tracking-wider ${statusCls}`}>
+          {gen.status}
+        </span>
+      </div>
+      <div className="text-[11px] text-zinc-400 line-clamp-2 min-h-[2.2em]">
+        {gen.prompt}
+      </div>
+      {gen.status === 'succeeded' && gen.audio_url && (
+        <audio controls src={gen.audio_url} className="w-full h-8" style={{ filter: 'invert(0.9) hue-rotate(180deg)' }} />
+      )}
+      {gen.status === 'failed' && gen.error_message && (
+        <div className="text-[10px] text-rose-300 line-clamp-1">{gen.error_message}</div>
+      )}
+      <div className="flex items-center justify-between text-[9px] text-zinc-600">
+        <span>{ago}</span>
+        <span className="tabular-nums">${(gen.actual_cost_usd ?? gen.estimated_cost_usd ?? 0).toFixed(3)}</span>
+      </div>
+    </div>
+  )
+}
+
+function RecentGenerations() {
+  const { data, isLoading } = useMusicGenerations(20)
+  const gens = data?.data?.generations || []
+  if (isLoading && gens.length === 0) return null
+  if (!gens.length) return null
+  return (
+    <div className="mb-6 space-y-2">
+      <div className="flex items-center gap-2 text-zinc-400 text-xs font-semibold uppercase tracking-wider">
+        <Music size={12} /> Recent generations ({gens.length})
+      </div>
+      <div className="flex gap-3 overflow-x-auto pb-2 -mx-2 px-2">
+        {gens.map(g => <RecentGenerationCard key={g.id} gen={g} />)}
+      </div>
+    </div>
   )
 }
 
@@ -392,6 +453,9 @@ export default function SongLab() {
           </button>
         </div>
       </div>
+
+      {/* Recent generations — persisted across sessions */}
+      <RecentGenerations />
 
       {/* Loading state */}
       {isLoading && (
