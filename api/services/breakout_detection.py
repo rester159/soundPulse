@@ -7,7 +7,9 @@ genre median. Writes one breakout_events row per detection.
 
 Also resolves old breakout events: after 30 days, checks if the track
 sustained (hit), faded (moderate), or died (fizzle) by comparing its
-current composite_score against the genre median at resolution time.
+forward-window peak composite against the DETECTION-TIME peak. If no
+forward-window data exists at all, the event is labeled `unresolvable`
+with outcome_score=NULL — never silently coerced to fizzle.
 
 See planning/PRD/breakoutengine_prd.md for the full design.
 """
@@ -33,6 +35,15 @@ MIN_GENRE_TRACKS = 5
 BREAKOUT_THRESHOLD = 2.0
 BREAKOUT_SCORE_THRESHOLD = 0.4
 RESOLUTION_DAYS = 30
+RESOLUTION_WINDOW_HALF = 5  # look ±5d around detection_date + RESOLUTION_DAYS
+
+# Hit/fizzle thresholds — expressed as ratio of outcome peak to detection peak.
+# Aligned with detection so velocity-driven and composite-driven breakouts are
+# judged on whether the same peak held up, not whether the track reached a
+# genre-median absolute level it was never going to reach.
+HIT_RATIO = 1.2          # outcome peak >= 1.2× detection peak → sustained/grew
+FIZZLE_RATIO = 0.6       # outcome peak < 0.6× detection peak  → faded
+# [FIZZLE_RATIO, HIT_RATIO) is "moderate"
 
 
 async def sweep_breakout_detection(
@@ -54,6 +65,10 @@ async def sweep_breakout_detection(
         "breakouts_detected": 0,
         "already_detected": 0,
         "events_resolved": 0,
+        "hits": 0,
+        "moderate": 0,
+        "fizzles": 0,
+        "unresolvable": 0,
         "elapsed_ms": 0,
     }
     started = datetime.now(timezone.utc)
@@ -134,7 +149,12 @@ async def sweep_breakout_detection(
 
     # ---- Step 3: Resolve old events ----
     resolution_cutoff = today - timedelta(days=RESOLUTION_DAYS)
-    stats["events_resolved"] = await _resolve_old_events(db, resolution_cutoff)
+    resolution_counts = await _resolve_old_events(db, resolution_cutoff)
+    stats["hits"] += resolution_counts["hit"]
+    stats["moderate"] += resolution_counts["moderate"]
+    stats["fizzles"] += resolution_counts["fizzle"]
+    stats["unresolvable"] += resolution_counts["unresolvable"]
+    stats["events_resolved"] = sum(resolution_counts.values())
 
     await db.commit()
 
@@ -188,24 +208,29 @@ async def _get_genre_track_performance(
     return genre_tracks
 
 
-async def _resolve_old_events(db: AsyncSession, cutoff: date) -> int:
+async def _resolve_old_events(db: AsyncSession, cutoff: date) -> dict[str, int]:
     """
     Resolve breakout events that are old enough to have outcome data.
 
     For each unresolved event with detection_date <= cutoff, look up the
     track's MAX composite_score in a ±5-day window centered on
     detection_date + 30 days. That value is the actual outcome — what
-    the track became 30 days after we flagged it.
+    the track's peak looked like 30 days after we flagged it.
 
-    Outcome labels:
-      hit       — outcome > 2x genre_median_composite at detection time
-      moderate  — outcome > 1x genre_median_composite
-      fizzle    — outcome <= 1x genre_median_composite
+    The outcome is judged against the DETECTION-TIME peak, not the
+    genre median, so velocity-driven breakouts (which can start below
+    median) are evaluated on whether their own momentum held up:
 
-    This works for both real-time resolution (30+ day old events) AND
-    historical backfill (events detected with as_of in the past), because
-    the lookup is bounded to a date window relative to detection_date,
-    not "all time."
+      hit          — outcome_peak >= HIT_RATIO × detection_peak (grew/sustained)
+      moderate     — FIZZLE_RATIO × detection_peak <= outcome_peak < HIT_RATIO × ...
+      fizzle       — outcome_peak < FIZZLE_RATIO × detection_peak (faded)
+      unresolvable — NO snapshots in the forward window. Happens when
+                     ingestion didn't run, scheduler was down, or we're
+                     before the dense-coverage era. Kept separate from
+                     fizzle so ML training doesn't learn fake labels.
+
+    Resolution counters are returned as a dict so the caller can report
+    how much of each outcome class we saw.
     """
     result = await db.execute(
         select(BreakoutEvent)
@@ -216,12 +241,12 @@ async def _resolve_old_events(db: AsyncSession, cutoff: date) -> int:
         .limit(2000)
     )
     events = result.scalars().all()
-    resolved = 0
+    counts = {"hit": 0, "moderate": 0, "fizzle": 0, "unresolvable": 0}
 
     for event in events:
         target_date = event.detection_date + timedelta(days=RESOLUTION_DAYS)
-        window_start = target_date - timedelta(days=5)
-        window_end = target_date + timedelta(days=5)
+        window_start = target_date - timedelta(days=RESOLUTION_WINDOW_HALF)
+        window_end = target_date + timedelta(days=RESOLUTION_WINDOW_HALF)
 
         latest = await db.execute(
             select(func.max(TrendingSnapshot.composite_score))
@@ -232,27 +257,42 @@ async def _resolve_old_events(db: AsyncSession, cutoff: date) -> int:
                 TrendingSnapshot.snapshot_date <= window_end,
             )
         )
-        outcome_composite = latest.scalar()
+        outcome_peak = latest.scalar()
 
-        if outcome_composite is None:
-            # No snapshots in the resolution window — track went quiet.
-            # That's a fizzle (track disappeared), but mark with a 0.
-            outcome_composite = 0
+        if outcome_peak is None:
+            # No data in forward window — we simply can't tell. DO NOT
+            # label this as a fizzle; that would poison ML training with
+            # a "miss" every time ingestion was offline.
+            event.resolved_at = datetime.now(timezone.utc)
+            event.outcome_score = None
+            event.outcome_label = "unresolvable"
+            counts["unresolvable"] += 1
+            continue
 
-        # Compare against the genre median at detection time
-        if outcome_composite > 2 * event.genre_median_composite:
+        detection_peak = event.peak_composite or 0.0
+        if detection_peak <= 0:
+            # Degenerate: event had no measurable peak. Mark unresolvable
+            # rather than divide-by-zero guessing.
+            event.resolved_at = datetime.now(timezone.utc)
+            event.outcome_score = float(outcome_peak)
+            event.outcome_label = "unresolvable"
+            counts["unresolvable"] += 1
+            continue
+
+        ratio = outcome_peak / detection_peak
+        if ratio >= HIT_RATIO:
             label = "hit"
-        elif outcome_composite > event.genre_median_composite:
+        elif ratio >= FIZZLE_RATIO:
             label = "moderate"
         else:
             label = "fizzle"
 
         event.resolved_at = datetime.now(timezone.utc)
-        event.outcome_score = float(outcome_composite)
+        event.outcome_score = float(outcome_peak)
         event.outcome_label = label
-        resolved += 1
+        counts[label] += 1
 
-    return resolved
+    return counts
 
 
 async def backfill_historical_breakouts(
@@ -312,6 +352,10 @@ async def backfill_historical_breakouts(
         "total_breakouts_detected": 0,
         "total_already_existed": 0,
         "events_resolved": 0,
+        "hits": 0,
+        "moderate": 0,
+        "fizzles": 0,
+        "unresolvable": 0,
         "earliest_ref": oldest_ref.isoformat(),
         "newest_ref": newest_ref.isoformat(),
         "step_days": step_days,
@@ -327,11 +371,19 @@ async def backfill_historical_breakouts(
         stats["total_breakouts_detected"] += sweep_stats.get("breakouts_detected", 0)
         stats["total_already_existed"] += sweep_stats.get("already_detected", 0)
         stats["events_resolved"] += sweep_stats.get("events_resolved", 0)
+        stats["hits"] += sweep_stats.get("hits", 0)
+        stats["moderate"] += sweep_stats.get("moderate", 0)
+        stats["fizzles"] += sweep_stats.get("fizzles", 0)
+        stats["unresolvable"] += sweep_stats.get("unresolvable", 0)
         ref_date += timedelta(days=step_days)
 
     # Final resolution pass for anything that fell through
-    final_resolved = await _resolve_old_events(db, today - timedelta(days=RESOLUTION_DAYS))
-    stats["events_resolved"] += final_resolved
+    final_counts = await _resolve_old_events(db, today - timedelta(days=RESOLUTION_DAYS))
+    stats["hits"] += final_counts["hit"]
+    stats["moderate"] += final_counts["moderate"]
+    stats["fizzles"] += final_counts["fizzle"]
+    stats["unresolvable"] += final_counts["unresolvable"]
+    stats["events_resolved"] += sum(final_counts.values())
     await db.commit()
 
     stats["elapsed_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
