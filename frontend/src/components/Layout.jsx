@@ -110,7 +110,7 @@ export default function Layout() {
             onClick={() => setSettingsOpen(true)}
             className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors w-full"
           >
-            <Settings className="w-4 h-4 flex-shrink-0" />
+            <SettingsIcon className="w-4 h-4 flex-shrink-0" />
             Settings
           </button>
         </div>
