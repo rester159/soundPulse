@@ -159,7 +159,7 @@ async def generate_blueprint(
         .where(TrendingSnapshot.snapshot_date >= lookback)
         .where(TrendingSnapshot.entity_type == "track")
         .where(TrendingSnapshot.signals_json.isnot(None))
-        .order_by(TrendingSnapshot.composite_score.desc())
+        .order_by(TrendingSnapshot.composite_score.desc().nullslast())
         .limit(200)
     )
     all_snapshots = result.all()
