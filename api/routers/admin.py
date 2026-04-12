@@ -3617,3 +3617,103 @@ async def get_data_flow(
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Music generation providers — §24, §61
+# ---------------------------------------------------------------------------
+
+class MusicGenerateRequest(BaseModel):
+    provider: str
+    prompt: str
+    duration_seconds: int = 30
+    genre_hint: str | None = None
+    tempo_bpm: float | None = None
+    key_hint: str | None = None
+    mood_tags: list[str] = []
+    reference_audio_url: str | None = None
+    seed: int | None = None
+    model_variant: str | None = None
+
+
+@router.get("/api/v1/admin/music/providers")
+async def list_music_providers(_admin: ApiKey = Depends(require_admin)):
+    """List every registered music-gen provider and whether it's live."""
+    from api.services.music_providers import list_providers
+    return {"providers": list_providers()}
+
+
+@router.post("/api/v1/admin/music/generate")
+async def music_generate(
+    body: MusicGenerateRequest,
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Submit a music generation request. Returns a task handle to poll."""
+    from api.services.music_providers import (
+        GenerateParams,
+        ProviderError,
+        get_provider,
+    )
+    try:
+        adapter = get_provider(body.provider)
+    except KeyError as e:
+        raise HTTPException(404, detail=str(e))
+
+    params = GenerateParams(
+        prompt=body.prompt,
+        duration_seconds=body.duration_seconds,
+        genre_hint=body.genre_hint,
+        tempo_bpm=body.tempo_bpm,
+        key_hint=body.key_hint,
+        mood_tags=body.mood_tags,
+        reference_audio_url=body.reference_audio_url,
+        seed=body.seed,
+        model_variant=body.model_variant,
+    )
+    try:
+        task = await adapter.generate(params)
+    except ProviderError as e:
+        raise HTTPException(503, detail=str(e))
+    except Exception as e:
+        logger.exception("[music] %s generate failed", body.provider)
+        raise HTTPException(502, detail=f"provider call failed: {e}")
+
+    return {
+        "provider": task.provider,
+        "task_id": task.task_id,
+        "submitted_at": task.submitted_at.isoformat(),
+        "estimated_cost_usd": task.estimated_cost_usd,
+        "params_echo": task.params_echo,
+    }
+
+
+@router.get("/api/v1/admin/music/generate/{provider}/{task_id}")
+async def music_poll(
+    provider: str,
+    task_id: str,
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Poll a generation task. Returns the latest status + audio URL on success."""
+    from api.services.music_providers import ProviderError, get_provider
+    try:
+        adapter = get_provider(provider)
+    except KeyError as e:
+        raise HTTPException(404, detail=str(e))
+
+    try:
+        result = await adapter.poll(task_id)
+    except ProviderError as e:
+        raise HTTPException(503, detail=str(e))
+    except Exception as e:
+        logger.exception("[music] %s poll failed for %s", provider, task_id)
+        raise HTTPException(502, detail=f"provider poll failed: {e}")
+
+    return {
+        "provider": result.provider,
+        "task_id": result.task_id,
+        "status": result.status.value,
+        "audio_url": result.audio_url,
+        "duration_seconds": result.duration_seconds,
+        "error": result.error,
+        "actual_cost_usd": result.actual_cost_usd,
+    }
