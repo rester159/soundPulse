@@ -62,27 +62,30 @@ async def create_blueprint_v2(
 
 @router.get("/api/v1/blueprint/top-opportunities")
 async def get_top_opportunities(
-    n: int = 5,
+    n: int = 10,
     model: str = "suno",
+    sort_by: str = "opportunity",
     db: AsyncSession = Depends(get_db),
     _key: ApiKey = Depends(get_api_key_record),
 ):
     """
     The flagship endpoint: returns the top N breakout opportunities
-    with a ready-to-use smart prompt for each.
+    with ready-to-use smart prompts AND quantified $ + stream upside.
 
-    Picks the top N genres by opportunity score (v2), then runs the
-    smart prompt generator on each in PARALLEL via asyncio.gather.
-    Total wall time ≈ single LLM latency, not n × latency.
+    Picks the top N genres by `sort_by` ("opportunity" | "revenue" |
+    "confidence"), runs smart prompt generation on each in PARALLEL
+    via asyncio.gather, then merges in cached quantification data
+    (estimated streams, $ revenue, confidence, surfaced date).
 
-    Genres without breakout data are filtered out — only genres with
-    real intelligence make the list.
+    Genres without breakout data are filtered out.
     """
     import asyncio
+    from sqlalchemy import select as sa_select
     from api.services.blueprint_service import get_genre_opportunities
     from api.services.smart_prompt import generate_smart_prompt
+    from api.models.breakout_quantification import BreakoutQuantification
 
-    n = max(1, min(n, 10))
+    n = max(1, min(n, 30))
 
     # 1. Pull the top genres by opportunity score
     all_opportunities = await get_genre_opportunities(db)
@@ -92,6 +95,48 @@ async def get_top_opportunities(
     with_breakouts = [
         o for o in all_opportunities if o.get("breakout_count", 0) > 0
     ]
+
+    # 3. Pull cached quantifications for ALL filtered genres (one query)
+    if with_breakouts:
+        q_result = await db.execute(
+            sa_select(
+                BreakoutQuantification.genre_id,
+                BreakoutQuantification.quantification,
+                BreakoutQuantification.confidence_level,
+                BreakoutQuantification.confidence_score,
+                BreakoutQuantification.total_revenue_median_usd,
+            ).where(
+                BreakoutQuantification.genre_id.in_([o["genre"] for o in with_breakouts])
+            )
+        )
+        # Take the latest per genre (the unique index ensures one per
+        # window_end, so we just key by genre)
+        quants_by_genre = {row[0]: {
+            "quantification": row[1],
+            "confidence_level": row[2],
+            "confidence_score": row[3],
+            "total_revenue_median_usd": row[4],
+        } for row in q_result.fetchall()}
+    else:
+        quants_by_genre = {}
+
+    # 4. Re-sort if requested
+    if sort_by == "revenue":
+        with_breakouts.sort(
+            key=lambda o: quants_by_genre.get(o["genre"], {}).get("total_revenue_median_usd", 0) or 0,
+            reverse=True,
+        )
+    elif sort_by == "confidence":
+        confidence_rank = {"high": 3, "medium": 2, "low": 1, "very_low": 0, None: -1}
+        with_breakouts.sort(
+            key=lambda o: (
+                confidence_rank.get(quants_by_genre.get(o["genre"], {}).get("confidence_level"), -1),
+                o.get("opportunity_score", 0),
+            ),
+            reverse=True,
+        )
+    # default: keep opportunity_score order from get_genre_opportunities
+
     top_n = with_breakouts[:n]
 
     if not top_n:
@@ -102,25 +147,32 @@ async def get_top_opportunities(
             }
         }
 
-    # 3. Generate smart prompts in parallel
+    # 5. Generate smart prompts in parallel
     tasks = [
         generate_smart_prompt(db, genre=g["genre"], model=model)
         for g in top_n
     ]
     smart_prompts = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # 4. Combine opportunity metadata with smart prompt output
+    # 6. Combine everything: opportunity metadata + smart prompt + quantification
     blueprints = []
     for opp, sp in zip(top_n, smart_prompts):
+        quant_entry = quants_by_genre.get(opp["genre"], {})
+        quant_payload = quant_entry.get("quantification") or {}
+
         if isinstance(sp, Exception):
             blueprints.append({
                 "genre": opp["genre"],
                 "genre_name": opp["genre_name"],
                 "opportunity_score": opp["opportunity_score"],
                 "breakout_count": opp["breakout_count"],
+                "quantification": quant_payload,
+                "surfaced_at": quant_payload.get("earliest_surfaced_at"),
+                "latest_surfaced_at": quant_payload.get("latest_surfaced_at"),
                 "error": f"smart prompt failed: {type(sp).__name__}: {sp}",
             })
             continue
+
         blueprints.append({
             "genre": opp["genre"],
             "genre_name": opp["genre_name"],
@@ -137,6 +189,10 @@ async def get_top_opportunities(
             "rationale": sp.get("rationale"),
             "based_on": sp.get("based_on"),
             "model": model,
+            # Quantification (from cache)
+            "quantification": quant_payload,
+            "surfaced_at": quant_payload.get("earliest_surfaced_at"),
+            "latest_surfaced_at": quant_payload.get("latest_surfaced_at"),
         })
 
     return {

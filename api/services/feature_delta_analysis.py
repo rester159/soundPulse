@@ -191,6 +191,17 @@ async def compute_all_feature_deltas(
     await db.commit()
     stats["elapsed_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
     logger.info("[feature-delta-analysis] %s", stats)
+
+    # Layer 2.5 — chain quantification refresh after deltas land.
+    # Same daily cadence so the cache stays in sync with deltas.
+    try:
+        from api.services.breakout_quantification import quantify_all_genres_with_breakouts
+        q_stats = await quantify_all_genres_with_breakouts(db)
+        stats["quantifications_cached"] = q_stats["quantifications_cached"]
+        stats["quantifications_skipped"] = q_stats["skipped_no_data"]
+    except Exception as exc:
+        logger.exception("[feature-delta-analysis] quantification chain failed: %s", exc)
+
     return stats
 
 

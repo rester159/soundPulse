@@ -1680,6 +1680,84 @@ async def get_feature_deltas(
     }
 
 
+@router.get("/api/v1/admin/ceo-profile")
+async def get_ceo_profile(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Return the CEO profile (single row)."""
+    from api.models.ceo_profile import CeoProfile
+    result = await db.execute(select(CeoProfile).where(CeoProfile.id == 1))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        return {"error": "ceo_profile not initialized"}
+    return {
+        "id": profile.id,
+        "name": profile.name,
+        "email": profile.email,
+        "phone": profile.phone,
+        "telegram_handle": profile.telegram_handle,
+        "telegram_chat_id": profile.telegram_chat_id,
+        "slack_channel": profile.slack_channel,
+        "preferred_channel": profile.preferred_channel,
+        "escalation_severity_threshold": profile.escalation_severity_threshold,
+        "quiet_hours_start": profile.quiet_hours_start.isoformat() if profile.quiet_hours_start else None,
+        "quiet_hours_end": profile.quiet_hours_end.isoformat() if profile.quiet_hours_end else None,
+        "timezone": profile.timezone,
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+    }
+
+
+@router.put("/api/v1/admin/ceo-profile")
+async def update_ceo_profile(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Update the CEO profile. Body fields are merged into the single row.
+    Only known fields are accepted; unknown fields are ignored.
+    """
+    from api.models.ceo_profile import CeoProfile
+    result = await db.execute(select(CeoProfile).where(CeoProfile.id == 1))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        profile = CeoProfile(id=1)
+        db.add(profile)
+
+    allowed = {
+        "name", "email", "phone", "telegram_handle", "telegram_chat_id",
+        "slack_channel", "preferred_channel", "escalation_severity_threshold",
+        "quiet_hours_start", "quiet_hours_end", "timezone",
+    }
+    for k, v in body.items():
+        if k in allowed:
+            setattr(profile, k, v)
+
+    await db.commit()
+    return {"detail": "ceo_profile updated", "id": 1}
+
+
+@router.post("/api/v1/admin/sweeps/breakout-detection/backfill", status_code=202)
+async def trigger_breakout_backfill(
+    weeks_back: int = 78,
+    step_days: int = 7,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Run historical backfill of breakout detection. Walks reference dates
+    backward and detects breakouts AS IF each date were today, then
+    resolves outcomes from the data we already have. Bootstrap for ML
+    training (no need to wait 30 days from launch).
+    """
+    from api.services.breakout_detection import backfill_historical_breakouts
+    stats = await backfill_historical_breakouts(
+        db, weeks_back=weeks_back, step_days=step_days
+    )
+    return {"detail": "historical backfill complete", "stats": stats}
+
+
 # Breakout Analysis Engine — Layer 1 (breakoutengine_prd.md)
 @router.post("/api/v1/admin/sweeps/breakout-detection", status_code=202)
 async def trigger_breakout_detection(

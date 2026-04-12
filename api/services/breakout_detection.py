@@ -190,9 +190,22 @@ async def _get_genre_track_performance(
 
 async def _resolve_old_events(db: AsyncSession, cutoff: date) -> int:
     """
-    For breakout_events detected before `cutoff` that haven't been
-    resolved yet, check the track's current composite_score and assign
-    an outcome label.
+    Resolve breakout events that are old enough to have outcome data.
+
+    For each unresolved event with detection_date <= cutoff, look up the
+    track's MAX composite_score in a ±5-day window centered on
+    detection_date + 30 days. That value is the actual outcome — what
+    the track became 30 days after we flagged it.
+
+    Outcome labels:
+      hit       — outcome > 2x genre_median_composite at detection time
+      moderate  — outcome > 1x genre_median_composite
+      fizzle    — outcome <= 1x genre_median_composite
+
+    This works for both real-time resolution (30+ day old events) AND
+    historical backfill (events detected with as_of in the past), because
+    the lookup is bounded to a date window relative to detection_date,
+    not "all time."
     """
     result = await db.execute(
         select(BreakoutEvent)
@@ -200,33 +213,127 @@ async def _resolve_old_events(db: AsyncSession, cutoff: date) -> int:
             BreakoutEvent.resolved_at.is_(None),
             BreakoutEvent.detection_date <= cutoff,
         )
-        .limit(500)
+        .limit(2000)
     )
     events = result.scalars().all()
     resolved = 0
 
     for event in events:
-        # Get the track's latest composite score
+        target_date = event.detection_date + timedelta(days=RESOLUTION_DAYS)
+        window_start = target_date - timedelta(days=5)
+        window_end = target_date + timedelta(days=5)
+
         latest = await db.execute(
             select(func.max(TrendingSnapshot.composite_score))
             .where(
                 TrendingSnapshot.entity_id == event.track_id,
                 TrendingSnapshot.entity_type == "track",
+                TrendingSnapshot.snapshot_date >= window_start,
+                TrendingSnapshot.snapshot_date <= window_end,
             )
         )
-        current_composite = latest.scalar() or 0
+        outcome_composite = latest.scalar()
+
+        if outcome_composite is None:
+            # No snapshots in the resolution window — track went quiet.
+            # That's a fizzle (track disappeared), but mark with a 0.
+            outcome_composite = 0
 
         # Compare against the genre median at detection time
-        if current_composite > 2 * event.genre_median_composite:
+        if outcome_composite > 2 * event.genre_median_composite:
             label = "hit"
-        elif current_composite > event.genre_median_composite:
+        elif outcome_composite > event.genre_median_composite:
             label = "moderate"
         else:
             label = "fizzle"
 
         event.resolved_at = datetime.now(timezone.utc)
-        event.outcome_score = current_composite
+        event.outcome_score = float(outcome_composite)
         event.outcome_label = label
         resolved += 1
 
     return resolved
+
+
+async def backfill_historical_breakouts(
+    db: AsyncSession,
+    *,
+    weeks_back: int = 78,  # ~18 months of weekly steps
+    step_days: int = 7,
+) -> dict[str, int]:
+    """
+    Walk backward through historical reference dates and detect breakouts
+    AS IF each date were "today." This populates breakout_events with
+    historical data we can resolve immediately, since the ground-truth
+    outcome (composite_score 30 days later) is already in the DB.
+
+    The newest reference date is `today - 30 days` (we need at least 30
+    days of forward data for resolution to be meaningful). The oldest
+    reference date is `today - (30 + weeks_back * 7) days`, capped by
+    the earliest snapshot we have.
+
+    After all detections are written, runs a full resolution sweep to
+    label every event whose forward window has data.
+
+    This is the bootstrap that lets the ML hit predictor train on real
+    historical outcomes instead of waiting 30 days from launch.
+    """
+    today = date.today()
+
+    # Find the actual data range we have to work with
+    range_result = await db.execute(text("""
+        SELECT MIN(snapshot_date) AS earliest, MAX(snapshot_date) AS latest
+        FROM trending_snapshots
+        WHERE entity_type = 'track' AND composite_score IS NOT NULL
+    """))
+    range_row = range_result.fetchone()
+    if not range_row or not range_row[0]:
+        return {"error": "no historical snapshots available"}
+
+    earliest_data = range_row[0]
+    latest_data = range_row[1]
+
+    # Newest reference: leave 30 days of forward window for resolution
+    newest_ref = min(today, latest_data) - timedelta(days=RESOLUTION_DAYS)
+    # Oldest reference: walk back weeks_back weeks, but not before our data
+    requested_oldest = newest_ref - timedelta(days=weeks_back * 7)
+    # Need at least 14 days of LOOKBACK data before the reference date too
+    oldest_ref = max(requested_oldest, earliest_data + timedelta(days=WINDOW_DAYS))
+
+    if oldest_ref >= newest_ref:
+        return {
+            "error": "insufficient historical range",
+            "oldest_ref": oldest_ref.isoformat(),
+            "newest_ref": newest_ref.isoformat(),
+        }
+
+    stats = {
+        "reference_dates_scanned": 0,
+        "total_breakouts_detected": 0,
+        "total_already_existed": 0,
+        "events_resolved": 0,
+        "earliest_ref": oldest_ref.isoformat(),
+        "newest_ref": newest_ref.isoformat(),
+        "step_days": step_days,
+        "elapsed_ms": 0,
+    }
+    started = datetime.now(timezone.utc)
+
+    # Walk forward from oldest to newest
+    ref_date = oldest_ref
+    while ref_date <= newest_ref:
+        sweep_stats = await sweep_breakout_detection(db, as_of=ref_date)
+        stats["reference_dates_scanned"] += 1
+        stats["total_breakouts_detected"] += sweep_stats.get("breakouts_detected", 0)
+        stats["total_already_existed"] += sweep_stats.get("already_detected", 0)
+        stats["events_resolved"] += sweep_stats.get("events_resolved", 0)
+        ref_date += timedelta(days=step_days)
+
+    # Final resolution pass for anything that fell through
+    final_resolved = await _resolve_old_events(db, today - timedelta(days=RESOLUTION_DAYS))
+    stats["events_resolved"] += final_resolved
+    await db.commit()
+
+    stats["elapsed_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    logger.info("[breakout-backfill] %s", stats)
+    return stats
