@@ -210,6 +210,15 @@ class SpotifyAudioScraper(BaseScraper):
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 body = (e.response.text or "")[:300]
+                if code == 429:
+                    # Record the cooldown in the shared governor so every
+                    # other Spotify caller backs off too, then abort.
+                    from api.services.spotify_throttle import record_rate_limit
+                    record_rate_limit(e.response.headers.get("Retry-After"))
+                    raise SpotifyEndpointForbidden(
+                        f"Spotify 429 on /v1/audio-features: {body}. "
+                        f"Cooldown recorded, all Spotify callers backing off."
+                    ) from e
                 if code in (401, 403) and i == 0:
                     raise SpotifyEndpointForbidden(
                         f"Spotify /v1/audio-features returned {code}: {body}. "
@@ -346,6 +355,18 @@ class SpotifyAudioScraper(BaseScraper):
         3. For top tracks, fetch full audio analysis
         4. Return data points to be POSTed back to SoundPulse
         """
+        # Short-circuit if the shared Spotify cooldown governor says we're
+        # locked out by a prior 429. Continuing would just waste API calls
+        # and potentially extend the cooldown.
+        from api.services.spotify_throttle import is_cooldown_active
+        active, remaining = is_cooldown_active()
+        if active:
+            logger.warning(
+                "[spotify_audio] Spotify cooldown active, skipping run "
+                "(%.0fs remaining)", remaining,
+            )
+            return []
+
         today = date.today()
 
         # Step 1: Find tracks needing enrichment

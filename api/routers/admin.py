@@ -1143,23 +1143,57 @@ async def merge_artist_metadata(
     return {"artist_id": artist_id, "merged_keys": list(body.keys())}
 
 
+@router.get("/api/v1/admin/spotify/cooldown")
+async def get_spotify_cooldown(
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Report the shared Spotify rate-limit governor's state. Tells you:
+      - whether the process is currently in cooldown
+      - how many seconds remain
+    Use before kicking off any Spotify-heavy operation.
+    """
+    from api.services.spotify_throttle import is_cooldown_active
+    active, remaining = is_cooldown_active()
+    return {
+        "cooldown_active": active,
+        "seconds_remaining": int(remaining),
+    }
+
+
+@router.post("/api/v1/admin/spotify/cooldown/clear")
+async def clear_spotify_cooldown(
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Force-clear the Spotify cooldown window. Use sparingly — if it
+    was set for a reason, the next call will likely re-set it."""
+    from api.services.spotify_throttle import clear_cooldown
+    clear_cooldown()
+    return {"cleared": True}
+
+
 @router.post("/api/v1/admin/artists/backfill-spotify-ids")
 async def backfill_artists_spotify_ids(
-    limit: int = 300,
+    limit: int = 50,
     db: AsyncSession = Depends(get_db),
     _admin: ApiKey = Depends(require_admin),
 ):
     """
-    One-shot: for artists without a spotify_id, query Spotify's search
-    endpoint by name, fuzzy-match the top result, and persist the ID.
+    Backfill artists.spotify_id via Spotify /v1/search (name match).
 
-    Only fills artists whose top search result is a strong (>=0.85
-    Levenshtein ratio) name match — never guesses. Capped at `limit`
-    per call so the caller can paginate manually and observe progress.
+    Rate-limit safe: all calls go through api.services.spotify_throttle,
+    which enforces a process-wide semaphore of 3, a 2 req/s delay, and
+    a shared cooldown window set by any prior 429. Default `limit=50`
+    (down from 300) so a single call produces a short, predictable
+    burst. Call repeatedly at least a minute apart to work through the
+    backlog.
 
-    Spotify's /v1/search is not part of the November 2024 deprecation
-    set, so this works for client-credential apps. If auth or search
-    fails, returns a useful error.
+    Prior incident (2026-04-11): running this endpoint 5 times in a
+    row at 10 req/s triggered a 12.5h Spotify cooldown. The governor
+    now caps cooldowns at 600s and blocks subsequent bursts.
+
+    Only persists the Spotify ID when the name match is >=0.85
+    Levenshtein ratio — never guesses.
     """
     import base64
     import os
@@ -1167,6 +1201,22 @@ async def backfill_artists_spotify_ids(
     from Levenshtein import ratio as levenshtein_ratio
     from api.models.artist import Artist
     from api.services.entity_resolution import _normalize_name
+    from api.services.spotify_throttle import (
+        SpotifyCooldownActive,
+        is_cooldown_active,
+        throttled_request,
+    )
+
+    # Fail fast if a prior 429 cooldown is still in effect — no point
+    # burning through a batch when every call will be refused.
+    active, remaining = is_cooldown_active()
+    if active:
+        return {
+            "checked": 0, "matched": 0, "skipped": 0, "errors": 0,
+            "cooldown_active": True,
+            "cooldown_remaining_seconds": int(remaining),
+            "detail": f"Spotify cooldown active, retry in {int(remaining)}s",
+        }
 
     client_id = os.environ.get("SPOTIFY_CLIENT_ID", "")
     client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
@@ -1176,7 +1226,8 @@ async def backfill_artists_spotify_ids(
             "error": "SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET not set",
         }
 
-    limit = max(1, min(limit, 1000))
+    # Lowered cap: short bursts paginate through the backlog safely.
+    limit = max(1, min(limit, 200))
 
     result = await db.execute(
         select(Artist)
@@ -1216,65 +1267,58 @@ async def backfill_artists_spotify_ids(
         errors = 0
         status_counts: dict[int, int] = {}
         last_error_sample: str | None = None
-        consecutive_429 = 0
+        stopped_on_cooldown = False
+
         for artist in candidates:
             try:
-                search_resp = await client.get(
-                    "https://api.spotify.com/v1/search",
+                search_resp = await throttled_request(
+                    client, "GET", "https://api.spotify.com/v1/search",
                     params={"q": artist.name, "type": "artist", "limit": 1},
                     headers=headers,
                 )
-                sc = search_resp.status_code
-                if sc != 200:
-                    errors += 1
-                    status_counts[sc] = status_counts.get(sc, 0) + 1
-                    if last_error_sample is None:
-                        last_error_sample = f"HTTP {sc}: {(search_resp.text or '')[:200]}"
-                    # Spotify 429 often signals a hard cooldown. Stop early
-                    # on sustained 429 so we don't waste the whole batch.
-                    if sc == 429:
-                        consecutive_429 += 1
-                        if consecutive_429 >= 5:
-                            last_error_sample = (
-                                f"stopped early after {consecutive_429} consecutive 429s "
-                                f"(Retry-After header: {search_resp.headers.get('Retry-After', '?')})"
-                            )
-                            break
-                    else:
-                        consecutive_429 = 0
-                    await asyncio.sleep(0.3)
-                    continue
-                consecutive_429 = 0
-                items = (search_resp.json().get("artists") or {}).get("items") or []
-                if not items:
-                    skipped += 1
-                    continue
-                top = items[0]
-                top_name = top.get("name", "")
-                top_id = top.get("id")
-                if not top_id:
-                    skipped += 1
-                    continue
-                score = levenshtein_ratio(_normalize_name(artist.name), _normalize_name(top_name))
-                if score < 0.85:
-                    skipped += 1
-                    continue
-                artist.spotify_id = top_id
-                sp_genres = top.get("genres") or []
-                if sp_genres:
-                    artist.metadata_json = {
-                        **(artist.metadata_json or {}),
-                        "spotify_genres": sp_genres,
-                        "needs_classification": True,
-                    }
-                matched += 1
+            except SpotifyCooldownActive as exc:
+                # First 429 sets the module-level cooldown; every subsequent
+                # call in this loop raises immediately. Stop cleanly.
+                stopped_on_cooldown = True
+                last_error_sample = str(exc)
+                break
             except Exception as exc:
                 errors += 1
                 if last_error_sample is None:
                     last_error_sample = f"exception: {type(exc).__name__}: {str(exc)[:200]}"
-            # Throttle: 0.2s -> 5 req/s. Spotify's soft limit is around
-            # 10-20/s for client-credential apps; 5/s leaves margin.
-            await asyncio.sleep(0.2)
+                continue
+
+            sc = search_resp.status_code
+            if sc != 200:
+                errors += 1
+                status_counts[sc] = status_counts.get(sc, 0) + 1
+                if last_error_sample is None:
+                    last_error_sample = f"HTTP {sc}: {(search_resp.text or '')[:200]}"
+                continue
+
+            items = (search_resp.json().get("artists") or {}).get("items") or []
+            if not items:
+                skipped += 1
+                continue
+            top = items[0]
+            top_name = top.get("name", "")
+            top_id = top.get("id")
+            if not top_id:
+                skipped += 1
+                continue
+            score = levenshtein_ratio(_normalize_name(artist.name), _normalize_name(top_name))
+            if score < 0.85:
+                skipped += 1
+                continue
+            artist.spotify_id = top_id
+            sp_genres = top.get("genres") or []
+            if sp_genres:
+                artist.metadata_json = {
+                    **(artist.metadata_json or {}),
+                    "spotify_genres": sp_genres,
+                    "needs_classification": True,
+                }
+            matched += 1
 
         await db.commit()
 
@@ -1285,7 +1329,8 @@ async def backfill_artists_spotify_ids(
         "errors": errors,
         "status_counts": status_counts,
         "last_error_sample": last_error_sample,
-        "detail": "paged: call again to continue (Artist.spotify_id IS NULL ordered by created_at DESC)",
+        "stopped_on_cooldown": stopped_on_cooldown,
+        "detail": "paged: call again at least 60s apart (Artist.spotify_id IS NULL ordered by created_at DESC)",
     }
 
 
