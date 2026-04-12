@@ -1469,6 +1469,71 @@ async def chartmetric_probe(
     return report
 
 
+@router.post("/api/v1/admin/sweeps/breakout-detection", status_code=202)
+async def trigger_breakout_detection(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Trigger an immediate breakout detection sweep."""
+    from api.services.breakout_detection import sweep_breakout_detection
+    stats = await sweep_breakout_detection(db)
+    return {"detail": "breakout detection sweep complete", "stats": stats}
+
+
+@router.get("/api/v1/admin/breakouts")
+async def get_recent_breakouts(
+    genre: str | None = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Return recent breakout events, optionally filtered by genre."""
+    from api.models.breakout_event import BreakoutEvent
+    from api.models.track import Track
+
+    stmt = (
+        select(
+            BreakoutEvent.genre_id,
+            BreakoutEvent.detection_date,
+            BreakoutEvent.breakout_score,
+            BreakoutEvent.composite_ratio,
+            BreakoutEvent.velocity_ratio,
+            BreakoutEvent.peak_composite,
+            BreakoutEvent.platform_count,
+            BreakoutEvent.outcome_label,
+            Track.title,
+            Track.spotify_id,
+        )
+        .join(Track, Track.id == BreakoutEvent.track_id)
+        .order_by(BreakoutEvent.detection_date.desc(), BreakoutEvent.breakout_score.desc())
+        .limit(min(limit, 200))
+    )
+    if genre:
+        stmt = stmt.where(BreakoutEvent.genre_id == genre)
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    return {
+        "breakouts": [
+            {
+                "genre": r[0],
+                "detection_date": r[1].isoformat() if r[1] else None,
+                "breakout_score": round(r[2], 3),
+                "composite_ratio": round(r[3], 2),
+                "velocity_ratio": round(r[4], 2),
+                "peak_composite": round(r[5], 1),
+                "platform_count": r[6],
+                "outcome": r[7],
+                "title": r[8],
+                "spotify_id": r[9],
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
 @router.get("/api/v1/admin/spotify/cooldown")
 async def get_spotify_cooldown(
     _admin: ApiKey = Depends(require_admin),

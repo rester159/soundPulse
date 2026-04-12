@@ -233,6 +233,18 @@ async def init_scheduler(database_url: str):
         name="composite sweep (deferred)",
     )
 
+    # Breakout detection sweep — Layer 1 of the Breakout Analysis Engine.
+    # Runs every 6 hours. Scans genres for tracks that outperform their
+    # genre peers (2× median composite/velocity) and writes breakout_events.
+    # Also resolves old events after 30 days with outcome labels.
+    _scheduler.add_job(
+        _run_breakout_detection_job,
+        trigger=IntervalTrigger(hours=6),
+        id="sweep_breakout_detection",
+        replace_existing=True,
+        name="breakout detection sweep",
+    )
+
     # Stale-job reaper — clears scrapers whose last_status got stuck at
     # "running" because the process was killed mid-run (deploy, OOM, crash).
     # Without this, a scraper can sit in "running" forever until the next
@@ -279,6 +291,19 @@ async def _run_composite_sweep_job():
         logger.info("[scheduler] composite sweep: %s", stats)
     except Exception:
         logger.exception("[scheduler] composite sweep failed")
+
+
+async def _run_breakout_detection_job():
+    """APScheduler entry point for the breakout detection sweep."""
+    from api.services.breakout_detection import sweep_breakout_detection
+
+    factory = _get_session_factory()
+    try:
+        async with factory() as db:
+            stats = await sweep_breakout_detection(db)
+        logger.info("[scheduler] breakout detection: %s", stats)
+    except Exception:
+        logger.exception("[scheduler] breakout detection sweep failed")
 
 
 async def _reap_stale_running_scrapers():
