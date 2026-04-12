@@ -1,0 +1,10 @@
+{
+  "name": "tunebat-crawler",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Autonomous Tunebat audio-features crawler for SoundPulse, powered by BlackTip",
+  "dependencies": {
+    "black-tip": "file:/opt/blacktip"
+  }
+}
