@@ -140,14 +140,22 @@ async def generate_blueprint(
     latest_date = latest_row.scalar() or date.today()
     lookback = latest_date - timedelta(days=60)
 
-    # Get tracks in this genre by searching signals for the genre tag
+    # Get tracks in this genre. JOIN to tracks table so we have
+    # access to tracks.audio_features — the canonical source for
+    # tempo/energy/danceability/etc. Previously this read audio
+    # features from signals_json, but chart-data snapshots don't
+    # carry audio_features in their signals. The actual features
+    # are stored on the track row by the Tunebat/Chartmetric
+    # audio enrichment pipeline.
     result = await db.execute(
         select(
             TrendingSnapshot.entity_id,
             TrendingSnapshot.composite_score,
             TrendingSnapshot.velocity,
             TrendingSnapshot.signals_json,
+            Track.audio_features,
         )
+        .join(Track, Track.id == TrendingSnapshot.entity_id)
         .where(TrendingSnapshot.snapshot_date >= lookback)
         .where(TrendingSnapshot.entity_type == "track")
         .where(TrendingSnapshot.signals_json.isnot(None))
@@ -207,8 +215,13 @@ def _aggregate_song_dna(tracks: list, genre: str) -> dict:
     for track in tracks:
         signals = track.signals_json or {}
 
-        # Audio features may be in signals (from spotify_audio enricher)
-        af = signals.get("audio_features") or {}
+        # Audio features: prefer the track-level column (canonical,
+        # populated by Tunebat/Chartmetric enrichment pipelines),
+        # fall back to signals_json.audio_features for snapshots
+        # that carry features inline.
+        af = track.audio_features if hasattr(track, 'audio_features') and track.audio_features else {}
+        if not af:
+            af = signals.get("audio_features") or {}
         if af.get("tempo"):
             tempos.append(af["tempo"])
         if af.get("energy") is not None:
