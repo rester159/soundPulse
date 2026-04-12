@@ -1469,6 +1469,7 @@ async def chartmetric_probe(
     return report
 
 
+# Breakout Analysis Engine — Layer 1 (breakoutengine_prd.md)
 @router.post("/api/v1/admin/sweeps/breakout-detection", status_code=202)
 async def trigger_breakout_detection(
     db: AsyncSession = Depends(get_db),
