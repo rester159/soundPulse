@@ -37,3 +37,24 @@ async def create_blueprint(
     """Generate a Song DNA blueprint and model-specific prompt for a genre."""
     result = await generate_blueprint(db, genre=request.genre, model=request.model)
     return {"data": result}
+
+
+@router.post("/api/v1/blueprint/generate-v2")
+async def create_blueprint_v2(
+    request: BlueprintRequest,
+    db: AsyncSession = Depends(get_db),
+    _key: ApiKey = Depends(get_api_key_record),
+):
+    """
+    Generate a smart, breakout-informed song prompt for a genre.
+
+    Uses the Breakout Analysis Engine (Layers 1-6) to synthesize
+    breakout intelligence + feature deltas + gap zones + lyrical
+    themes into a production-ready prompt for Suno/Udio.
+
+    Falls back to v1 if no breakout data exists for the genre yet.
+    See planning/PRD/breakoutengine_prd.md for the architecture.
+    """
+    from api.services.smart_prompt import generate_smart_prompt
+    result = await generate_smart_prompt(db, genre=request.genre, model=request.model)
+    return {"data": result}
