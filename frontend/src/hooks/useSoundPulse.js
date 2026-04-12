@@ -213,6 +213,15 @@ export function useGenerateBlueprint() {
   })
 }
 
+export function useTopOpportunities(n = 5, model = 'suno') {
+  return useQuery({
+    queryKey: ['blueprint', 'top-opportunities', n, model],
+    queryFn: () => makeRequest('GET', '/blueprint/top-opportunities', { n, model }),
+    staleTime: 5 * 60_000,  // 5 min — LLM calls are expensive
+    refetchOnWindowFocus: false,
+  })
+}
+
 // Assistant hook
 export function useAssistantChat() {
   return useMutation({
