@@ -397,6 +397,37 @@ async def escalate_missing_prereqs_to_ceo(
 
     if created:
         await db.commit()
+
+        # T-150 auto-notify: dispatch each newly-created decision to the
+        # CEO's configured channel (Telegram if preferred_channel='telegram')
+        try:
+            from api.models.ceo_profile import CeoProfile
+            from sqlalchemy import select as _select
+            from api.services.telegram_bot import send_ceo_decision
+
+            profile_row = (await db.execute(_select(CeoProfile).limit(1))).scalar_one_or_none()
+            if profile_row:
+                # Pull the decisions we just created by id to get full shape
+                for decision_id in created:
+                    r = await db.execute(
+                        _text("SELECT decision_id, decision_type, proposal, data, created_at "
+                              "FROM ceo_decisions WHERE decision_id = :did"),
+                        {"did": decision_id},
+                    )
+                    row = r.fetchone()
+                    if row is None:
+                        continue
+                    decision_dict = {
+                        "decision_id": str(row[0]),
+                        "decision_type": row[1],
+                        "proposal": row[2],
+                        "data": row[3],
+                        "created_at": row[4].isoformat() if row[4] else None,
+                    }
+                    await send_ceo_decision(decision_dict, profile_row)
+        except Exception:
+            logger.exception("[submissions-agent] CEO notify batch failed (non-fatal)")
+
     return created
 
 

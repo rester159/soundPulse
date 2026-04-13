@@ -5744,6 +5744,23 @@ async def assign_blueprint(
     await db.commit()
     await db.refresh(decision_row)
 
+    # T-150: auto-dispatch to the CEO's configured channel (Telegram)
+    try:
+        from api.models.ceo_profile import CeoProfile
+        profile_row = (await db.execute(select(CeoProfile).limit(1))).scalar_one_or_none()
+        if profile_row:
+            from api.services.telegram_bot import send_ceo_decision
+            decision_dict = {
+                "decision_id": str(decision_row.decision_id),
+                "decision_type": decision_row.decision_type,
+                "proposal": decision_row.proposal,
+                "data": decision_row.data,
+                "created_at": decision_row.created_at.isoformat() if decision_row.created_at else None,
+            }
+            await send_ceo_decision(decision_dict, profile_row)
+    except Exception:
+        logger.exception("[assign] CEO notify failed (non-fatal)")
+
     return {
         "decision_id": str(decision_row.decision_id),
         "proposal": decision.proposal,
@@ -5760,6 +5777,84 @@ async def assign_blueprint(
 class CEODecisionRespondRequest(BaseModel):
     response_notes: str | None = None
     modifications: dict | None = None
+
+
+class TelegramTestRequest(BaseModel):
+    text: str | None = None
+
+
+@router.post("/api/v1/admin/telegram/test")
+async def telegram_test(
+    body: TelegramTestRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Send a test message to the CEO's configured Telegram chat.
+    Verifies TELEGRAM_BOT_TOKEN + ceo_profile.telegram_chat_id.
+    """
+    from sqlalchemy import text as _text
+    from api.services.telegram_bot import (
+        TelegramNotConfigured, send_message,
+    )
+
+    row = await db.execute(
+        _text("SELECT telegram_chat_id FROM ceo_profile LIMIT 1")
+    )
+    result = row.fetchone()
+    if not result or not result[0]:
+        raise HTTPException(
+            409,
+            detail="CEO profile has no telegram_chat_id — set it in Settings → CEO Profile",
+        )
+    chat_id = result[0]
+
+    text = (body.text if body and body.text else
+            "🔔 <b>SoundPulse test message</b>\n\n"
+            "If you're seeing this, your Telegram delivery is wired correctly. "
+            "You'll receive approval gates, setup reminders, and decision "
+            "escalations here automatically.")
+
+    try:
+        await send_message(chat_id, text)
+    except TelegramNotConfigured as e:
+        raise HTTPException(503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(502, detail=f"telegram send failed: {e}")
+
+    return {"sent": True, "chat_id": chat_id}
+
+
+@router.get("/api/v1/admin/telegram/get-chat-id")
+async def telegram_get_chat_id(
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Fetch chat_ids that have recently messaged the bot. Used during
+    setup so the CEO can send /start to the bot and then paste the
+    returned chat_id into their profile without fishing through the
+    Telegram API manually.
+    """
+    from api.services.telegram_bot import (
+        TelegramNotConfigured, get_recent_chat_ids,
+    )
+    try:
+        chats = await get_recent_chat_ids()
+    except TelegramNotConfigured as e:
+        raise HTTPException(503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(502, detail=f"telegram getUpdates failed: {e}")
+
+    return {
+        "chats": chats,
+        "count": len(chats),
+        "hint": (
+            "If this list is empty, open your Telegram bot in the app "
+            "and send /start. Then call this endpoint again."
+            if not chats else
+            "Paste one of these chat_ids into Settings → CEO Profile → Telegram."
+        ),
+    }
 
 
 @router.post("/api/v1/admin/ceo-decisions/{decision_id}/approve")
