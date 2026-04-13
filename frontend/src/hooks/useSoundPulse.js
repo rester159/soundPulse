@@ -552,6 +552,53 @@ export function useCreateArtistFromPersona() {
   })
 }
 
+// -------- Instrumentals (task #86) --------
+
+export function useInstrumentals(activeOnly = true) {
+  return useQuery({
+    queryKey: ['admin', 'instrumentals', activeOnly],
+    queryFn: () => makeRequest('GET', '/admin/instrumentals', { active_only: activeOnly }),
+    staleTime: 10_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+export function useUploadInstrumental() {
+  // Multipart form POST — FormData must go through the shared axios
+  // instance so the API key interceptor fires. Setting Content-Type
+  // explicitly to undefined forces axios to compute the multipart
+  // boundary header on its own.
+  return useMutation({
+    mutationFn: async ({ title, file, tempo_bpm, key_hint, genre_hint, notes }) => {
+      const fd = new FormData()
+      fd.append('title', title)
+      fd.append('file', file)
+      if (tempo_bpm) fd.append('tempo_bpm', tempo_bpm)
+      if (key_hint) fd.append('key_hint', key_hint)
+      if (genre_hint) fd.append('genre_hint', genre_hint)
+      if (notes) fd.append('notes', notes)
+      const res = await api.post('/admin/instrumentals/upload', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      return { data: res.data }
+    },
+  })
+}
+
+export function useDeleteInstrumental() {
+  return useMutation({
+    mutationFn: ({ instrumental_id }) =>
+      makeRequest('DELETE', `/admin/instrumentals/${instrumental_id}`, {}, {}),
+  })
+}
+
+export function useGenerateSongWithInstrumental() {
+  return useMutation({
+    mutationFn: ({ blueprintId, body }) =>
+      makeRequest('POST', `/admin/blueprints/${blueprintId}/generate-song-with-instrumental`, {}, body),
+  })
+}
+
 export function useBlueprints({ status = null, limit = 50 } = {}) {
   return useQuery({
     queryKey: ['admin', 'blueprints', status, limit],
