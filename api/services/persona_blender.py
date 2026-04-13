@@ -109,15 +109,21 @@ async def blend_persona(
     target_genre: str,
     caller: str = "persona_blender",
     avoid_stage_names: list[str] | None = None,
+    reference_artists_block: str | None = None,
+    reference_artist_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Produce a complete ai_artists-shaped dict from a short description.
 
     Raises ValueError if the LLM returns unparseable JSON.
 
-    `avoid_stage_names` is a list of existing roster names that the LLM
-    must NOT reuse. Prevents the common failure where the LLM re-picks
-    a name it generated for a previous similar description.
+    `avoid_stage_names` — existing roster names the LLM must NOT reuse.
+    `reference_artists_block` — pre-formatted string describing current
+      top-momentum artists in the target genre. Grounds the LLM in real
+      data vs pre-training confabulation.
+    `reference_artist_names` — list of the actual names that were passed
+      in the block; goes into the persona's `derived_from` field so we
+      can trace which references drove the output.
     """
     avoid_block = ""
     if avoid_stage_names:
@@ -128,11 +134,18 @@ async def blend_persona(
             f"Pick something distinctive that has never been used before."
         )
 
+    reference_block = ""
+    if reference_artists_block:
+        reference_block = f"\n\n{reference_artists_block}\n"
+
     user_prompt = (
         f"Target genre: {target_genre}\n\n"
         f"Description: {description}"
+        f"{reference_block}"
         f"{avoid_block}\n\n"
-        f"Return the JSON persona now."
+        f"Return the JSON persona now. In the `influences` field, cite at "
+        f"least 2-3 of the reference artists above (if provided) and add any "
+        f"additional real artists from your knowledge that fit the direction."
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -165,5 +178,14 @@ async def blend_persona(
                      "audience_tags"):
         if list_key in persona and isinstance(persona[list_key], str):
             persona[list_key] = [s.strip() for s in persona[list_key].split(",") if s.strip()]
+
+    # Tag the persona with the references used so callers can trace
+    # which real-world artists drove the output
+    if reference_artist_names:
+        persona["derived_from"] = {
+            "reference_artists": reference_artist_names,
+            "method": "chartmetric_top_momentum",
+            "blender_version": "lite_v2",
+        }
 
     return persona

@@ -4350,6 +4350,19 @@ async def create_artist_from_description(
     )
     existing_names = [r[0] for r in existing_names_result.fetchall() if r[0]]
 
+    # Pull real reference artists from the Chartmetric-scraped `artists`
+    # table so the LLM grounds the persona in actual current-momentum
+    # data vs pre-training confabulation.
+    from api.services.reference_artist_lookup import (
+        format_references_for_prompt,
+        get_top_reference_artists,
+    )
+    references = await get_top_reference_artists(
+        db, target_genre=body.target_genre, limit=5,
+    )
+    reference_block = format_references_for_prompt(references) if references else None
+    reference_names = [r.name for r in references]
+
     try:
         persona = await blend_persona(
             db=db,
@@ -4357,6 +4370,8 @@ async def create_artist_from_description(
             target_genre=body.target_genre,
             caller="admin.from_description",
             avoid_stage_names=existing_names,
+            reference_artists_block=reference_block,
+            reference_artist_names=reference_names,
         )
     except ValueError as e:
         raise HTTPException(502, detail=f"persona generation failed: {e}")
@@ -4448,6 +4463,10 @@ async def create_artist_from_description(
         "ceo_approved": row.ceo_approved,
         "persona": persona,
         "portrait": portrait_info,
+        "derived_from": {
+            "reference_artists": reference_names,
+            "reference_count": len(references),
+        },
         "created_at": row.created_at.isoformat(),
     }
 
@@ -4476,6 +4495,7 @@ async def generate_reference_sheet(
     from api.models.ai_artist import AIArtist
     from api.services.image_generator import (
         build_8_view_prompts,
+        composite_8_view_sheet,
         generate_and_store_image,
     )
 
@@ -4502,6 +4522,8 @@ async def generate_reference_sheet(
     results: list[dict] = []
     front_asset_id: _uuid.UUID | None = None
     front_bytes: bytes | None = None
+    # Collect every view's bytes so we can composite at the end
+    view_bytes_by_angle: dict[str, bytes] = {}
 
     for view_angle, prompt in view_prompts:
         # Front view: high-quality text-to-image.
@@ -4544,26 +4566,24 @@ async def generate_reference_sheet(
             })
             continue
 
+        # Pull the freshly-persisted bytes back for:
+        # 1. front view → passed as reference to the 7 follow-up calls
+        # 2. every view → collected for the final composite sheet
+        blob_row = await db.execute(
+            _text("SELECT image_bytes FROM visual_asset_blobs WHERE asset_id = :aid"),
+            {"aid": portrait.asset_id},
+        )
+        blob = blob_row.fetchone()
+        if blob:
+            view_bytes_by_angle[view_angle] = bytes(blob[0])
+            if view_angle == "front":
+                front_bytes = bytes(blob[0])
+
         if view_angle == "front":
             front_asset_id = portrait.asset_id
-            # Mark as canonical sheet
-            await db.execute(
-                _text("""
-                    UPDATE artist_visual_assets
-                    SET asset_type = 'reference_sheet', is_canonical_sheet = TRUE
-                    WHERE asset_id = :asset_id
-                """),
-                {"asset_id": portrait.asset_id},
-            )
-            # Pull the front bytes back out of visual_asset_blobs for
-            # subsequent reference-image calls
-            blob_row = await db.execute(
-                _text("SELECT image_bytes FROM visual_asset_blobs WHERE asset_id = :aid"),
-                {"aid": front_asset_id},
-            )
-            front_bytes_row = blob_row.fetchone()
-            if front_bytes_row:
-                front_bytes = bytes(front_bytes_row[0])
+            # Individual 'front' row stays as a sheet_view child —
+            # the canonical reference_sheet row will be the composite,
+            # created below after all 8 views land.
 
         results.append({
             "view_angle": view_angle,
@@ -4572,10 +4592,50 @@ async def generate_reference_sheet(
             "bytes": portrait.bytes_len,
         })
 
-    # Stamp the front view as the canonical reference sheet
-    if front_asset_id is not None:
+    # --- Composite the 8 views into ONE PNG per PRD §20 step 4 --------
+    composite_asset_id: _uuid.UUID | None = None
+    if len(view_bytes_by_angle) >= 4:  # need at least half the views
+        composite_bytes = composite_8_view_sheet(view_bytes_by_angle)
+        if composite_bytes:
+            composite_asset_id = _uuid.uuid4()
+            await db.execute(
+                _text("""
+                    INSERT INTO artist_visual_assets (
+                        asset_id, artist_id, asset_type, view_angle,
+                        storage_url, generation_provider, source_prompt,
+                        is_canonical_sheet
+                    ) VALUES (
+                        :asset_id, :artist_id, 'reference_sheet', 'composite',
+                        :storage_url, :provider, :prompt, TRUE
+                    )
+                """),
+                {
+                    "asset_id": composite_asset_id,
+                    "artist_id": aid,
+                    "storage_url": f"/api/v1/admin/visual/{composite_asset_id}.png",
+                    "provider": "pil_composite",
+                    "prompt": f"8-view composite from {len(view_bytes_by_angle)} gpt-image-1 views",
+                },
+            )
+            await db.execute(
+                _text("""
+                    INSERT INTO visual_asset_blobs
+                      (asset_id, content_type, size_bytes, image_bytes)
+                    VALUES (:asset_id, 'image/png', :sz, :bytes)
+                """),
+                {
+                    "asset_id": composite_asset_id,
+                    "sz": len(composite_bytes),
+                    "bytes": composite_bytes,
+                },
+            )
+
+    # Stamp visual_dna.reference_sheet_asset_id → composite (or front if no composite)
+    canonical_id = composite_asset_id or front_asset_id
+    if canonical_id is not None:
         updated_visual = dict(artist.visual_dna or {})
-        updated_visual["reference_sheet_asset_id"] = str(front_asset_id)
+        updated_visual["reference_sheet_asset_id"] = str(canonical_id)
+        updated_visual["reference_sheet_is_composite"] = composite_asset_id is not None
         await db.execute(
             _text("UPDATE ai_artists SET visual_dna = CAST(:vdna AS jsonb), updated_at = NOW() WHERE artist_id = :aid"),
             {"vdna": json.dumps(updated_visual), "aid": aid},
@@ -4593,6 +4653,11 @@ async def generate_reference_sheet(
         "stage_name": artist.stage_name,
         "views": results,
         "front_asset_id": str(front_asset_id) if front_asset_id else None,
+        "composite_asset_id": str(composite_asset_id) if composite_asset_id else None,
+        "composite_storage_url": (
+            f"/api/v1/admin/visual/{composite_asset_id}.png"
+            if composite_asset_id else None
+        ),
         "total_cost_usd": round(approx_cost, 3),
         "model": "gpt-image-1",
         "face_locked": front_bytes is not None,

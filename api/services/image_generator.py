@@ -405,6 +405,62 @@ def build_8_view_prompts(persona: dict) -> list[tuple[str, str]]:
     return views
 
 
+def composite_8_view_sheet(view_bytes_by_angle: dict[str, bytes]) -> bytes | None:
+    """
+    Stitch 8 per-view PNGs into a single 4×2 composite sheet.
+
+    Input dict keys must match the canonical angle codes:
+      front, side_l, side_r, back, top_l, top_r, bottom_l, bottom_r
+
+    Layout:
+      row 1 (top):    front    side_l   side_r   back
+      row 2 (bottom): top_l    top_r    bottom_l bottom_r
+
+    Each cell is resized to 512×512 so the final sheet is 2048×1024.
+    Returns PNG bytes, or None if PIL isn't available or all views are
+    missing.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.error("[composite] PIL not installed — pip install Pillow")
+        return None
+
+    CANONICAL_ORDER = [
+        "front", "side_l", "side_r", "back",
+        "top_l", "top_r", "bottom_l", "bottom_r",
+    ]
+    CELL = 512
+    COLS = 4
+    ROWS = 2
+
+    sheet = Image.new("RGB", (CELL * COLS, CELL * ROWS), color=(15, 15, 17))
+    placed = 0
+    for i, angle in enumerate(CANONICAL_ORDER):
+        view_bytes = view_bytes_by_angle.get(angle)
+        if not view_bytes:
+            continue
+        try:
+            img = Image.open(io.BytesIO(view_bytes)).convert("RGB")
+            img.thumbnail((CELL, CELL), Image.LANCZOS)
+            # Center within the cell
+            col = i % COLS
+            row = i // COLS
+            x = col * CELL + (CELL - img.width) // 2
+            y = row * CELL + (CELL - img.height) // 2
+            sheet.paste(img, (x, y))
+            placed += 1
+        except Exception:
+            logger.exception("[composite] failed to place %s", angle)
+
+    if placed == 0:
+        return None
+
+    out = io.BytesIO()
+    sheet.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 def build_song_cover_prompt(
     *,
     title: str,
