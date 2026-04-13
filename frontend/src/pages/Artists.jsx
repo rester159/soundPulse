@@ -7,7 +7,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   useAIArtists, useSongs, useCreateArtistFromDescription,
   useRegenerateArtistPortrait, useArtistReferenceSheet,
-  useGenerateReferenceSheet, getBaseUrl,
+  useGenerateReferenceSheet, usePreviewPersona,
+  useCreateArtistFromPersona, getBaseUrl,
 } from '../hooks/useSoundPulse'
 
 const VIEW_LABELS = {
@@ -302,83 +303,214 @@ function ArtistCard({ artist, expanded, onToggle }) {
 }
 
 function CreateFromDescriptionForm({ onCreated, onCancel }) {
+  // Two-step flow:
+  //   Step 1: describe + generate preview (5 name candidates + full persona)
+  //   Step 2: CEO picks one of the 5 names → finalize + generate portrait
   const [description, setDescription] = useState('')
   const [genre, setGenre] = useState('')
-  const [autoApprove, setAutoApprove] = useState(false)
-  const create = useCreateArtistFromDescription()
+  const [preview, setPreview] = useState(null)
+  const [chosenName, setChosenName] = useState(null)
+  const [customName, setCustomName] = useState('')
+  const previewMut = usePreviewPersona()
+  const createMut = useCreateArtistFromPersona()
   const qc = useQueryClient()
 
-  const handleSubmit = async (e) => {
+  const handlePreview = async (e) => {
     e.preventDefault()
     if (!description || !genre) return
+    setPreview(null)
+    setChosenName(null)
     try {
-      await create.mutateAsync({
+      const res = await previewMut.mutateAsync({
+        body: { description, target_genre: genre },
+      })
+      const p = res?.data
+      setPreview(p)
+      setChosenName(p?.default_choice || null)
+    } catch (_) {}
+  }
+
+  const handleCreate = async () => {
+    if (!preview || !chosenName) return
+    try {
+      await createMut.mutateAsync({
         body: {
-          description,
-          target_genre: genre,
-          auto_approve: autoApprove,
+          persona: preview.persona,
+          chosen_stage_name: customName.trim() || chosenName,
+          target_genre: preview.target_genre,
+          auto_approve: true,
         },
       })
       qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
       onCreated?.()
-    } catch (_) { /* surfaced via create.error */ }
+    } catch (_) {}
+  }
+
+  const handleReset = () => {
+    setPreview(null)
+    setChosenName(null)
+    setCustomName('')
+    previewMut.reset()
+    createMut.reset()
   }
 
   return (
-    <form onSubmit={handleSubmit} className="rounded-xl border border-violet-500/40 bg-violet-500/5 p-4 space-y-3 mb-4">
+    <div className="rounded-xl border border-violet-500/40 bg-violet-500/5 p-4 space-y-3 mb-4">
       <div className="flex items-center justify-between">
-        <div className="text-sm font-semibold text-zinc-100">Create artist from description</div>
+        <div className="text-sm font-semibold text-zinc-100">
+          {preview ? 'Step 2 — pick a stage name' : 'Step 1 — describe the artist'}
+        </div>
         <button type="button" onClick={onCancel} className="text-zinc-500 hover:text-zinc-200">
           <X size={14} />
         </button>
       </div>
-      <div>
-        <label className="text-[10px] text-zinc-500 block mb-1">Natural-language description</label>
-        <textarea
-          value={description}
-          onChange={e => setDescription(e.target.value)}
-          placeholder="e.g. melancholy bedroom-pop girl from Portland, writes about longing and rainy streets, plays bass and writes in her journal, Phoebe Bridgers energy but more dreamy"
-          rows={3}
-          className="w-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1.5 resize-none"
-          required
-        />
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <div>
-          <label className="text-[10px] text-zinc-500 block mb-1">Target genre</label>
-          <input
-            type="text"
-            value={genre}
-            onChange={e => setGenre(e.target.value)}
-            placeholder="pop.bedroom-pop"
-            className="w-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1.5"
-            required
-          />
-        </div>
-        <label className="flex items-end gap-1.5 text-[10px] text-zinc-400 cursor-pointer pb-1.5">
-          <input
-            type="checkbox"
-            checked={autoApprove}
-            onChange={e => setAutoApprove(e.target.checked)}
-            className="accent-violet-500"
-          />
-          Auto-approve (skip CEO gate)
-        </label>
-      </div>
-      <button
-        type="submit"
-        disabled={!description || !genre || create.isPending}
-        className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-medium rounded"
-      >
-        {create.isPending ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
-        {create.isPending ? 'Blending persona via LLM...' : 'Create artist'}
-      </button>
-      {create.error && (
-        <div className="text-[10px] text-rose-300">
-          {String(create.error?.response?.data?.detail || create.error?.message)}
+
+      {/* STEP 1 — description + genre */}
+      {!preview && (
+        <form onSubmit={handlePreview} className="space-y-3">
+          <div>
+            <label className="text-[10px] text-zinc-500 block mb-1">Natural-language description</label>
+            <textarea
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              placeholder="e.g. melancholy bedroom-pop girl from Portland, writes about longing and rainy streets, Phoebe Bridgers energy but more dreamy"
+              rows={3}
+              className="w-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1.5 resize-none"
+              required
+            />
+          </div>
+          <div>
+            <label className="text-[10px] text-zinc-500 block mb-1">Target genre</label>
+            <input
+              type="text"
+              value={genre}
+              onChange={e => setGenre(e.target.value)}
+              placeholder="caribbean.reggae"
+              className="w-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1.5"
+              required
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={!description || !genre || previewMut.isPending}
+            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-medium rounded"
+          >
+            {previewMut.isPending ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+            {previewMut.isPending ? 'Generating 5 name options + persona...' : 'Generate preview'}
+          </button>
+          {previewMut.error && (
+            <div className="text-[10px] text-rose-300">
+              {String(previewMut.error?.response?.data?.detail || previewMut.error?.message)}
+            </div>
+          )}
+        </form>
+      )}
+
+      {/* STEP 2 — pick a stage name */}
+      {preview && (
+        <div className="space-y-3">
+          {/* Reference artists used */}
+          {preview.references_used?.length > 0 && (
+            <div className="bg-zinc-950 border border-zinc-800 rounded p-3">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+                Grounded in these real reference artists (by current momentum)
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {preview.references_used.map(r => (
+                  <span key={r.name} className="inline-flex items-center gap-1 text-[11px] text-zinc-300 bg-zinc-900 border border-zinc-700 rounded px-2 py-0.5">
+                    {r.name}
+                    {r.momentum > 0 && <span className="text-zinc-600">×{r.momentum}</span>}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 5 name candidates */}
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">
+              Pick one of 5 stage names
+            </div>
+            <div className="grid grid-cols-1 gap-1.5">
+              {(preview.stage_name_alternatives || []).map(name => (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => { setChosenName(name); setCustomName('') }}
+                  className={`text-left px-3 py-2 rounded border transition-colors ${
+                    (customName.trim() || chosenName) === name
+                      ? 'bg-violet-600/30 border-violet-500 text-white'
+                      : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:bg-zinc-900'
+                  }`}
+                >
+                  <div className="font-semibold text-sm">{name}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Or enter a custom name */}
+          <div>
+            <label className="text-[10px] text-zinc-500 block mb-1">
+              Or type a custom name (overrides the picks above)
+            </label>
+            <input
+              type="text"
+              value={customName}
+              onChange={e => setCustomName(e.target.value)}
+              placeholder="Custom stage name"
+              className="w-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1.5"
+            />
+          </div>
+
+          {/* Show the persona's key details so CEO knows what they're approving */}
+          <div className="bg-zinc-950 border border-zinc-800 rounded p-3 space-y-1 text-[11px]">
+            <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Persona preview</div>
+            {preview.persona?.persona_dna?.backstory && (
+              <div>
+                <span className="text-zinc-500">Backstory: </span>
+                <span className="text-zinc-300">{preview.persona.persona_dna.backstory}</span>
+              </div>
+            )}
+            {preview.persona?.influences?.length > 0 && (
+              <div>
+                <span className="text-zinc-500">Influences: </span>
+                <span className="text-zinc-300">{preview.persona.influences.join(', ')}</span>
+              </div>
+            )}
+            {preview.persona?.lyrical_dna?.recurring_themes?.length > 0 && (
+              <div>
+                <span className="text-zinc-500">Themes: </span>
+                <span className="text-zinc-300">{preview.persona.lyrical_dna.recurring_themes.join(', ')}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={handleCreate}
+              disabled={createMut.isPending || (!chosenName && !customName.trim())}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-medium rounded"
+            >
+              {createMut.isPending ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+              {createMut.isPending ? 'Creating + generating portrait...' : `Create "${customName.trim() || chosenName}"`}
+            </button>
+            <button
+              onClick={handleReset}
+              disabled={createMut.isPending}
+              className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded border border-zinc-700"
+            >
+              Start over
+            </button>
+          </div>
+          {createMut.error && (
+            <div className="text-[10px] text-rose-300">
+              {String(createMut.error?.response?.data?.detail || createMut.error?.message)}
+            </div>
+          )}
         </div>
       )}
-    </form>
+    </div>
   )
 }
 

@@ -24,18 +24,60 @@ from api.services.llm_client import llm_chat
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are a creative director for SoundPulse Records, an AI music label.
+SYSTEM_PROMPT = """You are a creative director for SoundPulse Records, an AI music label. You pick names like a top-tier A&R person at Columbia or XL Recordings — realistic, professional, and marketable.
 
 Given a short description of an artist and a target genre, produce a complete
 artist persona as a JSON object matching the schema below. Every field is
 mandatory. Be specific and internally consistent — a gravelly-voiced outlaw
 country singer should not have a "cute K-pop" visual direction.
 
+STAGE NAME RULES — THIS IS CRITICAL. Read carefully:
+
+  GOOD names (use these as a quality bar):
+    Pop/indie:   Clairo, Mitski, Phoebe Bridgers, Gracie Abrams, Maisie Peters,
+                 Beabadoobee, Faye Webster, Men I Trust, Still Woozy
+    Hip-hop:     Ken Carson, Yeat, Ice Spice, Doechii, BabyTron, NLE Choppa,
+                 Destroy Lonely, Lil Tecca
+    Reggae:      Koffee, Protoje, Chronixx, Lila Iké, Masicka, Popcaan,
+                 Vybz Kartel, Kabaka Pyramid, Samory I
+    Country:     Zach Bryan, Tyler Childers, Sierra Ferrell, Ian Noe,
+                 Margo Price, Kassi Ashton
+    R&B:         SZA, Summer Walker, Kehlani, Ari Lennox, Snoh Aalegra,
+                 UMI, Arlo Parks
+
+  BAD names (these are DISQUALIFYING — do NOT generate anything like these):
+    ❌ "Rasta Breeze" — meme-y, literal, sounds like a beer ad
+    ❌ "Beat King" — generic, on-the-nose
+    ❌ "DJ SunVibes" — cliché, dated
+    ❌ "MC Flow" — lazy abbreviation pattern
+    ❌ "Lil Shadow" — overused "Lil" prefix
+    ❌ "The Sunshine Collective" — overly wholesome group name
+    ❌ "Melody Rivers" — too perfect, sounds like a soap opera
+    ❌ Any name that literally describes the genre
+
+  Rules that ALWAYS apply:
+    - Sound like a real person's name OR a pronounceable made-up word
+    - 1-3 words max, typically 1-2
+    - Googleable — avoid collisions with famous existing artists
+    - Must pass the "would this work on a Spotify editorial cover?" test
+    - Reggae names often use Jamaican first names (Kofi, Jaden, Tafari,
+      Marcia) with or without a short stylized surname; avoid "Rasta X"
+      or "Jah X" which are parodies
+    - Pop/indie names often use real-sounding lowercase or single names
+      (like "clairo", "mitski")
+    - Hip-hop can stylize but must not default to "Lil/Young/Big X"
+    - Country names use Americana-sounding first + last names
+
+You must return FIVE distinct stage_name_alternatives in the output. All five
+must pass the quality bar above. The top-level stage_name field is the first
+choice (the default); the CEO will pick one of the 5 to finalize.
+
 Schema (return EXACTLY this shape, valid JSON, no markdown fences, no prose):
 
 {
-  "stage_name": "string — marketable, pronounceable, googleable",
-  "legal_name": "string — often same as stage_name but can differ",
+  "stage_name_alternatives": ["string", "string", "string", "string", "string"],
+  "stage_name": "string — equals stage_name_alternatives[0], your top pick",
+  "legal_name": "string — real-sounding legal name, distinct from stage_name",
   "primary_genre": "string — echoes the target genre",
   "adjacent_genres": ["string", "string", "string"],
   "influences": ["string (real artist name)", "..."],
@@ -172,6 +214,22 @@ async def blend_persona(
     for key in ("stage_name", "legal_name", "primary_genre", "voice_dna", "visual_dna"):
         if key not in persona:
             raise ValueError(f"persona missing required field: {key}")
+
+    # Ensure stage_name_alternatives is present + non-empty; if the LLM
+    # skipped it, synthesize from the top stage_name so downstream code
+    # can still show "options" even if it's a list of 1.
+    alts = persona.get("stage_name_alternatives")
+    if not isinstance(alts, list) or not alts:
+        persona["stage_name_alternatives"] = [persona["stage_name"]]
+    else:
+        # De-duplicate while preserving order + ensure stage_name is first
+        seen = set()
+        unique = []
+        for n in [persona["stage_name"]] + list(alts):
+            if n and n not in seen:
+                seen.add(n)
+                unique.append(n)
+        persona["stage_name_alternatives"] = unique[:5]
 
     # Coerce lists that the LLM may return as strings
     for list_key in ("adjacent_genres", "influences", "anti_influences",

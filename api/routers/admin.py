@@ -4327,6 +4327,184 @@ class ArtistFromDescriptionRequest(BaseModel):
     auto_approve: bool = False  # skip CEO gate for testing; default keeps gate
 
 
+class ArtistPreviewRequest(BaseModel):
+    description: str
+    target_genre: str
+
+
+class ArtistCreateFromPersonaRequest(BaseModel):
+    persona: dict            # the persona dict from /preview-persona
+    chosen_stage_name: str   # which of the 5 alternatives to use
+    target_genre: str        # echo of target_genre for the authoritative field
+    content_rating: str = "mild"
+    auto_approve: bool = False
+
+
+@router.post("/api/v1/admin/artists/preview-persona")
+async def preview_persona(
+    body: ArtistPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Generate a persona preview WITHOUT creating a DB row. Returns the
+    full persona JSON including 5 stage_name_alternatives + the set of
+    real reference artists from the Chartmetric-scraped roster that
+    grounded the LLM output. CEO reviews, picks one stage name, then
+    calls POST /admin/artists/create-from-persona to finalize.
+
+    No portrait is generated here — portraits happen at create-from-persona
+    time once the name is locked in.
+    """
+    from sqlalchemy import text as _text
+    from api.services.persona_blender import blend_persona
+    from api.services.reference_artist_lookup import (
+        format_references_for_prompt,
+        get_top_reference_artists,
+    )
+
+    existing_names_result = await db.execute(
+        _text("SELECT stage_name FROM ai_artists WHERE roster_status = 'active'")
+    )
+    existing_names = [r[0] for r in existing_names_result.fetchall() if r[0]]
+
+    references = await get_top_reference_artists(
+        db, target_genre=body.target_genre, limit=5,
+    )
+    reference_block = format_references_for_prompt(references) if references else None
+    reference_names = [r.name for r in references]
+
+    try:
+        persona = await blend_persona(
+            db=db,
+            description=body.description,
+            target_genre=body.target_genre,
+            caller="admin.preview_persona",
+            avoid_stage_names=existing_names,
+            reference_artists_block=reference_block,
+            reference_artist_names=reference_names,
+        )
+    except ValueError as e:
+        raise HTTPException(502, detail=f"persona generation failed: {e}")
+    except Exception as e:
+        logger.exception("[persona_blender] unexpected failure")
+        raise HTTPException(502, detail=f"persona generation failed: {e}")
+
+    return {
+        "persona": persona,
+        "stage_name_alternatives": persona.get("stage_name_alternatives") or [persona["stage_name"]],
+        "default_choice": persona["stage_name"],
+        "references_used": [
+            {"name": r.name, "genres": r.genres, "momentum": r.recent_trending_count}
+            for r in references
+        ],
+        "target_genre": body.target_genre,
+    }
+
+
+@router.post("/api/v1/admin/artists/create-from-persona")
+async def create_artist_from_persona(
+    body: ArtistCreateFromPersonaRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Finalize an artist from a previewed persona. The CEO has picked
+    one of the 5 stage_name_alternatives. We:
+      1. Persist the ai_artists row with the chosen name
+      2. Generate the portrait via gpt-image-1 high-quality
+      3. Return the created row + portrait info
+    """
+    from sqlalchemy import text as _text
+    from api.models.ai_artist import AIArtist
+    from api.services.image_generator import (
+        build_artist_portrait_prompt,
+        generate_and_store_image,
+    )
+
+    persona = body.persona
+    # Allow the CEO's pick to override whatever was in persona.stage_name
+    chosen = body.chosen_stage_name.strip()
+    if not chosen:
+        raise HTTPException(400, detail="chosen_stage_name is required")
+    alternatives = persona.get("stage_name_alternatives") or []
+    if chosen not in alternatives and chosen != persona.get("stage_name"):
+        # Allow free-text override but log — CEO can rename entirely
+        logger.info("[create-from-persona] CEO picked custom name '%s' not in alternatives", chosen)
+
+    row = AIArtist(
+        stage_name=chosen,
+        legal_name=persona.get("legal_name") or chosen,
+        primary_genre=body.target_genre,
+        adjacent_genres=persona.get("adjacent_genres") or None,
+        influences=persona.get("influences") or None,
+        anti_influences=persona.get("anti_influences") or None,
+        voice_dna=persona["voice_dna"],
+        visual_dna=persona["visual_dna"],
+        fashion_dna=persona.get("fashion_dna"),
+        lyrical_dna=persona.get("lyrical_dna"),
+        persona_dna=persona.get("persona_dna"),
+        social_dna=persona.get("social_dna"),
+        audience_tags=persona.get("audience_tags") or None,
+        content_rating=persona.get("content_rating") or body.content_rating,
+        ceo_approved=body.auto_approve,
+    )
+    db.add(row)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        import random as _random, string as _string
+        suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=4))
+        row.stage_name = f"{chosen} {suffix}"
+        row.legal_name = f"{row.legal_name} {suffix}"
+        db.add(row)
+        try:
+            await db.commit()
+        except Exception as e2:
+            await db.rollback()
+            raise HTTPException(409, detail=f"artist creation failed after retry: {e2}")
+    await db.refresh(row)
+
+    # Generate + store portrait (single view — user can click
+    # "Generate 8-view sheet" separately if they want the full PRD §20)
+    portrait_prompt = build_artist_portrait_prompt(persona)
+    portrait = await generate_and_store_image(
+        db,
+        artist_id=row.artist_id,
+        asset_type="reference_sheet",
+        prompt=portrait_prompt,
+        quality="high",
+    )
+    portrait_info = None
+    if portrait is not None:
+        updated_visual = dict(row.visual_dna or {})
+        updated_visual["reference_sheet_asset_id"] = str(portrait.asset_id)
+        await db.execute(
+            _text(
+                "UPDATE ai_artists SET visual_dna = CAST(:vdna AS jsonb), updated_at = NOW() "
+                "WHERE artist_id = :aid"
+            ),
+            {"vdna": json.dumps(updated_visual), "aid": row.artist_id},
+        )
+        await db.commit()
+        portrait_info = {
+            "asset_id": str(portrait.asset_id),
+            "storage_url": portrait.storage_url,
+            "provider": portrait.provider,
+            "bytes": portrait.bytes_len,
+        }
+
+    return {
+        "artist_id": str(row.artist_id),
+        "stage_name": row.stage_name,
+        "primary_genre": row.primary_genre,
+        "portrait": portrait_info,
+        "derived_from": persona.get("derived_from"),
+        "created_at": row.created_at.isoformat(),
+    }
+
+
 @router.post("/api/v1/admin/artists/from-description")
 async def create_artist_from_description(
     body: ArtistFromDescriptionRequest,

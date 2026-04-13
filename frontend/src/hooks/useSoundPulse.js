@@ -538,6 +538,20 @@ export function useCreateArtistFromDescription() {
   })
 }
 
+export function usePreviewPersona() {
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/artists/preview-persona', {}, body),
+  })
+}
+
+export function useCreateArtistFromPersona() {
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/artists/create-from-persona', {}, body),
+  })
+}
+
 export function useBlueprints({ status = null, limit = 50 } = {}) {
   return useQuery({
     queryKey: ['admin', 'blueprints', status, limit],
