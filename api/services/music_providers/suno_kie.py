@@ -87,6 +87,14 @@ class SunoKieAdapter(ProviderAdapter):
             "customMode": False,       # let Suno handle structure
             "instrumental": False,     # we want vocals
             "model": params.model_variant or DEFAULT_MODEL,
+            # Kie.ai requires callBackUrl even though docs list it as
+            # optional. We're poll-based so any URL that returns 200 on
+            # POST works. httpbin.org/post is the standard "bucket"
+            # endpoint for this kind of thing.
+            "callBackUrl": os.environ.get(
+                "KIE_CALLBACK_URL",
+                "https://httpbin.org/post",
+            ),
         }
         return payload
 
