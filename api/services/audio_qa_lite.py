@@ -13,11 +13,13 @@ sometimes short) doesn't get unfairly rejected.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import text as _text
+from sqlalchemy import bindparam, text as _text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -100,27 +102,31 @@ async def sweep_audio_qa(db: AsyncSession, *, limit: int = 100) -> dict[str, Any
 
         pass_fail = len(failure_reasons) == 0
 
+        report = {
+            "engine": "audio_qa_lite_v1",
+            "asset_duration_seconds": float(asset_duration) if asset_duration else None,
+            "size_bytes": int(size_bytes),
+            "notes": "Lightweight checks only. DSP metrics (tempo, key, "
+                     "silence, clipping, loudness, duplication) deferred to T-162-full.",
+        }
+        # asyncpg needs JSONB columns bound via a typed parameter — plain
+        # dicts sent through a raw text query hit DataError.
+        insert_stmt = _text("""
+            INSERT INTO song_qa_reports (
+                song_id, asset_id, duration_ok, pass_fail, failure_reasons, report_json
+            ) VALUES (
+                :song_id, :asset_id, :duration_ok, :pass_fail, :reasons, CAST(:report AS jsonb)
+            )
+        """)
         await db.execute(
-            _text("""
-                INSERT INTO song_qa_reports (
-                    song_id, asset_id, duration_ok, pass_fail, failure_reasons, report_json
-                ) VALUES (
-                    :song_id, :asset_id, :duration_ok, :pass_fail, :reasons, :report
-                )
-            """),
+            insert_stmt,
             {
                 "song_id": song_id,
                 "asset_id": asset_id,
                 "duration_ok": duration_ok,
                 "pass_fail": pass_fail,
                 "reasons": failure_reasons if failure_reasons else None,
-                "report": {
-                    "engine": "audio_qa_lite_v1",
-                    "asset_duration_seconds": float(asset_duration) if asset_duration else None,
-                    "size_bytes": int(size_bytes),
-                    "notes": "Lightweight checks only. DSP metrics (tempo, key, "
-                             "silence, clipping, loudness, duplication) deferred to T-162-full.",
-                },
+                "report": json.dumps(report),
             },
         )
 
