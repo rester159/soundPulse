@@ -5006,11 +5006,32 @@ async def list_ai_artists(
     _admin: ApiKey = Depends(require_admin),
 ):
     from api.models.ai_artist import AIArtist
+    from sqlalchemy import text as _text
     stmt = select(AIArtist).where(AIArtist.roster_status == roster_status).order_by(
         AIArtist.created_at.desc()
     )
     result = await db.execute(stmt)
     rows = result.scalars().all()
+
+    # Denormalized ai_artists.song_count is historically unmaintained —
+    # the PRD called for a post-insert trigger that was never created,
+    # so the column drifts to stale 0s. Compute live counts from
+    # songs_master so the Artists page is always accurate regardless of
+    # counter state. One aggregate query covers the whole roster.
+    live_counts: dict[str, int] = {}
+    if rows:
+        count_rows = (await db.execute(
+            _text("""
+                SELECT primary_artist_id::text, COUNT(*)
+                FROM songs_master
+                WHERE status NOT IN ('draft','abandoned')
+                  AND primary_artist_id = ANY(:ids::uuid[])
+                GROUP BY primary_artist_id
+            """),
+            {"ids": [str(r.artist_id) for r in rows]},
+        )).fetchall()
+        live_counts = {cr[0]: int(cr[1]) for cr in count_rows}
+
     return {
         "artists": [
             {
@@ -5021,7 +5042,7 @@ async def list_ai_artists(
                 "adjacent_genres": r.adjacent_genres,
                 "influences": r.influences,
                 "anti_influences": r.anti_influences,
-                "song_count": r.song_count,
+                "song_count": live_counts.get(str(r.artist_id), 0),
                 "audience_tags": r.audience_tags,
                 "content_rating": r.content_rating,
                 "voice_dna": r.voice_dna,
