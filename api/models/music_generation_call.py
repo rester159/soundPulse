@@ -37,6 +37,7 @@ class MusicGenerationCall(Base):
         UUID(as_uuid=True), nullable=True
     )
     blueprint_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    song_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     audio_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     audio_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)

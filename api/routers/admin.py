@@ -3833,6 +3833,11 @@ async def music_poll(
             persisted_locally = await _download_and_persist_audio(
                 db, row.id, result.audio_url
             )
+            # If this call is linked to a song (T-160 orchestrator), flip
+            # songs_master.status draft → qa_pending and create the
+            # audio_assets row pointing at the self-hosted stream URL.
+            if persisted_locally and row.song_id is not None:
+                await _materialize_song_audio(db, row, provider, task_id)
 
     # Prefer the self-hosted URL when bytes are available.
     response_audio_url = result.audio_url
@@ -3848,6 +3853,56 @@ async def music_poll(
         "error": result.error,
         "actual_cost_usd": result.actual_cost_usd,
     }
+
+
+async def _materialize_song_audio(
+    db: AsyncSession, call_row, provider: str, task_id: str
+) -> None:
+    """
+    Post-success bookkeeping for a T-160 generation: create an
+    audio_assets row for the self-hosted stream and flip the linked
+    songs_master.status from 'draft' to 'qa_pending'. Idempotent —
+    no-op if an audio_assets row already exists for this call.
+    """
+    from sqlalchemy import text as _text
+    exists = await db.execute(
+        _text("SELECT 1 FROM audio_assets WHERE music_generation_call_id = :cid"),
+        {"cid": call_row.id},
+    )
+    if exists.scalar() is not None:
+        return
+
+    stream_url = f"/api/v1/admin/music/audio/{provider}/{task_id}.mp3"
+    await db.execute(
+        _text("""
+            INSERT INTO audio_assets (
+                song_id, provider, provider_job_id, music_generation_call_id,
+                format, duration_seconds, storage_url, storage_backend,
+                is_master_candidate
+            ) VALUES (
+                :song_id, :provider, :job_id, :cid,
+                'mp3', :dur, :url, 'neon_bytea', TRUE
+            )
+        """),
+        {
+            "song_id": call_row.song_id,
+            "provider": provider,
+            "job_id": task_id,
+            "cid": call_row.id,
+            "dur": call_row.audio_duration_seconds,
+            "url": stream_url,
+        },
+    )
+    await db.execute(
+        _text("UPDATE songs_master SET status = 'qa_pending', updated_at = NOW() "
+              "WHERE song_id = :sid AND status = 'draft'"),
+        {"sid": call_row.song_id},
+    )
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("[orchestrator] materialize failed for call %s", call_row.id)
 
 
 async def _has_stored_audio(db: AsyncSession, call_id) -> bool:
@@ -4134,6 +4189,184 @@ async def list_ai_artists(
             for r in rows
         ],
         "count": len(rows),
+    }
+
+
+class GenerateSongRequest(BaseModel):
+    provider: str = "musicgen"
+    duration_seconds: int = 30
+    model_variant: str | None = None
+    title: str | None = None  # optional override of auto-derived working title
+
+
+@router.post("/api/v1/admin/blueprints/{blueprint_id}/generate-song")
+async def generate_song_for_blueprint(
+    blueprint_id: str,
+    body: GenerateSongRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    T-160: Blueprint → song generation orchestrator (§24).
+
+    Preconditions: blueprint exists, has assigned_artist_id (set by the
+    CEO gate via approve), and the provider is live in the registry.
+
+    Side effects:
+      - songs_master row created with status='draft', release_id=NULL
+      - music_generation_calls row created and linked via song_id
+      - Provider call submitted asynchronously
+      - On later successful poll: audio bytes self-hosted, songs_master
+        flips to 'qa_pending', audio_assets row created.
+
+    Release assembly is a SEPARATE step (T-183, §30) — never done here.
+    """
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+    from api.models.music_generation_call import MusicGenerationCall
+    from api.models.song_blueprint import SongBlueprint
+    from api.models.songs_master import SongMaster
+    from api.services.generation_orchestrator import (
+        assemble_generation_prompt,
+        derive_song_title,
+    )
+    from api.services.music_providers import (
+        GenerateParams,
+        ProviderError,
+        get_provider,
+    )
+
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id")
+
+    # Load blueprint
+    blueprint = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if blueprint is None:
+        raise HTTPException(404, detail="blueprint not found")
+    if blueprint.assigned_artist_id is None:
+        raise HTTPException(
+            409,
+            detail="blueprint has no assigned_artist_id — run the assignment engine "
+                   "and approve via the CEO gate first",
+        )
+
+    # Load artist
+    artist = (await db.execute(
+        select(AIArtist).where(AIArtist.artist_id == blueprint.assigned_artist_id)
+    )).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(500, detail="assigned artist row missing")
+
+    # Voice state — optional (None for first song)
+    from sqlalchemy import text as _text
+    voice_state_row = await db.execute(
+        _text("SELECT * FROM artist_voice_state WHERE artist_id = :aid LIMIT 1"),
+        {"aid": artist.artist_id},
+    )
+    vs = voice_state_row.fetchone()
+    voice_state_dict: dict | None = None
+    if vs is not None:
+        # Convert SQLAlchemy Row to dict of named attributes
+        voice_state_dict = {k: getattr(vs, k) for k in vs._mapping.keys()}
+
+    # Assemble artist + blueprint dicts for the orchestrator service
+    artist_dict = {
+        "voice_dna": artist.voice_dna,
+        "song_count": artist.song_count or 0,
+        "content_rating": artist.content_rating or "mild",
+    }
+    blueprint_dict = {
+        "smart_prompt_text": blueprint.smart_prompt_text,
+        "primary_genre": blueprint.primary_genre or blueprint.genre_id,
+        "genre_id": blueprint.genre_id,
+        "target_themes": blueprint.target_themes or [],
+    }
+    final_prompt = assemble_generation_prompt(
+        artist=artist_dict,
+        blueprint=blueprint_dict,
+        voice_state=voice_state_dict,
+    )
+    title = body.title or derive_song_title(blueprint_dict, artist_dict)
+
+    # Call provider
+    try:
+        adapter = get_provider(body.provider)
+    except KeyError as e:
+        raise HTTPException(404, detail=str(e))
+
+    gen_params = GenerateParams(
+        prompt=final_prompt,
+        duration_seconds=body.duration_seconds,
+        genre_hint=blueprint.primary_genre or blueprint.genre_id,
+        model_variant=body.model_variant,
+    )
+    try:
+        task = await adapter.generate(gen_params)
+    except ProviderError as e:
+        raise HTTPException(503, detail=str(e))
+    except Exception as e:
+        logger.exception("[orchestrator] %s generate failed", body.provider)
+        raise HTTPException(502, detail=f"provider call failed: {e}")
+
+    # Create the songs_master row in draft status
+    song = SongMaster(
+        title=title,
+        primary_artist_id=artist.artist_id,
+        blueprint_id=blueprint.id,
+        primary_genre=blueprint.primary_genre or blueprint.genre_id,
+        content_rating=artist.content_rating or "mild",
+        status="draft",
+        generation_provider=body.provider,
+        generation_provider_job_id=task.task_id,
+        generation_prompt=final_prompt,
+        generation_params=task.params_echo,
+        generation_cost_usd=task.estimated_cost_usd,
+    )
+    db.add(song)
+    await db.flush()  # assign song.song_id before we FK to it
+
+    # Create the linked music_generation_calls row
+    call = MusicGenerationCall(
+        provider=task.provider,
+        task_id=task.task_id,
+        status="pending",
+        prompt=final_prompt,
+        params_json=task.params_echo,
+        model_variant=body.model_variant,
+        duration_seconds_requested=body.duration_seconds,
+        genre_hint=blueprint.primary_genre or blueprint.genre_id,
+        breakout_event_id=None,
+        blueprint_id=blueprint.id,
+        estimated_cost_usd=task.estimated_cost_usd,
+        submitted_at=task.submitted_at,
+    )
+    db.add(call)
+    await db.flush()
+    # Link the call row to the song (new FK column from T-160)
+    await db.execute(
+        _text("UPDATE music_generation_calls SET song_id = :sid WHERE id = :cid"),
+        {"sid": song.song_id, "cid": call.id},
+    )
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.exception("[orchestrator] persistence failed")
+        raise HTTPException(500, detail=f"persistence failed: {e}")
+
+    return {
+        "song_id": str(song.song_id),
+        "task_id": task.task_id,
+        "provider": task.provider,
+        "estimated_cost_usd": task.estimated_cost_usd,
+        "title": title,
+        "status": "draft",
+        "prompt_preview": final_prompt[:200],
     }
 
 
