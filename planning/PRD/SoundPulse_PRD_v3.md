@@ -1941,6 +1941,117 @@ live           → archived | taken_down
 
 ---
 
+## §25.5 Vocal Stem Pipeline (instrumental mixing)
+
+**Purpose.** When the CEO uploads an instrumental and generates a song via Suno's `add-vocals` endpoint, Kie.ai does NOT lock to the uploaded bytes — it analyzes the beat and **recreates** a similar backing track underneath Suno's vocals. The result is "similar but not the same". This pipeline post-processes Suno's output to extract just the vocal layer and mix it onto the user's real instrumental.
+
+**Architecture.** Separate Railway microservice (`services/stem-extractor/`) following the same pattern as `services/tunebat-crawler/` and `services/portal-worker/`. Runs Demucs (Meta's state-of-the-art stem separator) locally via PyTorch CPU wheels. Polls the main API for pending jobs, downloads audio, separates, mixes, posts results back.
+
+**Why a microservice instead of in-process.** Demucs + PyTorch CPU = ~1 GB of dependencies. Keeping the main API container slim (stays ~200 MB) matters for deploy speed + cold-start latency. The microservice isolates the heavy ML path and can be scaled/scheduled independently when demand grows.
+
+**Why not Kie.ai's stems endpoint.** Probed 9 variants (`/api/v1/generate/stems`, `/vocal-separation`, `/vocal-removal`, `/audio-separation`, etc). All return 404. Kie.ai is a thin wrapper — Suno's own stems feature isn't passed through.
+
+### Schema (alembic 024)
+
+```sql
+song_stem_jobs (                  -- work queue
+    id UUID PK,
+    song_id UUID FK → songs_master,
+    music_generation_call_id UUID FK → music_generation_calls,
+    source_instrumental_id UUID FK → instrumentals,
+    source_audio_url TEXT NOT NULL,   -- Suno output MP3 URL
+    status TEXT CHECK IN ('pending','in_progress','done','failed'),
+    worker_id TEXT, claimed_at, completed_at,
+    error_message, retry_count, params_json
+)
+
+song_stems (                      -- output artifacts
+    id UUID PK,
+    song_id UUID FK → songs_master,
+    job_id UUID FK → song_stem_jobs,
+    stem_type TEXT CHECK IN ('suno_original','vocals_only',
+                             'final_mixed','drums','bass','other'),
+    content_type VARCHAR(50),
+    audio_bytes BYTEA,             -- inline storage
+    size_bytes INT, duration_seconds FLOAT, loudness_lufs FLOAT,
+    UNIQUE (song_id, stem_type)
+)
+```
+
+### Worker flow
+
+```
+1. Main API: Kie.ai Suno poll returns 'succeeded' for an add-vocals task
+2. _enqueue_stem_job_if_needed() detects the uploadUrl in params_json
+3. Creates a song_stem_jobs row with status='pending'
+4. services/stem-extractor/ claim-next loop picks it up (SELECT FOR UPDATE SKIP LOCKED)
+5. Worker downloads:
+   - Suno output (source_audio_url) → suno.mp3
+   - User's original instrumental (source_instrumental_url) → instrumental.mp3
+6. Worker runs: python -m demucs -n htdemucs --mp3 suno.mp3
+   → demucs_out/htdemucs/suno/{vocals,drums,bass,other}.mp3
+7. Worker runs: ffmpeg -i vocals.mp3 -i instrumental.mp3
+   -filter_complex '[0:a]volume=1.25[v];[1:a]volume=1.0[i];[v][i]amix=...'
+   → final_mixed.mp3
+   (Vocals boosted +25% so they sit on top without fighting the beat.
+    Tuning knob in services/stem-extractor/worker.py::_ffmpeg_mix)
+8. Base64-encode suno_original + vocals_only + final_mixed and POST
+   to /admin/worker/stem-ack/{job_id}
+9. API writes one song_stems row per stem, flips job to 'done'
+```
+
+### Admin endpoints
+
+- `POST /admin/worker/stem-claim-next` — atomic claim, returns song + source URLs + instrumental URL
+- `POST /admin/worker/stem-ack/{job_id}` — worker posts back stem payloads (base64)
+- `POST /admin/worker/stem-fail/{job_id}` — worker posts failure with retry flag
+- `GET /admin/songs/{song_id}/stems` — lists stems + job status for a song
+- `GET /admin/songs/{song_id}/stems/{stem_type}.mp3` — streams a single stem
+
+### Performance
+
+CPU-only PyTorch 2.2 on a Railway default container, `htdemucs` model, ~3-minute track:
+- Download: 2-5 s
+- Demucs separation: 90-180 s
+- ffmpeg mix: 3-5 s
+- **Total per job: ~2-3 minutes**
+
+The model weights are pre-downloaded at Docker build time (~500 MB) so the first job after a cold start doesn't pay the download cost.
+
+### Storage footprint per song
+
+Each `song_stems` row carries a BYTEA blob inline:
+- `suno_original`: ~2-4 MB
+- `vocals_only`: ~1-2 MB
+- `final_mixed`: ~2-4 MB
+- Optional `drums` / `bass` / `other` when `STEM_STORE_EXTRAS=1`: +3 × ~2 MB
+
+Baseline: ~6-10 MB per song. With extras: ~12-16 MB. For a 1000-song catalog that's ~10-15 GB — Neon handles it.
+
+### UI integration
+
+`/songs` page detail panel includes a `StemAwareAudioPlayer` component. Default playback = `final_mixed` if available, else falls back to the master `audio_assets` URL. Toggle strip below the player lets the CEO A/B between mixed / vocals / suno / drums / bass / other. Active stem highlighted in violet, inactive muted. Job-state banner reports "extraction queued" / "demucs separating" / "failed" with live refetch while in progress.
+
+### Required env vars on the Railway service
+
+| Var | Purpose |
+|---|---|
+| `SOUNDPULSE_API` | Base URL of the main API |
+| `API_ADMIN_KEY` | `X-API-Key` with admin privilege |
+| `WORKER_ID` | Stable identifier (default hostname) |
+| `POLL_INTERVAL_SEC` | Sleep between empty polls (default 30) |
+| `DEMUCS_MODEL` | Model name (default `htdemucs`) |
+| `STEM_STORE_EXTRAS` | Set `1` to also store drums/bass/other stems |
+
+### Known limitations + future work
+
+- **Vocal timing drift.** Suno's recreated beat has the same tempo/key as the user upload but may drift slightly in structure (intro length, bar count). The extracted vocal is aligned to Suno's beat, not the user's. When laid over the user's instrumental, structural drift can produce offset by 100-300ms at section boundaries. Mitigation: tighter ffmpeg alignment via cross-correlation (not shipped v1).
+- **Demucs CPU latency.** 2-3 minutes per job is acceptable for our volume (~dozens/day) but becomes a bottleneck if the catalog grows past hundreds/day. Upgrade path: GPU Railway service or swap in a lighter model (`htdemucs_ft`, `mdx_extra`).
+- **Extras storage disabled by default.** Setting `STEM_STORE_EXTRAS=1` doubles storage; leave off unless we need drums/bass for a remix flow or stem submission.
+- **No per-stem loudness normalization yet.** `loudness_lufs` column exists but the worker doesn't populate it — follow-up can run librosa RMS at ack time.
+
+---
+
 ## §25. Audio QA
 
 Before any audio is accepted, run QA checks. Result row written to `song_qa_reports`.
