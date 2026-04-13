@@ -145,9 +145,12 @@ Schema (return EXACTLY this shape, valid JSON, no markdown fences, no prose):
     "fashion_style_summary": "latin urban streetwear with luxury accents"
   },
   "fashion_dna": {
-    "core_garments": ["string", "string"],
-    "accessories": ["string"],
+    "core_garments": ["string (2-4 specific hero pieces, not generic 'pants')"],
+    "fabric_inspirations": ["string (e.g. 'hanbok silk', 'Japanese denim', 'leather', 'pvc', 'lace', 'metallic mesh', 'cashmere', 'washed cotton') — at least 2"],
+    "silhouette": "string — e.g. 'oversized layered streetwear', 'tailored slim cut', 'cropped y2k', 'draped avant-garde', 'utility workwear'",
+    "accessories": ["string (2-4 specific items — earrings, chains, bags, hats, gloves, belts)"],
     "footwear": ["string"],
+    "styling_mood": "string — one-line fashion editorial mood, e.g. 'moody cyberpunk minimalism', 'sun-bleached Americana', 'Seoul 4th-gen K-pop pastel futurism', 'Kingston dancehall luxe'",
     "avoid": ["string"]
   },
   "lyrical_dna": {

@@ -241,54 +241,162 @@ async def generate_and_store_image(
     )
 
 
-def build_artist_portrait_prompt(persona: dict) -> str:
-    """
-    Turn a persona dict into a DALL-E 3 portrait prompt that produces
-    a PHOTOREALISTIC result — a candid editorial photograph of an actual
-    person, not illustration or AI art.
+HEX_NAMES = {
+    # Enough to translate typical persona palettes into words gpt-image-1
+    # can reason about. Approximate match — closest primary name wins.
+    "red": [(255, 0, 0)], "coral": [(255, 111, 97), (255, 127, 80)],
+    "crimson": [(220, 20, 60)], "burgundy": [(128, 0, 32)],
+    "orange": [(255, 165, 0)], "peach": [(255, 218, 185)],
+    "amber": [(255, 191, 0)], "gold": [(255, 215, 0)],
+    "yellow": [(255, 255, 0)], "cream": [(255, 253, 208)],
+    "olive": [(128, 128, 0)], "mint": [(189, 252, 201)],
+    "green": [(0, 128, 0)], "emerald": [(80, 200, 120)],
+    "forest": [(34, 139, 34)], "teal": [(0, 128, 128)],
+    "cyan": [(0, 255, 255)], "sky": [(135, 206, 235)],
+    "blue": [(0, 0, 255)], "navy": [(0, 0, 128)],
+    "slate-blue": [(106, 90, 205)], "indigo": [(75, 0, 130)],
+    "violet": [(138, 43, 226)], "purple": [(128, 0, 128)],
+    "lavender": [(230, 230, 250)], "magenta": [(255, 0, 255)],
+    "pink": [(255, 192, 203)], "hot-pink": [(255, 105, 180)],
+    "brown": [(139, 69, 19)], "tan": [(210, 180, 140)],
+    "beige": [(245, 245, 220)], "ivory": [(255, 255, 240)],
+    "white": [(255, 255, 255)], "gray": [(128, 128, 128)],
+    "charcoal": [(54, 69, 79)], "black": [(0, 0, 0)],
+    "silver": [(192, 192, 192)], "chrome": [(218, 223, 225)],
+}
 
-    DALL-E 3 has a strong default tendency toward illustrative output.
-    Countering that requires: explicit "photograph" language, camera
-    specifics (body + lens), lighting specifics, skin-texture cues,
-    AND explicit anti-illustration directives. Without ALL of these
-    the model drifts back to stylized output.
+
+def _hex_to_name(hex_str: str) -> str:
+    """Translate '#RRGGBB' to the closest human color word. Used so gpt-image-1
+    gets 'coral, slate-blue, gold' instead of three opaque hex strings."""
+    s = hex_str.strip().lstrip("#")
+    if len(s) == 3:
+        s = "".join(c * 2 for c in s)
+    if len(s) != 6:
+        return hex_str
+    try:
+        r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+    except ValueError:
+        return hex_str
+    best_name = hex_str
+    best_dist = float("inf")
+    for name, refs in HEX_NAMES.items():
+        for (rr, gg, bb) in refs:
+            d = (r - rr) ** 2 + (g - gg) ** 2 + (b - bb) ** 2
+            if d < best_dist:
+                best_dist = d
+                best_name = name
+    return best_name
+
+
+def _format_palette(palette: Any) -> str | None:
+    """Turn a color_palette list into a natural-language descriptor."""
+    if not isinstance(palette, list) or not palette:
+        return None
+    names: list[str] = []
+    for p in palette:
+        if not isinstance(p, str):
+            continue
+        if p.startswith("#"):
+            names.append(_hex_to_name(p))
+        else:
+            names.append(p)
+    if not names:
+        return None
+    # Dedupe preserving order
+    seen = set()
+    unique = [n for n in names if not (n in seen or seen.add(n))]
+    return ", ".join(unique)
+
+
+def _subject_description(persona: dict) -> str:
+    """
+    Compose the full "real human being, X" descriptor used by every prompt.
+    Pulls ALL the rich visual/fashion fields — face, body, hair, ethnicity,
+    gender, age, signature outfit, color palette, fabric inspirations,
+    silhouette, styling mood, accessories, footwear. Ignored fields just
+    get skipped — no "if one is present" shortcut like the old builder.
     """
     visual = persona.get("visual_dna") or {}
     fashion = persona.get("fashion_dna") or {}
-    subject_parts: list[str] = []
 
-    # Age + gender + ethnicity go first so DALL-E locks the person type
+    parts: list[str] = []
     if (gender := persona.get("gender_presentation")):
-        subject_parts.append(gender)
+        parts.append(gender)
     if (age := persona.get("age")):
-        subject_parts.append(f"{age} years old")
+        parts.append(f"{age} years old")
     if (ethnicity := persona.get("ethnicity_heritage")):
-        subject_parts.append(ethnicity)
-
+        parts.append(ethnicity)
     if (face := visual.get("face_description")):
-        subject_parts.append(face)
+        parts.append(face)
     if (body := visual.get("body_presentation")):
-        subject_parts.append(body)
+        parts.append(body)
     if (hair := visual.get("hair_signature")):
-        subject_parts.append(hair)
+        parts.append(hair)
 
-    outfit_parts: list[str] = []
-    if fashion.get("style_summary"):
-        outfit_parts.append(fashion["style_summary"])
-    elif fashion.get("core_garments"):
-        outfit_parts.append(", ".join(fashion["core_garments"]))
+    subject = ", ".join(parts) if parts else "musician"
 
-    subject = ", ".join(subject_parts) if subject_parts else "musician"
-    outfit = f" wearing {', '.join(outfit_parts)}" if outfit_parts else ""
+    # OUTFIT — exploit every fashion field the schema defines.
+    # Bug fix: fashion_style_summary lives in visual_dna, NOT fashion_dna.
+    # The old builder looked in fashion_dna and silently dropped it.
+    outfit_bits: list[str] = []
+    if (summary := visual.get("fashion_style_summary")):
+        outfit_bits.append(summary)
+    if isinstance(fashion.get("core_garments"), list) and fashion["core_garments"]:
+        outfit_bits.append("core pieces: " + ", ".join(fashion["core_garments"]))
+    if isinstance(fashion.get("fabric_inspirations"), list) and fashion["fabric_inspirations"]:
+        outfit_bits.append("fabrics: " + ", ".join(fashion["fabric_inspirations"]))
+    if (silhouette := fashion.get("silhouette")):
+        outfit_bits.append(f"silhouette: {silhouette}")
+    if isinstance(fashion.get("accessories"), list) and fashion["accessories"]:
+        outfit_bits.append("accessories: " + ", ".join(fashion["accessories"]))
+    if isinstance(fashion.get("footwear"), list) and fashion["footwear"]:
+        outfit_bits.append("footwear: " + ", ".join(fashion["footwear"]))
+    if (styling_mood := fashion.get("styling_mood")):
+        outfit_bits.append(f"styling mood: {styling_mood}")
+
+    outfit = ""
+    if outfit_bits:
+        outfit = " — OUTFIT: " + "; ".join(outfit_bits)
+
+    # PALETTE — translate hex codes to color names the model understands.
+    palette_str = _format_palette(visual.get("color_palette"))
+    palette = f" COLOR PALETTE: {palette_str} (these colors MUST appear in the outfit, backdrop, or lighting)." if palette_str else ""
+
+    return subject + outfit + palette
+
+
+def build_artist_portrait_prompt(persona: dict) -> str:
+    """
+    Turn a persona dict into a gpt-image-1 portrait prompt that produces
+    a PHOTOREALISTIC result — a candid editorial photograph of an actual
+    person, not illustration or AI art.
+
+    gpt-image-1 (like DALL-E before it) has a strong default tendency
+    toward illustrative output. Countering that requires: explicit
+    "photograph" language, camera specifics (body + lens), lighting,
+    skin-texture cues, AND explicit anti-illustration directives.
+
+    Every rich field in the persona — fashion_style_summary, color_palette,
+    fabric_inspirations, silhouette, accessories, footwear, styling_mood,
+    art_direction — flows through _subject_description. Dropping any of
+    them is a bug; the persona schema exists to drive real distinctiveness.
+    """
+    visual = persona.get("visual_dna") or {}
+    subject = _subject_description(persona)
 
     # The art_direction field often says things like "moody urban night
     # photography" which IS photographic — fold it in as scene context.
     scene = visual.get("art_direction") or "natural daylight studio setting"
 
     return (
-        f"I NEED a real, unedited candid photograph. "
-        f"Subject: a real human being, {subject}{outfit}. "
-        f"Scene: {scene}. "
+        f"I NEED a real, unedited candid editorial photograph. "
+        f"Subject: a real human being — {subject}. "
+        f"Scene / art direction: {scene}. "
+        f"The outfit must be clearly visible and styled with intent — "
+        f"this is a FASHION EDITORIAL shoot where the wardrobe is the point, "
+        f"not a passport photo. Hero garment reads first, accessories "
+        f"support, palette carries through the whole frame. "
         f"This is a professional editorial portrait photograph, "
         f"shot on a Canon EOS R5 with an 85mm f/1.4 prime lens, "
         f"full frame, shallow depth of field, natural soft lighting, "
@@ -302,6 +410,8 @@ def build_artist_portrait_prompt(persona: dict) -> str:
         f"DO NOT generate cartoon, anime, or stylized art. "
         f"DO NOT generate 3D render, CGI, or digital painting. "
         f"DO NOT generate AI-art-looking smooth plastic skin. "
+        f"DO NOT default to a generic plain t-shirt + blazer look if "
+        f"the persona specifies richer styling. "
         f"This MUST look like an actual photograph of a real person "
         f"that could appear in a physical magazine. "
         f"No text, no watermarks, no logos, no graphic overlays."
@@ -313,40 +423,14 @@ def build_8_view_prompts(persona: dict) -> list[tuple[str, str]]:
     PRD §20 — produce 8 per-angle prompts that describe the SAME subject
     from 8 canonical angles. Used to build the artist reference sheet.
 
-    Returns a list of (view_angle, prompt) tuples. Every prompt shares
-    the same subject description to maximize face consistency (DALL-E 3
-    doesn't support reference-image locking, so the only lever is
-    describing the subject identically across prompts).
-
-    For true face consistency we'll need Flux-PuLID via Replicate in a
-    follow-up. For now DALL-E 3 gives good-enough per-view realism but
-    face details will drift between angles.
+    Every view uses the same rich _subject_description so outfit, color
+    palette, fabric, silhouette, and accessories stay consistent across
+    all 8 angles. Face consistency is locked via gpt-image-1's /edits
+    endpoint with a reference image (handled in the router).
     """
+    subject = _subject_description(persona)
     visual = persona.get("visual_dna") or {}
-    fashion = persona.get("fashion_dna") or {}
-
-    subject_parts: list[str] = []
-    if (gender := persona.get("gender_presentation")):
-        subject_parts.append(gender)
-    if (age := persona.get("age")):
-        subject_parts.append(f"{age} years old")
-    if (ethnicity := persona.get("ethnicity_heritage")):
-        subject_parts.append(ethnicity)
-    if (face := visual.get("face_description")):
-        subject_parts.append(face)
-    if (body := visual.get("body_presentation")):
-        subject_parts.append(body)
-    if (hair := visual.get("hair_signature")):
-        subject_parts.append(hair)
-
-    outfit_parts: list[str] = []
-    if fashion.get("style_summary"):
-        outfit_parts.append(fashion["style_summary"])
-    elif fashion.get("core_garments"):
-        outfit_parts.append(", ".join(fashion["core_garments"]))
-
-    subject = ", ".join(subject_parts) if subject_parts else "musician"
-    outfit = f" wearing {', '.join(outfit_parts)}" if outfit_parts else ""
+    scene = visual.get("art_direction") or "natural daylight studio setting"
 
     # Shared photo-realism preamble (same across all 8 views)
     photo_style = (
@@ -357,49 +441,49 @@ def build_8_view_prompts(persona: dict) -> list[tuple[str, str]]:
 
     anti_illustration = (
         "DO NOT generate illustration, cartoon, 3D render, CGI, or AI-art plastic skin. "
+        "DO NOT default to a plain t-shirt + blazer if the persona specifies richer styling. "
         "This MUST look like an actual photograph of a real person. "
         "No text, no watermarks, no graphic overlays."
     )
 
+    preamble = (
+        f"I NEED a real candid editorial photograph. Subject: a real human being — {subject}. "
+        f"Scene / art direction: {scene}. "
+        f"The outfit is the point of this shoot — clearly visible, styled with intent, "
+        f"hero garment reads first, palette carries through. "
+    )
+
     views: list[tuple[str, str]] = [
         ("front",
-         f"I NEED a real candid photograph. Subject: a real human being, {subject}{outfit}. "
-         f"Framing: straight-on FRONT view, head and shoulders, subject facing the camera directly, "
+         f"{preamble}Framing: straight-on FRONT view, head and shoulders, subject facing the camera directly, "
          f"eyes looking into the lens. {photo_style}. {anti_illustration}"),
 
         ("side_l",
-         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
-         f"Framing: LEFT PROFILE side view, subject facing to the camera's right, showing the left side of the face clearly, "
+         f"{preamble}Framing: LEFT PROFILE side view, subject facing to the camera's right, showing the left side of the face clearly, "
          f"head and shoulders framing. {photo_style}. {anti_illustration}"),
 
         ("side_r",
-         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
-         f"Framing: RIGHT PROFILE side view, subject facing to the camera's left, showing the right side of the face clearly, "
+         f"{preamble}Framing: RIGHT PROFILE side view, subject facing to the camera's left, showing the right side of the face clearly, "
          f"head and shoulders framing. {photo_style}. {anti_illustration}"),
 
         ("back",
-         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
-         f"Framing: BACK view, subject facing away from the camera, showing the back of the head and shoulders, "
+         f"{preamble}Framing: BACK view, subject facing away from the camera, showing the back of the head and shoulders, "
          f"hair and neckline visible. {photo_style}. {anti_illustration}"),
 
         ("top_l",
-         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
-         f"Framing: HIGH-ANGLE shot from UPPER LEFT, camera positioned above and to the left, looking down at the subject, "
+         f"{preamble}Framing: HIGH-ANGLE shot from UPPER LEFT, camera positioned above and to the left, looking down at the subject, "
          f"subject's face tilted up slightly toward the lens. {photo_style}. {anti_illustration}"),
 
         ("top_r",
-         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
-         f"Framing: HIGH-ANGLE shot from UPPER RIGHT, camera positioned above and to the right, looking down at the subject, "
+         f"{preamble}Framing: HIGH-ANGLE shot from UPPER RIGHT, camera positioned above and to the right, looking down at the subject, "
          f"subject's face tilted up slightly toward the lens. {photo_style}. {anti_illustration}"),
 
         ("bottom_l",
-         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
-         f"Framing: LOW-ANGLE shot from LOWER LEFT, camera positioned below and to the left, looking up at the subject, "
+         f"{preamble}Framing: LOW-ANGLE shot from LOWER LEFT, camera positioned below and to the left, looking up at the subject, "
          f"dramatic heroic angle. {photo_style}. {anti_illustration}"),
 
         ("bottom_r",
-         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
-         f"Framing: LOW-ANGLE shot from LOWER RIGHT, camera positioned below and to the right, looking up at the subject, "
+         f"{preamble}Framing: LOW-ANGLE shot from LOWER RIGHT, camera positioned below and to the right, looking up at the subject, "
          f"dramatic heroic angle. {photo_style}. {anti_illustration}"),
     ]
     return views
