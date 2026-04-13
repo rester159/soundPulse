@@ -98,8 +98,8 @@
   "actions": {
     "assistant_chat": "assistant_default",
     "lyrical_analysis": "analysis_default",
-    "smart_prompt_generation": "gemini_pro",
-    "persona_blender": "gemini_pro",
+    "smart_prompt_generation": "gemini_flash",
+    "persona_blender": "gemini_flash",
     "pop_culture_scraper": "gemini_flash"
   }
 }
