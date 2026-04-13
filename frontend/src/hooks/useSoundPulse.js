@@ -667,6 +667,24 @@ export function useGenerateInstrumentalSongForArtist() {
   })
 }
 
+// Vocal stems pipeline (song_stems table, populated by
+// services/stem-extractor/ after add-vocals generations complete).
+export function useSongStems(songId) {
+  return useQuery({
+    queryKey: ['admin', 'songs', songId, 'stems'],
+    queryFn: () => makeRequest('GET', `/admin/songs/${songId}/stems`),
+    enabled: !!songId,
+    // Refetch while the job is in progress so the UI flips to the
+    // mixed player automatically once the microservice finishes.
+    refetchInterval: (q) => {
+      const status = q.state.data?.data?.job?.status
+      if (status === 'done' || status === 'failed' || !status) return false
+      return 15_000
+    },
+    staleTime: 10_000,
+  })
+}
+
 export function useBlueprints({ status = null, limit = 50 } = {}) {
   return useQuery({
     queryKey: ['admin', 'blueprints', status, limit],

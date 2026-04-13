@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import {
   Disc3, Loader2, ChevronDown, ChevronUp, CheckCircle2, Music2,
-  Clock, FileAudio, AlertCircle, PlayCircle,
+  Clock, FileAudio, AlertCircle, PlayCircle, Layers, Mic2,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  useSongs, useSong, useMarkQaPassed, getBaseUrl,
+  useSongs, useSong, useMarkQaPassed, useSongStems, getBaseUrl,
 } from '../hooks/useSoundPulse'
 
 // Reuse the backend-relative → absolute URL helper
@@ -40,6 +40,110 @@ function StatusPill({ status }) {
   )
 }
 
+// Stem-aware audio player. Default-plays final_mixed (the vocal-on-
+// original-instrumental mix) if available, otherwise falls back to
+// the master audio asset. Shows a toggle strip so the CEO can A/B
+// between mixed / vocals-only / suno-original / drums / bass / other.
+function StemAwareAudioPlayer({ song, masterUrl, masterMeta }) {
+  const { data: stemsData, isLoading: stemsLoading } = useSongStems(song.song_id)
+  const stems = stemsData?.data?.stems || []
+  const job = stemsData?.data?.job
+  const [selectedStem, setSelectedStem] = useState(null)
+
+  // Pick the default playback source: final_mixed > master
+  const hasFinalMixed = stems.find(s => s.stem_type === 'final_mixed')
+  const activeStem = selectedStem || (hasFinalMixed ? hasFinalMixed.stem_type : null)
+  const playbackUrl = activeStem
+    ? resolveAudioUrl(stems.find(s => s.stem_type === activeStem)?.stream_url || masterUrl)
+    : resolveAudioUrl(masterUrl)
+
+  const STEM_META = {
+    final_mixed:   { label: 'Mixed',   desc: 'vocals over original instrumental', Icon: Layers },
+    vocals_only:   { label: 'Vocals',  desc: 'isolated vocal stem',               Icon: Mic2 },
+    suno_original: { label: 'Suno',    desc: 'full Suno output (no mix)',         Icon: Music2 },
+    drums:         { label: 'Drums',   desc: 'drum stem',                         Icon: Music2 },
+    bass:          { label: 'Bass',    desc: 'bass stem',                         Icon: Music2 },
+    other:         { label: 'Other',   desc: 'other instruments',                 Icon: Music2 },
+  }
+
+  const currentLabel = activeStem ? STEM_META[activeStem]?.label : 'Master'
+  const currentDesc = activeStem
+    ? STEM_META[activeStem]?.desc
+    : `${masterMeta.provider} · ${masterMeta.format} · ${masterMeta.duration_seconds?.toFixed(1)}s`
+
+  return (
+    <div className="space-y-2">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+        <PlayCircle size={10} /> Playing: <span className="text-violet-300">{currentLabel}</span> — {currentDesc}
+      </div>
+      <audio
+        key={playbackUrl}
+        controls
+        src={playbackUrl}
+        className="w-full"
+        style={{ filter: 'invert(0.9) hue-rotate(180deg)' }}
+      />
+
+      {/* Stem toggle strip — only visible if we have at least one stem */}
+      {stems.length > 0 && (
+        <div className="flex items-center gap-1.5 flex-wrap pt-1">
+          <div className="text-[10px] text-zinc-500 uppercase tracking-wider mr-1">
+            <Layers size={10} className="inline mr-0.5" /> Stems:
+          </div>
+          {stems.map(s => {
+            const meta = STEM_META[s.stem_type] || { label: s.stem_type, Icon: FileAudio }
+            const isActive = activeStem === s.stem_type
+            const Icon = meta.Icon
+            return (
+              <button
+                key={s.id}
+                onClick={() => setSelectedStem(s.stem_type)}
+                className={`px-2 py-0.5 text-[10px] rounded border flex items-center gap-1 transition-colors ${
+                  isActive
+                    ? 'bg-violet-500/20 border-violet-500 text-violet-200'
+                    : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
+                }`}
+                title={meta.desc}
+              >
+                <Icon size={10} />
+                {meta.label}
+                {s.size_bytes && (
+                  <span className="text-[9px] opacity-60">
+                    {Math.round(s.size_bytes / 1024)} KB
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Job status — shown while stems are being processed */}
+      {job && job.status === 'pending' && (
+        <div className="flex items-center gap-1.5 text-[10px] text-amber-400">
+          <Clock size={10} /> Stem extraction queued — waiting for stem-extractor microservice
+        </div>
+      )}
+      {job && job.status === 'in_progress' && (
+        <div className="flex items-center gap-1.5 text-[10px] text-violet-300">
+          <Loader2 size={10} className="animate-spin" /> Demucs separating vocals + mixing onto original instrumental…
+        </div>
+      )}
+      {job && job.status === 'failed' && job.error_message && (
+        <div className="text-[10px] text-rose-400 flex items-center gap-1">
+          <AlertCircle size={10} /> Stem extraction failed: {job.error_message.slice(0, 100)}
+        </div>
+      )}
+      {stemsLoading && !job && (
+        <div className="text-[10px] text-zinc-600 flex items-center gap-1">
+          <Loader2 size={10} className="animate-spin" /> Checking for stems…
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 function SongDetailPanel({ songId, onQaPassed }) {
   const { data, isLoading } = useSong(songId)
   const song = data?.data
@@ -70,19 +174,9 @@ function SongDetailPanel({ songId, onQaPassed }) {
           />
         </div>
       )}
-      {/* Audio player */}
+      {/* Audio player with stem toggle */}
       {master && master.storage_url && (
-        <div className="space-y-1">
-          <div className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-1">
-            <PlayCircle size={10} /> Master Audio — {master.provider} · {master.format} · {master.duration_seconds?.toFixed(1)}s
-          </div>
-          <audio
-            controls
-            src={resolveAudioUrl(master.storage_url)}
-            className="w-full"
-            style={{ filter: 'invert(0.9) hue-rotate(180deg)' }}
-          />
-        </div>
+        <StemAwareAudioPlayer song={song} masterUrl={master.storage_url} masterMeta={master} />
       )}
       {(!master || !master.storage_url) && song.status !== 'draft' && (
         <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 rounded p-2.5 text-[11px] text-amber-300">
