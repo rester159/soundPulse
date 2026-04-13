@@ -304,20 +304,43 @@ SoundPulse manages a roster of AI artists. Each artist is a persistent persona w
 - Submissions Agent (#14, see §43)
 - 1,090+ tracks with full audio features (and growing autonomously)
 
-### Phase 3 — Production Pipeline 📋 **TODO** (this PRD)
-- Artist creation system (§18-21)
-- Song generation under artist (§24)
-- Distribution Provider integration (§30)
-- Fonzworth ASCAP submission service (§31)
-- Other rights lanes (§32-36)
-- Marketing agent execution loops (§42-44)
-- Revenue tracking (§46-47)
+### Phase 3 — Production Pipeline 🟢 **FRAMEWORK COMPLETE** (April 13, 2026)
+- **Artist creation system (§18-21)** — ✅ Shipped with ethnicity/gender/age + edge_profile fields, fashion-editorial portraits with genre-specific references (HYBE teaser for K-pop, Dazed Caribbean for reggae, Complex for hip-hop), 8-view reference sheets with face-locked /v1/images/edits.
+- **Song generation under artist (§24)** — ✅ Shipped. Blueprint → assignment engine (10 live dimensions) → CEO gate → orchestrator → suno_kie. Includes upload-instrumental + Suno add-vocals flow.
+- **Edgy Themes pipeline (§10 Layer 7)** — ✅ Shipped. Edge rules + earworm rules + HOOK ISOLATION + per-artist edge_profile + pop_culture_references scraper + genre_traits multi-dimensional profile.
+- **Fonzworth ASCAP service (§31, T-190..T-194)** — ⚠️ FRAMEWORK shipped. DB tracking + scraper skeleton + admin endpoints live. Playwright container image needs 3-line Dockerfile edit to enable live submissions.
+- **Other rights lanes (§32-36)** — ⚠️ FRAMEWORK shipped. external_submissions table + generic dispatcher + 20 seeded targets + dependency graph. DistroKid/TuneCore/BMI/MLC/SoundExchange/YouTube Content ID all registered as stub adapters — 1-function-body replacement to go live per target as credentials land.
+- **Metadata projection (§27, T-167)** — ✅ Shipped. ISRC minting, writers/publishers, LLM-backed marketing enrichment (marketing_hook, pr_angle, playlist_fit, target_audience_tags, release_strategy, mood_tags).
+- **Audio QA full (§25, T-162-full)** — ✅ Shipped. Librosa-backed tempo/loudness/key/silence/peak/spectral centroid/MFCC analysis with Krumhansl key detection.
+- **Marketing agents (§37, T-225+)** — ✅ Two live adapters shipped: press_release_agent (AP-style release with headline/dateline/lede/quote/boilerplate) and social_media_agent (platform-specific captions for TikTok/Instagram/X/YouTube Shorts/Threads). Both pure LLM, no external credentials required.
+- **Submissions Agent downstream pipeline (T-225+)** — ✅ Shipped. sweep_downstream_pipeline() walks qa_passed songs through the dependency graph, dispatching each target in order (distributor → PRO → SoundExchange → playlists → marketing).
+- **Public instrumental submission page** — ✅ Shipped. External producers get a shareable URL (`/submit/instrumental`) with rate-limited upload.
+- **Multi-provider LLM resilience** — ✅ Shipped. Groq + OpenAI + Gemini all wired through config-driven llm_client. Per-provider fallback via llm.json action flip.
 
 ### Phase 4 — ML & Optimization 📋 **TODO**
 - ML hit predictor training on resolved breakout outcomes (§13)
+  ↳ blocked on data depth — need ~6 weeks of resolved breakout_events before XGBoost gradient boosting is viable. Target: late May 2026.
 - Outcome calibration of the quantification confidence model (§11)
 - Cross-platform cascade timing model
 - Per-artist success predictor (Artist DNA → growth probability)
+- **Duplicate detection via MFCC cosine similarity** — shipped as a computed field in song_qa_reports; the sweep that flags duplicates is a straightforward follow-up.
+
+### What's left to go fully autonomous
+
+The framework is end-to-end complete. The remaining work is a series of thin per-target adapter bodies that replace the `_stub_adapter` stubs registered in `api/services/external_submission_agent.py`. Each target follows the same pattern: check env credentials, call portal (httpx for API-based, Playwright for browser-driven), parse response, return (status, external_id, response_dict). The shared dispatcher handles retries, rate-limiting, state tracking, and CEO escalation.
+
+**In approximate priority order** (based on which unblocks revenue fastest):
+1. **DistroKid Playwright adapter** — unblocks everything downstream (SoundExchange, playlists, marketing sweeps all depend on distributor status). Highest ROI.
+2. **MLC DDEX XML generator** — publisher-side PRO, has a real API (not browser automation).
+3. **YouTube Content ID** — Google CMS partner API, needs a service account JSON.
+4. **Spotify for Artists editorial pitch** — Playwright; depends on DistroKid live.
+5. **Remaining distributors** (TuneCore, CD Baby, Amuse, UnitedMasters) — parallel alternatives.
+6. **BMI, SoundExchange** — writer/performance royalty lanes (Playwright).
+7. **Sync marketplaces** (Musicbed, Marmoset, Artlist, SubmitHub) — mostly Playwright, SubmitHub has a real API.
+8. **Playlist pitching** (Groover, Playlist Push) — Playwright.
+9. **TikTok upload bot** — Playwright, most fragile (TikTok hates automation).
+
+Each adapter is a 100-300 line module with the same skeleton. Average time to implement one: 4-8 hours with portal access + manual selector tuning against the real DOM.
 
 ---
 
