@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -5913,6 +5913,393 @@ async def telegram_test(
         raise HTTPException(502, detail=f"telegram send failed: {e}")
 
     return {"sent": True, "chat_id": chat_id}
+
+
+# ---------------------------------------------------------------------
+# Instrumentals — Task #86
+#   CEO (or anyone with a track) can upload a beat/instrumental as an
+#   audio file; Kie.ai's /api/v1/generate/add-vocals endpoint fetches it
+#   via a public URL and Suno sings over it. Mirrors the other bytea
+#   sidecar patterns (music_generation_audio, visual_asset_blobs).
+# ---------------------------------------------------------------------
+
+# Max bytes for a single upload — keeps uploads under Kie.ai's practical
+# fetch limits and protects against accidental gigabyte drops. 40 MB
+# covers ~15 minutes of mid-quality MP3, plenty for a single instrumental.
+INSTRUMENTAL_MAX_BYTES = 40 * 1024 * 1024
+
+# Content types we accept. Suno tolerates MP3/WAV/FLAC; other formats
+# get rejected so we don't waste a Kie.ai call on a 415.
+INSTRUMENTAL_ALLOWED_CTYPES = {
+    "audio/mpeg", "audio/mp3",
+    "audio/wav", "audio/x-wav", "audio/wave",
+    "audio/flac", "audio/x-flac",
+    "audio/ogg",
+    "audio/aac", "audio/mp4", "audio/x-m4a", "audio/m4a",
+}
+
+# Map content type to the extension we serve publicly. Kie.ai inspects
+# the URL's extension to decide how to decode the audio.
+INSTRUMENTAL_EXT_FOR_CTYPE = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/flac": "flac",
+    "audio/x-flac": "flac",
+    "audio/ogg": "ogg",
+    "audio/aac": "aac",
+    "audio/mp4": "m4a",
+    "audio/x-m4a": "m4a",
+    "audio/m4a": "m4a",
+}
+
+
+@router.post("/api/v1/admin/instrumentals/upload")
+async def upload_instrumental(
+    title: str = Form(...),
+    file: UploadFile = File(...),
+    tempo_bpm: float | None = Form(None),
+    key_hint: str | None = Form(None),
+    genre_hint: str | None = Form(None),
+    notes: str | None = Form(None),
+    uploaded_by: str | None = Form(None),
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Upload an instrumental audio file. Stores metadata in `instrumentals`
+    and bytes in `instrumental_blobs`. Returns the public streaming URL
+    Kie.ai can fetch when we call /api/v1/generate/add-vocals.
+
+    Multipart form fields:
+      title       (required)   — friendly name for the track
+      file        (required)   — the audio file (mp3/wav/flac/ogg/aac/m4a)
+      tempo_bpm   (optional)   — known BPM if you have it
+      key_hint    (optional)   — "A minor", "F# major", etc
+      genre_hint  (optional)   — drives the style descriptor for Suno
+      notes       (optional)   — free text
+      uploaded_by (optional)   — who uploaded this (CEO or agent name)
+    """
+    from api.models.instrumental import Instrumental, InstrumentalBlob
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, detail="empty upload")
+    if len(raw) > INSTRUMENTAL_MAX_BYTES:
+        raise HTTPException(
+            413,
+            detail=f"file exceeds {INSTRUMENTAL_MAX_BYTES // (1024 * 1024)} MB limit",
+        )
+
+    content_type = (file.content_type or "application/octet-stream").lower().strip()
+    if content_type not in INSTRUMENTAL_ALLOWED_CTYPES:
+        # Try to infer from filename extension as a fallback
+        lower_name = (file.filename or "").lower()
+        if lower_name.endswith(".mp3"):
+            content_type = "audio/mpeg"
+        elif lower_name.endswith(".wav"):
+            content_type = "audio/wav"
+        elif lower_name.endswith(".flac"):
+            content_type = "audio/flac"
+        elif lower_name.endswith(".ogg"):
+            content_type = "audio/ogg"
+        elif lower_name.endswith((".m4a", ".mp4")):
+            content_type = "audio/m4a"
+        elif lower_name.endswith(".aac"):
+            content_type = "audio/aac"
+        else:
+            raise HTTPException(
+                415,
+                detail=f"unsupported content type '{content_type}' — allowed: mp3, wav, flac, ogg, aac, m4a",
+            )
+
+    row = Instrumental(
+        title=title,
+        uploaded_by=uploaded_by,
+        genre_hint=genre_hint,
+        tempo_bpm=tempo_bpm,
+        key_hint=key_hint,
+        notes=notes,
+        original_filename=file.filename,
+        content_type=content_type,
+        size_bytes=len(raw),
+    )
+    db.add(row)
+    await db.flush()  # we need row.id before inserting the blob
+    db.add(InstrumentalBlob(
+        instrumental_id=row.id,
+        audio_bytes=raw,
+    ))
+    await db.commit()
+    await db.refresh(row)
+
+    ext = INSTRUMENTAL_EXT_FOR_CTYPE.get(content_type, "mp3")
+    public_path = f"/api/v1/instrumentals/public/{row.id}.{ext}"
+
+    logger.info(
+        "[instrumentals] uploaded %s (%d bytes, %s) → %s",
+        row.title, row.size_bytes, content_type, public_path,
+    )
+    return {
+        "instrumental_id": str(row.id),
+        "title": row.title,
+        "size_bytes": row.size_bytes,
+        "content_type": row.content_type,
+        "tempo_bpm": row.tempo_bpm,
+        "key_hint": row.key_hint,
+        "public_url_path": public_path,
+        "created_at": row.created_at.isoformat(),
+    }
+
+
+@router.get("/api/v1/admin/instrumentals")
+async def list_instrumentals(
+    active_only: bool = True,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """List uploaded instrumentals — used by the SongLab UI to pick one."""
+    from api.models.instrumental import Instrumental
+    stmt = select(Instrumental).order_by(Instrumental.created_at.desc()).limit(
+        max(1, min(limit, 500))
+    )
+    if active_only:
+        stmt = stmt.where(Instrumental.is_active == True)  # noqa: E712
+    rows = (await db.execute(stmt)).scalars().all()
+    return {
+        "count": len(rows),
+        "instrumentals": [
+            {
+                "instrumental_id": str(r.id),
+                "title": r.title,
+                "uploaded_by": r.uploaded_by,
+                "genre_hint": r.genre_hint,
+                "tempo_bpm": r.tempo_bpm,
+                "key_hint": r.key_hint,
+                "duration_seconds": r.duration_seconds,
+                "size_bytes": r.size_bytes,
+                "content_type": r.content_type,
+                "original_filename": r.original_filename,
+                "usage_count": r.usage_count,
+                "last_used_at": r.last_used_at.isoformat() if r.last_used_at else None,
+                "public_url_path": f"/api/v1/instrumentals/public/{r.id}.{INSTRUMENTAL_EXT_FOR_CTYPE.get(r.content_type, 'mp3')}",
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.delete("/api/v1/admin/instrumentals/{instrumental_id}")
+async def delete_instrumental(
+    instrumental_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Soft-delete an instrumental (sets is_active=false). Blob stays
+    until a separate prune sweep to avoid breaking any in-flight Suno
+    calls that already have the public URL."""
+    import uuid as _uuid
+    from api.models.instrumental import Instrumental
+    try:
+        iid = _uuid.UUID(instrumental_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid instrumental_id")
+    row = (await db.execute(
+        select(Instrumental).where(Instrumental.id == iid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail="not found")
+    row.is_active = False
+    await db.commit()
+    return {"instrumental_id": str(iid), "is_active": False}
+
+
+@router.post("/api/v1/admin/blueprints/{blueprint_id}/generate-song-with-instrumental")
+async def generate_song_with_instrumental(
+    blueprint_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Variant of generate-song that uploads an uploaded instrumental and
+    has Suno write vocals over it via Kie.ai's /api/v1/generate/add-vocals
+    endpoint.
+
+    Body:
+      instrumental_id    (required, str) — uuid of a row in instrumentals
+      duration_seconds   (optional int, default 60)
+      title              (optional str — overrides derived title)
+      vocal_gender       (optional 'm' | 'f')
+
+    Preconditions: blueprint has assigned_artist_id (same as generate-song).
+    """
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+    from api.models.instrumental import Instrumental
+    from api.models.music_generation_call import MusicGenerationCall
+    from api.models.song_blueprint import SongBlueprint
+    from api.models.songs_master import SongMaster
+    from api.services.generation_orchestrator import (
+        assemble_generation_prompt,
+        derive_song_title,
+    )
+    from api.services.music_providers import (
+        GenerateParams,
+        ProviderError,
+        get_provider,
+    )
+
+    instrumental_id_raw = body.get("instrumental_id")
+    if not instrumental_id_raw:
+        raise HTTPException(400, detail="instrumental_id is required")
+    try:
+        iid = _uuid.UUID(instrumental_id_raw)
+    except ValueError:
+        raise HTTPException(400, detail="invalid instrumental_id")
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id")
+
+    instrumental = (await db.execute(
+        select(Instrumental).where(Instrumental.id == iid)
+    )).scalar_one_or_none()
+    if instrumental is None or not instrumental.is_active:
+        raise HTTPException(404, detail="instrumental not found or inactive")
+
+    blueprint = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if blueprint is None:
+        raise HTTPException(404, detail="blueprint not found")
+    if blueprint.assigned_artist_id is None:
+        raise HTTPException(
+            409,
+            detail="blueprint has no assigned_artist_id — run assignment engine first",
+        )
+
+    artist = (await db.execute(
+        select(AIArtist).where(AIArtist.artist_id == blueprint.assigned_artist_id)
+    )).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(500, detail="assigned artist missing")
+
+    artist_dict = {
+        "voice_dna": artist.voice_dna,
+        "song_count": artist.song_count or 0,
+        "content_rating": artist.content_rating or "mild",
+    }
+
+    # Fresh smart_prompt with edge_profile, same as the text-only path
+    from api.services.smart_prompt import generate_smart_prompt
+    genre_for_prompt = blueprint.primary_genre or blueprint.genre_id
+    fresh_text: str | None = None
+    try:
+        fresh = await generate_smart_prompt(
+            db,
+            genre=genre_for_prompt,
+            model="suno",
+            edge_profile=getattr(artist, "edge_profile", None),
+        )
+        if fresh and fresh.get("prompt"):
+            fresh_text = fresh["prompt"]
+    except Exception:
+        logger.exception("[instrumental-gen] fresh smart_prompt failed")
+
+    blueprint_dict = {
+        "smart_prompt_text": fresh_text or blueprint.smart_prompt_text,
+        "primary_genre": genre_for_prompt,
+        "genre_id": blueprint.genre_id,
+        "target_themes": blueprint.target_themes or [],
+    }
+    final_prompt = assemble_generation_prompt(
+        artist=artist_dict,
+        blueprint=blueprint_dict,
+        voice_state=None,  # instrumental replaces voice reference
+    )
+
+    # Build the public URL for Kie.ai to fetch
+    import os as _os
+    public_base = _os.environ.get(
+        "PUBLIC_BASE_URL",
+        "https://soundpulse-production-5266.up.railway.app",
+    )
+    ext = INSTRUMENTAL_EXT_FOR_CTYPE.get(instrumental.content_type, "mp3")
+    upload_url = f"{public_base}/api/v1/instrumentals/public/{instrumental.id}.{ext}"
+
+    title = body.get("title") or derive_song_title(blueprint_dict, artist_dict)
+    vocal_gender = body.get("vocal_gender")
+
+    adapter = get_provider("suno_kie")
+    gen_params = GenerateParams(
+        prompt=final_prompt,
+        duration_seconds=int(body.get("duration_seconds") or 60),
+        genre_hint=genre_for_prompt,
+        tempo_bpm=instrumental.tempo_bpm,
+        key_hint=instrumental.key_hint,
+    )
+    try:
+        task = await adapter.generate_with_instrumental(
+            gen_params,
+            instrumental_url=upload_url,
+            title=title,
+            vocal_gender=vocal_gender,
+        )
+    except ProviderError as e:
+        raise HTTPException(503, detail=str(e))
+    except Exception as e:
+        logger.exception("[instrumental-gen] suno add-vocals failed")
+        raise HTTPException(502, detail=f"add-vocals call failed: {e}")
+
+    # Bump usage counter on the instrumental
+    instrumental.usage_count = (instrumental.usage_count or 0) + 1
+    instrumental.last_used_at = datetime.now(timezone.utc)
+
+    # Persist songs_master draft + music_generation_call (same pattern
+    # as the text-only generate-song endpoint)
+    song = SongMaster(
+        title=title,
+        primary_artist_id=artist.artist_id,
+        blueprint_id=blueprint.id,
+        primary_genre=genre_for_prompt,
+        content_rating=artist.content_rating or "mild",
+        status="draft",
+        generation_provider="suno_kie",
+        generation_provider_job_id=task.task_id,
+        generation_cost_usd=task.estimated_cost_usd,
+    )
+    db.add(song)
+    await db.flush()
+
+    gen_call = MusicGenerationCall(
+        provider="suno_kie",
+        task_id=task.task_id,
+        song_id=song.song_id,
+        status="pending",
+        submitted_at=task.submitted_at,
+        params_echo=task.params_echo,
+        estimated_cost_usd=task.estimated_cost_usd,
+    )
+    db.add(gen_call)
+    await db.commit()
+    await db.refresh(song)
+
+    return {
+        "song_id": str(song.song_id),
+        "task_id": task.task_id,
+        "provider": "suno_kie",
+        "endpoint": "add-vocals",
+        "title": title,
+        "instrumental_id": str(instrumental.id),
+        "instrumental_url": upload_url,
+        "estimated_cost_usd": task.estimated_cost_usd,
+        "status": "draft",
+    }
 
 
 @router.post("/api/v1/admin/pop-culture/refresh")

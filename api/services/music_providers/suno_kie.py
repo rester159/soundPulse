@@ -131,6 +131,117 @@ class SunoKieAdapter(ProviderAdapter):
         }
         return payload
 
+    async def generate_with_instrumental(
+        self,
+        params: GenerateParams,
+        *,
+        instrumental_url: str,
+        title: str,
+        vocal_gender: str | None = None,
+        negative_tags: str | None = None,
+    ) -> GenerationTask:
+        """
+        Call Kie.ai's /api/v1/generate/add-vocals endpoint — upload an
+        instrumental audio URL and Suno generates vocals on top that
+        lock to the backing track's tempo/key/structure.
+
+        Kie.ai's add-vocals API takes a PUBLIC uploadUrl (not multipart
+        bytes), so the caller must serve the instrumental via an open
+        streaming endpoint before calling this method. See
+        /api/v1/instrumentals/public/{id}.mp3 for the SoundPulse-side
+        implementation.
+
+        Required Kie.ai fields:
+          prompt       — lyric content + singing style description
+          title        — song title for display/filename
+          negativeTags — styles to exclude
+          style        — desired music genre/style (200 char max)
+          uploadUrl    — PUBLIC URL of the source instrumental
+          callBackUrl  — webhook (same httpbin no-op pattern we use elsewhere)
+        Optional:
+          model, vocalGender, styleWeight, weirdnessConstraint, audioWeight
+        """
+        # Build prompt: the lyric content + singing style block, same
+        # compaction rules as the text-to-song path to stay well under
+        # Kie.ai's internal cap for this endpoint.
+        raw = params.prompt
+        for marker in ("[PRODUCTION]", "[POLICY]"):
+            idx = raw.find(marker)
+            if idx > 0:
+                raw = raw[:idx]
+        for prefix_marker in ("[VOICE DNA]", "[VOICE REFERENCE]"):
+            idx = raw.find(prefix_marker)
+            if idx >= 0:
+                end = raw.find("\n\n", idx)
+                if end > 0:
+                    raw = raw[:idx] + raw[end + 2:]
+        prompt = raw.strip()[:4800]  # add-vocals accepts richer prompts
+
+        # Build compact style descriptor (200 char cap)
+        style_bits: list[str] = []
+        if params.genre_hint:
+            style_bits.append(params.genre_hint)
+        if params.tempo_bpm:
+            style_bits.append(f"{int(params.tempo_bpm)} BPM")
+        if params.key_hint:
+            style_bits.append(params.key_hint)
+        if params.mood_tags:
+            style_bits.append(", ".join(params.mood_tags[:3]))
+        style = ", ".join(style_bits)[:200] if style_bits else "modern pop"
+
+        payload: dict[str, Any] = {
+            "prompt": prompt,
+            "title": (title or "Untitled")[:80],
+            "style": style,
+            "negativeTags": negative_tags or "lo-fi, distorted, amateur",
+            "uploadUrl": instrumental_url,
+            "model": params.model_variant or DEFAULT_MODEL,
+            "callBackUrl": os.environ.get(
+                "KIE_CALLBACK_URL",
+                "https://httpbin.org/post",
+            ),
+        }
+        if vocal_gender in ("m", "f"):
+            payload["vocalGender"] = vocal_gender
+
+        async with self._client() as client:
+            r = await client.post("/api/v1/generate/add-vocals", json=payload)
+            if r.status_code >= 400:
+                logger.error(
+                    "[suno_kie] add-vocals failed %s: %s",
+                    r.status_code, r.text[:500],
+                )
+                raise RuntimeError(
+                    f"Kie.ai add-vocals returned {r.status_code}: {r.text[:500]}"
+                )
+            body = r.json()
+
+        task_id = None
+        if isinstance(body, dict):
+            data = body.get("data") or body
+            if isinstance(data, dict):
+                task_id = (
+                    data.get("taskId")
+                    or data.get("task_id")
+                    or data.get("id")
+                )
+            elif isinstance(data, str):
+                task_id = data
+        if not task_id:
+            raise RuntimeError(f"Kie.ai add-vocals missing taskId: {body}")
+
+        logger.info(
+            "[suno_kie] add-vocals submitted task %s (title=%s cost ~$%.3f)",
+            task_id, payload["title"], COST_PER_SONG_USD,
+        )
+        return GenerationTask(
+            provider=self.id,
+            task_id=task_id,
+            submitted_at=self._now(),
+            estimated_cost_usd=COST_PER_SONG_USD,
+            params_echo=payload,
+        )
+
     async def generate(self, params: GenerateParams) -> GenerationTask:
         async with self._client() as client:
             payload = self._build_payload(params)
