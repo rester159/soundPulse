@@ -26,13 +26,13 @@ function resolveAudioUrl(url) {
 // /blueprint/top-opportunities.
 const PROVIDER_TO_PROMPT_STYLE = {
   musicgen: 'musicgen',
-  suno_evolink: 'suno',
+  suno_kie: 'suno',
   udio: 'suno',  // Udio speaks the Suno-style prompt format
 }
 
 const PROVIDER_DISPLAY = {
   musicgen: 'MusicGen',
-  suno_evolink: 'Suno',
+  suno_kie: 'Suno v5.5',
   udio: 'Udio',
   soundraw: 'SOUNDRAW',
 }
@@ -58,8 +58,9 @@ function pickDefaultProvider(providers, genre) {
   const instrumental = isInstrumentalGenre(genre)
   // Preference order
   if (instrumental && liveIds.has('musicgen')) return 'musicgen'
+  // Suno v5.5 beats Udio on vocal quality — prefer when available
+  if (!instrumental && liveIds.has('suno_kie')) return 'suno_kie'
   if (!instrumental && liveIds.has('udio')) return 'udio'
-  if (!instrumental && liveIds.has('suno_evolink')) return 'suno_evolink'
   // Fall back to the first live provider
   return live[0].id
 }

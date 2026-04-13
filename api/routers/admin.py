@@ -5630,7 +5630,7 @@ async def generate_song_for_blueprint(
     #   - Providers that don't ship cover art (MusicGen via Replicate,
     #     raw audio models) — fire DALL-E now so the song has a cover
     #     before the first poll.
-    providers_with_covers = {"udio", "suno_evolink", "suno_kie"}
+    providers_with_covers = {"udio", "suno_kie"}
     cover_info = None
     if body.provider in providers_with_covers:
         logger.info(
