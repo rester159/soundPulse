@@ -114,7 +114,9 @@ These are tables referenced by §24–47 logic that still need schema + models.
       **Depends:** T-120
 - [ ] **T-126** [§19] Copy-risk validator — fail if >0.75 similarity to any reference artist on key features
       **Depends:** T-121, T-122, T-123
-- [ ] **T-127** [§18] Persona blender — LLM combines reference artists into A/B/C candidate personas, with deterministic rule clamps
+- [x] **T-127-lite** [§18] Persona blender — LLM shortcut that generates full ai_artists shape from a natural-language description + target genre, bypassing the reference-scraping pipeline. Endpoint POST /admin/artists/from-description. Frontend "New artist" form on the Artists page. Groq llama-3.3-70b, action 'persona_blender'.
+      ✓ shipped 2026-04-12 commit 1a820f8
+- [ ] **T-127-full** [§18] Persona blender (full) — LLM combines real reference artists (from T-121 enrichment) into A/B/C candidates with deterministic rule clamps. Supersedes the lite version once T-120..T-126 land.
       **Depends:** T-121, T-126
 - [ ] **T-128** [§18] Artist finalization service — persists `ai_artists` row after CEO approval
       **Depends:** T-127, T-032
@@ -340,3 +342,8 @@ These are tables referenced by §24–47 logic that still need schema + models.
 - 2026-04-12: PRD §24 clarified — release assembly is a SEPARATE step, not bundled into generation. Status lifecycle enumerated: draft → qa_pending → qa_passed → assigned_to_release → submitted → live.
 - 2026-04-12: T-160 song generation orchestrator — POST /admin/blueprints/{id}/generate-song + generation_orchestrator service + music_generation_calls.song_id FK + poll handler _materialize_song_audio helper (commit 78b1cfa)
 - 2026-04-12: T-183 release assembly — 5 endpoints for releases + tracks + manual qa-pass bypass (commit fba0772)
+- 2026-04-12: Songs page UI — inline audio + metadata + QA bypass action (commit 1109308)
+- 2026-04-12: T-162-lite audio QA sweep + openai_cli_proxy tool + PRD §61 bump to 42 tools (commit 2ba8f1f)
+- 2026-04-12: Artists + Releases pages — full CRUD UI for the internal pipeline (commit 67bc766)
+- 2026-04-12: T-195 E2E pipeline test — 9 cases, 8/9 passing (caught JSONB bind bug in audio_qa_lite which is also now fixed) (commit 1ac4842)
+- 2026-04-12: T-127-lite LLM persona blender + create-from-description flow (commit 1a820f8)
