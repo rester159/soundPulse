@@ -106,6 +106,58 @@ GENRE DOES NOT EXCUSE BLANDNESS. Reggae artists can be edgy (Koffee's "W")
 Ferrell naming her trauma). If you find yourself defaulting to "universal"
 themes because you think the genre requires it, you are wrong.
 
+EARWORM RULE — applies to every chorus regardless of genre:
+
+The chorus hook MUST satisfy at least 5 of these 7 properties. If fewer,
+rewrite the chorus:
+
+  1. HOOK LENGTH — the core hook is 4-7 syllables, max 2 bars of melody.
+     If you wrote an 11-syllable hook you wrote a pre-chorus, try again.
+     References: "Taste" (1), "Flowers" (2), "Vampire" (2), "Houdini" (3),
+     "Water" (2), "Espresso" (3), "Watermelon sugar" (6), "Good 4 u" (4).
+
+  2. REPETITION WITH VARIATION — the hook repeats 4+ times per chorus,
+     but the final repetition lands DIFFERENT — ad-lib, vowel extension,
+     pitch lift, or contradiction. Sabrina "Espresso / espresso / espresso /
+     that's that me espresso" — the 4th one extends. Dua Lipa "Houdini"
+     — same four-note hook but the bridge flips the final one minor.
+
+  3. V-SHAPE MELODIC CONTOUR — the hook melody ASCENDS on the first half
+     and DESCENDS on the second. Up then down. Not monotone, not all-up,
+     not all-down. The ear wants resolution and a V gives it. Reference:
+     "Bad Habit" (Steve Lacy) — every hook line is a V.
+
+  4. DOWNBEAT VOWEL STRESS — the stressed syllable of the hook sits on
+     beat 1 or 3, and the stressed vowel is OPEN (ah, eh, oh, ay) not
+     closed (ih, uh, ee). "TASTE me", "WATER-melon sugar", "I'M JUST a
+     girl", "PLEASE please please". Open vowels carry farther and stick.
+
+  5. ONE UNEXPECTED INTERVAL — ONE note in the hook should be a half-step,
+     a tritone, or a minor-to-major pivot away from what the ear expects.
+     ONE surprise, not six. Reference: the chromatic walk in Steve Lacy's
+     "Bad Habit", the minor-major flip in Billie Eilish's "What Was I Made
+     For". If the melody is entirely in-key and predictable it won't stick.
+
+  6. A CAPPELLA SINGABILITY — if a listener can't hum the hook after ONE
+     listen without hearing the instrumental, you failed. The hook must
+     work on its own voice-and-finger-snaps. Test: would this hook make
+     sense if sung by a 22-year-old walking home from the gym?
+
+  7. CONCRETE NOUN IN THE HOOK — the hook names an object, brand, place,
+     person, body part, or food. Not an abstract emotion. Passes: "Stanley
+     cup", "espresso", "vampire", "watermelon sugar", "ice cream", "bad
+     habit", "greedy". FAILS: "my broken heart", "my endless dreams", "your
+     love", "the feeling". Abstract-emotion hooks are the banned-trope tell.
+
+EXCEPTION — if the artist is deliberately experimental (lyrical_dna
+.vocab_level = "abstract" or "poetic"), apply only 3 of the 7 properties.
+Everyone else gets the full 5 of 7.
+
+In your rationale JSON, return an `earworm_devices_used` array listing
+which of the 7 the chorus actually satisfies, with the specific
+syllables/words referenced. This is the auditable gate — if you don't
+list 5, you failed and must rewrite before returning.
+
 Return ONLY valid JSON, no markdown fences."""
 
 
@@ -142,6 +194,7 @@ Return ONLY this JSON:
     "sonic_targeting": "one sentence on why these sonic choices",
     "lyrical_targeting": "one sentence on why these lyrical choices",
     "edge_devices_used": ["list the 2+ edge devices you actually put in the lyric"],
+    "earworm_devices_used": ["list 5+ of the 7 earworm properties the chorus satisfies — name the specific syllables/words for each"],
     "pop_culture_hooks_used": ["list the ref texts you injected, or [] if none fit"],
     "differentiation": "one sentence on what makes this distinctive vs typical {genre}"
   }}
