@@ -4594,6 +4594,47 @@ async def remove_track_from_release(
     return {"release_id": str(rid), "song_id": str(sid), "removed": True}
 
 
+@router.post("/api/v1/admin/sweeps/submissions")
+async def sweep_submissions_endpoint(
+    include_optional: bool = False,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    T-225: run the Submissions Agent. Walks every assigned_to_release
+    song, checks each lane's prereqs, and escalates missing items to
+    the CEO gate.
+    """
+    from api.services.submissions_agent import sweep_submissions
+    stats = await sweep_submissions(db, include_optional=include_optional)
+    return {"detail": "submissions sweep complete", "stats": stats}
+
+
+@router.get("/api/v1/admin/submissions/prerequisites/{artist_id}")
+async def get_submission_prerequisites(
+    artist_id: str,
+    include_optional: bool = True,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Show every missing submission prerequisite for a given artist.
+    Used by the Settings UI to display the lane-by-lane readiness grid.
+    """
+    import uuid as _uuid
+    from api.services.submissions_agent import check_prerequisites_for_artist
+
+    try:
+        aid = _uuid.UUID(artist_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid artist_id")
+
+    reports = await check_prerequisites_for_artist(
+        db, aid, include_optional=include_optional
+    )
+    return {"artist_id": artist_id, "reports": reports, "count": len(reports)}
+
+
 @router.post("/api/v1/admin/sweeps/audio-qa")
 async def sweep_audio_qa_endpoint(
     limit: int = 100,

@@ -284,6 +284,17 @@ async def init_scheduler(database_url: str):
         name="audio QA lite sweep",
     )
 
+    # Submissions Agent sweep (T-225) — for every assigned_to_release
+    # song, checks each lane's prereqs and escalates missing items to
+    # the CEO gate as setup_required decisions. Runs every 30 min.
+    _scheduler.add_job(
+        _run_submissions_agent_job,
+        trigger=IntervalTrigger(minutes=30),
+        id="sweep_submissions_agent",
+        replace_existing=True,
+        name="submissions agent sweep",
+    )
+
     # Stale-job reaper — clears scrapers whose last_status got stuck at
     # "running" because the process was killed mid-run (deploy, OOM, crash).
     # Without this, a scraper can sit in "running" forever until the next
@@ -383,6 +394,20 @@ async def _run_audio_qa_lite_job():
             logger.info("[scheduler] audio QA lite: %s", stats)
     except Exception:
         logger.exception("[scheduler] audio QA lite failed")
+
+
+async def _run_submissions_agent_job():
+    """APScheduler entry point for the T-225 Submissions Agent sweep."""
+    from api.services.submissions_agent import sweep_submissions
+
+    factory = _get_session_factory()
+    try:
+        async with factory() as db:
+            stats = await sweep_submissions(db)
+        if stats.get("songs_scanned", 0) > 0:
+            logger.info("[scheduler] submissions agent: %s", stats)
+    except Exception:
+        logger.exception("[scheduler] submissions agent failed")
 
 
 async def _reap_stale_running_scrapers():

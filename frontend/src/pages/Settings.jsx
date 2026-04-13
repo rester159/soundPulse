@@ -403,7 +403,90 @@ function GrantDropdown({ tool_id, agent_id, agents, tools, grantedAgentIds, gran
 
 // ─── Pending Decisions section ───────────────────────────────────────────
 
+function SetupRequiredCard({ decision, onApprove, onReject, busy }) {
+  const data = decision.data || {}
+  const missing = data.missing || []
+  return (
+    <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-amber-400">
+            <span className="px-1.5 py-0.5 rounded border border-amber-500/40 text-amber-300 bg-amber-500/10">
+              setup required
+            </span>
+            <span>{new Date(decision.created_at).toLocaleString()}</span>
+          </div>
+          <div className="text-zinc-100 font-semibold mt-1">
+            {data.lane_display_name || 'Submission blocker'} — {data.artist_name || 'artist'}
+          </div>
+          <div className="text-xs text-zinc-400 mt-0.5">
+            {data.summary}
+          </div>
+          {data.blocking_song_id && (
+            <div className="text-[10px] text-zinc-600 mt-0.5 font-mono">
+              Blocking song: {data.blocking_song_id.slice(0, 8)}
+            </div>
+          )}
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => onApprove(decision)}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-medium rounded-lg"
+          >
+            <CheckCircle2 size={12} /> Mark done
+          </button>
+          <button
+            onClick={() => onReject(decision)}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium rounded-lg border border-zinc-700"
+          >
+            Defer
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-2 pt-2 border-t border-amber-500/20">
+        <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+          Action items ({missing.length})
+        </div>
+        {missing.map((item, i) => (
+          <div key={i} className="bg-zinc-950 border border-zinc-800 rounded p-2.5 space-y-1">
+            <div className="text-xs font-semibold text-zinc-200">{item.description}</div>
+            <div className="text-[11px] text-zinc-400">{item.resolution_hint}</div>
+            {item.env_var && (
+              <div className="flex items-center gap-1 text-[10px] text-zinc-500">
+                Set env var:
+                <code className="text-amber-300 font-mono bg-zinc-900 px-1.5 py-0.5 rounded">
+                  {item.env_var}
+                </code>
+              </div>
+            )}
+            {item.social_platform && (
+              <div className="text-[10px] text-zinc-500">
+                Create account on:
+                <span className="text-violet-300 ml-1 uppercase">{item.social_platform}</span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {data.implementation_task && (
+        <div className="text-[9px] text-zinc-600 pt-1 border-t border-amber-500/20">
+          Submission lane ships in {data.implementation_task} ({data.submission_mode} mode)
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DecisionCard({ decision, onApprove, onReject, busy }) {
+  // Setup-required decisions get their own card with a checklist rendering
+  if (decision.decision_type === 'setup_required') {
+    return <SetupRequiredCard decision={decision} onApprove={onApprove} onReject={onReject} busy={busy} />
+  }
+
   const [expanded, setExpanded] = useState(false)
   const data = decision.data || {}
   const breakdown = data.breakdown || {}
