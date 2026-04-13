@@ -54,7 +54,9 @@ async def get_top_reference_artists(
     matches exist (e.g. 'caribbean.reggae.roots-reggae' falls back to
     'caribbean.reggae').
     """
-    # Try exact + prefix match first
+    # Try exact + prefix match first. Pre-aggregate trending snapshots in
+    # a subquery so we don't have to GROUP BY on the outer artists row
+    # (Postgres can't group on json columns — no equality operator).
     result = await db.execute(
         _text("""
             SELECT
@@ -64,18 +66,20 @@ async def get_top_reference_artists(
                 a.spotify_id,
                 a.genres,
                 COALESCE((a.metadata_json->>'popularity')::int, 0) AS popularity,
-                COUNT(ts.id) AS recent_trending_count
+                COALESCE(t.recent_trending_count, 0) AS recent_trending_count
             FROM artists a
-            LEFT JOIN trending_snapshots ts
-              ON ts.entity_id = a.id
-              AND ts.entity_type = 'artist'
-              AND ts.snapshot_date >= NOW() - INTERVAL '30 days'
+            LEFT JOIN (
+                SELECT entity_id, COUNT(*) AS recent_trending_count
+                FROM trending_snapshots
+                WHERE entity_type = 'artist'
+                  AND snapshot_date >= NOW() - INTERVAL '30 days'
+                GROUP BY entity_id
+            ) t ON t.entity_id = a.id
             WHERE :target_genre = ANY(a.genres)
                OR EXISTS (
                    SELECT 1 FROM unnest(a.genres) g
                    WHERE g LIKE :prefix OR g = :target_genre
                )
-            GROUP BY a.id, a.name, a.chartmetric_id, a.spotify_id, a.genres, a.metadata_json
             ORDER BY recent_trending_count DESC NULLS LAST,
                      popularity DESC NULLS LAST,
                      a.chartmetric_id DESC NULLS LAST
