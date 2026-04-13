@@ -272,6 +272,18 @@ async def init_scheduler(database_url: str):
         name="lyrical analysis (weekly)",
     )
 
+    # Audio QA lite sweep (T-162-lite) — flips songs_master from
+    # qa_pending to qa_passed or qa_failed using lightweight checks
+    # (duration, audio bytes present). Runs every 5 minutes so a newly
+    # generated song spends at most ~5 minutes in qa_pending.
+    _scheduler.add_job(
+        _run_audio_qa_lite_job,
+        trigger=IntervalTrigger(minutes=5),
+        id="sweep_audio_qa_lite",
+        replace_existing=True,
+        name="audio QA lite sweep",
+    )
+
     # Stale-job reaper — clears scrapers whose last_status got stuck at
     # "running" because the process was killed mid-run (deploy, OOM, crash).
     # Without this, a scraper can sit in "running" forever until the next
@@ -357,6 +369,20 @@ async def _run_lyrical_analysis_job():
         logger.info("[scheduler] lyrical analysis: %s", stats)
     except Exception:
         logger.exception("[scheduler] lyrical analysis failed")
+
+
+async def _run_audio_qa_lite_job():
+    """APScheduler entry point for the T-162-lite audio QA sweep."""
+    from api.services.audio_qa_lite import sweep_audio_qa
+
+    factory = _get_session_factory()
+    try:
+        async with factory() as db:
+            stats = await sweep_audio_qa(db)
+        if stats.get("scanned", 0) > 0:
+            logger.info("[scheduler] audio QA lite: %s", stats)
+    except Exception:
+        logger.exception("[scheduler] audio QA lite failed")
 
 
 async def _reap_stale_running_scrapers():

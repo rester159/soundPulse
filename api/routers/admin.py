@@ -4523,6 +4523,21 @@ async def remove_track_from_release(
     return {"release_id": str(rid), "song_id": str(sid), "removed": True}
 
 
+@router.post("/api/v1/admin/sweeps/audio-qa")
+async def sweep_audio_qa_endpoint(
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    T-162-lite: run the lightweight audio QA sweep across all
+    songs in qa_pending. Returns stats dict.
+    """
+    from api.services.audio_qa_lite import sweep_audio_qa
+    stats = await sweep_audio_qa(db, limit=limit)
+    return {"detail": "audio qa sweep complete", "stats": stats}
+
+
 @router.post("/api/v1/admin/songs/{song_id}/mark-qa-passed")
 async def mark_song_qa_passed(
     song_id: str,

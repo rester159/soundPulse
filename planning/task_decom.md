@@ -118,7 +118,7 @@ These are tables referenced by §24–47 logic that still need schema + models.
       **Depends:** T-121, T-126
 - [ ] **T-128** [§18] Artist finalization service — persists `ai_artists` row after CEO approval
       **Depends:** T-127, T-032
-- [ ] **T-129** [§20] Visual reference sheet generator — 8-view composite using Stable Diffusion + IP-Adapter or Flux-fal.ai, with locked embedding across views
+- [ ] **T-129** [§20] Visual reference sheet generator — 8-view composite via the `openai_cli_proxy` tool (preferred path, broker for DALL-E 3 / gpt-image-1), with locked seed/embedding across views. Fallback to Flux via fal.ai or Stable Diffusion + IP-Adapter if OpenAI path rejects face-locking.
       **Depends:** T-106, T-128
 - [ ] **T-130** [§20] Facial consistency QA via embedding similarity — kill and retry if any view drifts
       **Depends:** T-129
