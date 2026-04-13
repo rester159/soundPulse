@@ -5854,6 +5854,39 @@ async def telegram_test(
     return {"sent": True, "chat_id": chat_id}
 
 
+@router.get("/api/v1/admin/telegram/bot-info")
+async def telegram_bot_info(
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Hit Telegram's getMe endpoint to verify the TELEGRAM_BOT_TOKEN is
+    valid and tell us the bot's username. Used during setup to confirm
+    the user /start'd the right bot.
+    """
+    import os
+    import httpx
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(503, detail="TELEGRAM_BOT_TOKEN env not set")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+            body = r.json()
+    except Exception as e:
+        raise HTTPException(502, detail=f"telegram getMe failed: {e}")
+    if not body.get("ok"):
+        raise HTTPException(401, detail=f"telegram rejected token: {body}")
+    bot = body.get("result") or {}
+    return {
+        "valid": True,
+        "bot_id": bot.get("id"),
+        "username": bot.get("username"),
+        "first_name": bot.get("first_name"),
+        "can_join_groups": bot.get("can_join_groups"),
+        "open_url": f"https://t.me/{bot.get('username')}" if bot.get("username") else None,
+    }
+
+
 @router.get("/api/v1/admin/telegram/get-chat-id")
 async def telegram_get_chat_id(
     _admin: ApiKey = Depends(require_admin),
