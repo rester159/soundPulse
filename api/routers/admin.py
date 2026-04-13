@@ -4452,6 +4452,176 @@ async def create_artist_from_description(
     }
 
 
+@router.post("/api/v1/admin/artists/{artist_id}/generate-reference-sheet")
+async def generate_reference_sheet(
+    artist_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    PRD §20 — generate the full 8-view photographic reference sheet for
+    an artist. Each view is a separate DALL-E 3 HD call ($0.08 each)
+    following the per-angle prompt in build_8_view_prompts.
+
+    Total cost: $0.64 per artist (8 × $0.08).
+    Note: DALL-E 3 doesn't support face locking, so facial details will
+    drift between views. For guaranteed consistency we'll need Flux-PuLID
+    via Replicate in a follow-up.
+
+    Returns a list of generated views with their asset_ids. The front
+    view becomes the new canonical reference sheet (updates
+    visual_dna.reference_sheet_asset_id) + all other views are linked
+    via parent_sheet_id.
+    """
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    from api.models.ai_artist import AIArtist
+    from api.services.image_generator import (
+        build_8_view_prompts,
+        generate_and_store_image,
+    )
+
+    try:
+        aid = _uuid.UUID(artist_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid artist_id")
+
+    artist = (await db.execute(
+        select(AIArtist).where(AIArtist.artist_id == aid)
+    )).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(404, detail="artist not found")
+
+    persona = {
+        "age": artist.age,
+        "gender_presentation": artist.gender_presentation,
+        "ethnicity_heritage": artist.ethnicity_heritage,
+        "visual_dna": artist.visual_dna or {},
+        "fashion_dna": artist.fashion_dna or {},
+    }
+    view_prompts = build_8_view_prompts(persona)
+
+    results: list[dict] = []
+    front_asset_id: _uuid.UUID | None = None
+
+    for view_angle, prompt in view_prompts:
+        portrait = await generate_and_store_image(
+            db,
+            artist_id=aid,
+            asset_type="sheet_view",
+            prompt=prompt,
+            view_angle=view_angle,
+            parent_sheet_id=front_asset_id,  # linked to front view once it's created
+        )
+        if portrait is None:
+            logger.warning("[sheet-gen] %s view failed for %s", view_angle, artist.stage_name)
+            results.append({
+                "view_angle": view_angle,
+                "asset_id": None,
+                "error": "generation returned None",
+            })
+            continue
+
+        if view_angle == "front":
+            front_asset_id = portrait.asset_id
+            # Update the front view's row to mark it as the canonical sheet
+            await db.execute(
+                _text("""
+                    UPDATE artist_visual_assets
+                    SET asset_type = 'reference_sheet', is_canonical_sheet = TRUE
+                    WHERE asset_id = :asset_id
+                """),
+                {"asset_id": portrait.asset_id},
+            )
+
+        results.append({
+            "view_angle": view_angle,
+            "asset_id": str(portrait.asset_id),
+            "storage_url": portrait.storage_url,
+            "bytes": portrait.bytes_len,
+        })
+
+    # Stamp the front view as the canonical reference sheet
+    if front_asset_id is not None:
+        updated_visual = dict(artist.visual_dna or {})
+        updated_visual["reference_sheet_asset_id"] = str(front_asset_id)
+        await db.execute(
+            _text("UPDATE ai_artists SET visual_dna = CAST(:vdna AS jsonb), updated_at = NOW() WHERE artist_id = :aid"),
+            {"vdna": json.dumps(updated_visual), "aid": aid},
+        )
+
+    await db.commit()
+
+    return {
+        "artist_id": str(aid),
+        "stage_name": artist.stage_name,
+        "views": results,
+        "front_asset_id": str(front_asset_id) if front_asset_id else None,
+        "total_cost_usd": 0.08 * len([r for r in results if r.get("asset_id")]),
+    }
+
+
+@router.get("/api/v1/admin/artists/{artist_id}/reference-sheet")
+async def get_artist_reference_sheet(
+    artist_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Return every artist_visual_assets row for this artist that belongs
+    to a reference sheet (asset_type in reference_sheet | sheet_view),
+    ordered by view_angle. The UI uses this to render the 8-view grid.
+    """
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    try:
+        aid = _uuid.UUID(artist_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid artist_id")
+
+    # Canonical order for the 8 views
+    VIEW_ORDER = [
+        "front", "side_l", "side_r", "back",
+        "top_l", "top_r", "bottom_l", "bottom_r",
+    ]
+
+    r = await db.execute(
+        _text("""
+            SELECT asset_id, view_angle, storage_url, is_canonical_sheet, created_at
+            FROM artist_visual_assets
+            WHERE artist_id = :aid
+              AND asset_type IN ('reference_sheet', 'sheet_view')
+            ORDER BY created_at DESC
+        """),
+        {"aid": aid},
+    )
+    rows = r.fetchall()
+
+    # Group by view_angle, keeping the newest per angle
+    latest_by_angle: dict = {}
+    for row in rows:
+        angle = row[1] or "front"
+        if angle not in latest_by_angle:
+            latest_by_angle[angle] = {
+                "asset_id": str(row[0]),
+                "view_angle": angle,
+                "storage_url": row[2],
+                "is_canonical_sheet": row[3],
+                "created_at": row[4].isoformat() if row[4] else None,
+            }
+
+    ordered = []
+    for angle in VIEW_ORDER:
+        if angle in latest_by_angle:
+            ordered.append(latest_by_angle[angle])
+
+    return {
+        "artist_id": str(aid),
+        "views": ordered,
+        "count": len(ordered),
+    }
+
+
 @router.post("/api/v1/admin/artists/{artist_id}/regenerate-portrait")
 async def regenerate_artist_portrait(
     artist_id: str,

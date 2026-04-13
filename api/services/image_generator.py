@@ -261,6 +261,103 @@ def build_artist_portrait_prompt(persona: dict) -> str:
     )
 
 
+def build_8_view_prompts(persona: dict) -> list[tuple[str, str]]:
+    """
+    PRD §20 — produce 8 per-angle prompts that describe the SAME subject
+    from 8 canonical angles. Used to build the artist reference sheet.
+
+    Returns a list of (view_angle, prompt) tuples. Every prompt shares
+    the same subject description to maximize face consistency (DALL-E 3
+    doesn't support reference-image locking, so the only lever is
+    describing the subject identically across prompts).
+
+    For true face consistency we'll need Flux-PuLID via Replicate in a
+    follow-up. For now DALL-E 3 gives good-enough per-view realism but
+    face details will drift between angles.
+    """
+    visual = persona.get("visual_dna") or {}
+    fashion = persona.get("fashion_dna") or {}
+
+    subject_parts: list[str] = []
+    if (gender := persona.get("gender_presentation")):
+        subject_parts.append(gender)
+    if (age := persona.get("age")):
+        subject_parts.append(f"{age} years old")
+    if (ethnicity := persona.get("ethnicity_heritage")):
+        subject_parts.append(ethnicity)
+    if (face := visual.get("face_description")):
+        subject_parts.append(face)
+    if (body := visual.get("body_presentation")):
+        subject_parts.append(body)
+    if (hair := visual.get("hair_signature")):
+        subject_parts.append(hair)
+
+    outfit_parts: list[str] = []
+    if fashion.get("style_summary"):
+        outfit_parts.append(fashion["style_summary"])
+    elif fashion.get("core_garments"):
+        outfit_parts.append(", ".join(fashion["core_garments"]))
+
+    subject = ", ".join(subject_parts) if subject_parts else "musician"
+    outfit = f" wearing {', '.join(outfit_parts)}" if outfit_parts else ""
+
+    # Shared photo-realism preamble (same across all 8 views)
+    photo_style = (
+        "Shot on Canon EOS R5 with 85mm f/1.4 prime lens, full frame, "
+        "natural soft lighting, sharp focus, visible skin texture and pores, "
+        "authentic human details, documentary realism, editorial magazine quality"
+    )
+
+    anti_illustration = (
+        "DO NOT generate illustration, cartoon, 3D render, CGI, or AI-art plastic skin. "
+        "This MUST look like an actual photograph of a real person. "
+        "No text, no watermarks, no graphic overlays."
+    )
+
+    views: list[tuple[str, str]] = [
+        ("front",
+         f"I NEED a real candid photograph. Subject: a real human being, {subject}{outfit}. "
+         f"Framing: straight-on FRONT view, head and shoulders, subject facing the camera directly, "
+         f"eyes looking into the lens. {photo_style}. {anti_illustration}"),
+
+        ("side_l",
+         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
+         f"Framing: LEFT PROFILE side view, subject facing to the camera's right, showing the left side of the face clearly, "
+         f"head and shoulders framing. {photo_style}. {anti_illustration}"),
+
+        ("side_r",
+         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
+         f"Framing: RIGHT PROFILE side view, subject facing to the camera's left, showing the right side of the face clearly, "
+         f"head and shoulders framing. {photo_style}. {anti_illustration}"),
+
+        ("back",
+         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
+         f"Framing: BACK view, subject facing away from the camera, showing the back of the head and shoulders, "
+         f"hair and neckline visible. {photo_style}. {anti_illustration}"),
+
+        ("top_l",
+         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
+         f"Framing: HIGH-ANGLE shot from UPPER LEFT, camera positioned above and to the left, looking down at the subject, "
+         f"subject's face tilted up slightly toward the lens. {photo_style}. {anti_illustration}"),
+
+        ("top_r",
+         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
+         f"Framing: HIGH-ANGLE shot from UPPER RIGHT, camera positioned above and to the right, looking down at the subject, "
+         f"subject's face tilted up slightly toward the lens. {photo_style}. {anti_illustration}"),
+
+        ("bottom_l",
+         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
+         f"Framing: LOW-ANGLE shot from LOWER LEFT, camera positioned below and to the left, looking up at the subject, "
+         f"dramatic heroic angle. {photo_style}. {anti_illustration}"),
+
+        ("bottom_r",
+         f"I NEED a real candid photograph. Same subject as a multi-angle photoshoot: a real human being, {subject}{outfit}. "
+         f"Framing: LOW-ANGLE shot from LOWER RIGHT, camera positioned below and to the right, looking up at the subject, "
+         f"dramatic heroic angle. {photo_style}. {anti_illustration}"),
+    ]
+    return views
+
+
 def build_song_cover_prompt(
     *,
     title: str,

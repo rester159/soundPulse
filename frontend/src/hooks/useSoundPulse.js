@@ -501,7 +501,33 @@ export function useAIArtists(rosterStatus = 'active') {
   return useQuery({
     queryKey: ['admin', 'ai-artists', rosterStatus],
     queryFn: () => makeRequest('GET', '/admin/artists', { roster_status: rosterStatus }),
-    staleTime: 30_000,
+    // Short staleTime + always refetch on window focus so
+    // portrait/persona updates become visible without a hard refresh.
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+export function useRegenerateArtistPortrait() {
+  return useMutation({
+    mutationFn: ({ artistId }) =>
+      makeRequest('POST', `/admin/artists/${artistId}/regenerate-portrait`, {}, {}),
+  })
+}
+
+export function useArtistReferenceSheet(artistId) {
+  return useQuery({
+    queryKey: ['admin', 'artists', artistId, 'reference-sheet'],
+    queryFn: () => makeRequest('GET', `/admin/artists/${artistId}/reference-sheet`),
+    enabled: !!artistId,
+    staleTime: 10_000,
+  })
+}
+
+export function useGenerateReferenceSheet() {
+  return useMutation({
+    mutationFn: ({ artistId }) =>
+      makeRequest('POST', `/admin/artists/${artistId}/generate-reference-sheet`, {}, {}),
   })
 }
 

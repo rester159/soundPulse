@@ -1,12 +1,105 @@
 import { useState } from 'react'
 import {
   Users, Loader2, ChevronDown, ChevronUp, Music2, CheckCircle2,
-  Mic, Palette, BookOpen, Hash, Plus, X,
+  Mic, Palette, BookOpen, Hash, Plus, X, RefreshCw, Camera,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  useAIArtists, useSongs, useCreateArtistFromDescription, getBaseUrl,
+  useAIArtists, useSongs, useCreateArtistFromDescription,
+  useRegenerateArtistPortrait, useArtistReferenceSheet,
+  useGenerateReferenceSheet, getBaseUrl,
 } from '../hooks/useSoundPulse'
+
+const VIEW_LABELS = {
+  front: 'Front',
+  side_l: 'Side L',
+  side_r: 'Side R',
+  back: 'Back',
+  top_l: 'Top L',
+  top_r: 'Top R',
+  bottom_l: 'Low L',
+  bottom_r: 'Low R',
+}
+
+function ReferenceSheetGrid({ artistId }) {
+  const { data, isLoading } = useArtistReferenceSheet(artistId)
+  const generate = useGenerateReferenceSheet()
+  const qc = useQueryClient()
+  const views = data?.data?.views || []
+
+  const handleGenerate = async () => {
+    if (!window.confirm('Generate the full 8-view reference sheet? Cost: $0.64 (8 × DALL-E 3 HD). This takes ~2-3 minutes.')) return
+    await generate.mutateAsync({ artistId })
+    qc.invalidateQueries({ queryKey: ['admin', 'artists', artistId, 'reference-sheet'] })
+    qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
+  }
+
+  if (isLoading) {
+    return <div className="text-[10px] text-zinc-500 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> Loading reference sheet...</div>
+  }
+
+  if (views.length === 0) {
+    return (
+      <div className="space-y-2">
+        <div className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+          <Palette size={10} /> 8-View Reference Sheet — PRD §20
+        </div>
+        <div className="bg-zinc-950 border border-zinc-800 rounded p-3 text-center">
+          <div className="text-[11px] text-zinc-500 mb-2">
+            No reference sheet yet. 8 angles × $0.08 DALL-E 3 HD = $0.64
+          </div>
+          <button
+            onClick={handleGenerate}
+            disabled={generate.isPending}
+            className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[11px] font-medium rounded"
+          >
+            {generate.isPending ? (
+              <span className="flex items-center gap-1.5"><Loader2 size={10} className="animate-spin" /> Generating 8 views (~2-3 min)...</span>
+            ) : (
+              'Generate 8-view sheet ($0.64)'
+            )}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+          <Palette size={10} /> 8-View Reference Sheet ({views.length}/8)
+        </div>
+        <button
+          onClick={handleGenerate}
+          disabled={generate.isPending}
+          className="text-[10px] px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-400 rounded"
+        >
+          {generate.isPending ? 'Regenerating...' : 'Regen'}
+        </button>
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        {views.map(v => (
+          <div key={v.asset_id} className="relative">
+            <img
+              src={resolveBackendUrl(v.storage_url)}
+              alt={v.view_angle}
+              className="w-full aspect-square rounded object-cover border border-zinc-800"
+            />
+            <div className="absolute bottom-1 left-1 bg-zinc-950/90 border border-zinc-700 text-[9px] text-zinc-300 px-1.5 py-0.5 rounded">
+              {VIEW_LABELS[v.view_angle] || v.view_angle}
+            </div>
+            {v.is_canonical_sheet && (
+              <div className="absolute top-1 right-1 bg-violet-600/80 text-[9px] text-white px-1.5 py-0.5 rounded font-semibold">
+                ★
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function resolveBackendUrl(url) {
   if (!url) return url
@@ -91,6 +184,15 @@ function ArtistSongsList({ artistId }) {
 }
 
 function ArtistCard({ artist, expanded, onToggle }) {
+  const regenerate = useRegenerateArtistPortrait()
+  const qc = useQueryClient()
+
+  const handleRegenerate = async (e) => {
+    e.stopPropagation()
+    await regenerate.mutateAsync({ artistId: artist.artist_id })
+    qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
+  }
+
   const approvedBadge = artist.ceo_approved ? (
     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[9px] uppercase tracking-wider bg-emerald-500/10 border-emerald-500/30 text-emerald-300">
       <CheckCircle2 size={8} /> CEO Approved
@@ -143,12 +245,25 @@ function ArtistCard({ artist, expanded, onToggle }) {
       {expanded && (
         <div className="border-t border-zinc-800 p-4 space-y-3 bg-zinc-950/40">
           {portraitUrl && (
-            <div className="flex justify-center">
+            <div className="relative flex justify-center">
               <img
                 src={portraitUrl}
                 alt={artist.stage_name}
                 className="w-64 h-64 rounded-lg object-cover border border-zinc-700"
               />
+              <button
+                onClick={handleRegenerate}
+                disabled={regenerate.isPending}
+                className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 bg-zinc-900/80 hover:bg-violet-600/40 border border-zinc-700 text-zinc-300 text-[10px] rounded backdrop-blur transition-colors disabled:opacity-40"
+                title="Regenerate portrait"
+              >
+                {regenerate.isPending ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : (
+                  <Camera size={11} />
+                )}
+                Regen
+              </button>
             </div>
           )}
           {/* Audience tags */}
@@ -161,6 +276,9 @@ function ArtistCard({ artist, expanded, onToggle }) {
               ))}
             </div>
           )}
+
+          {/* 8-view reference sheet (PRD §20) */}
+          <ReferenceSheetGrid artistId={artist.artist_id} />
 
           {/* DNA blocks */}
           <div className="grid grid-cols-2 gap-2">
