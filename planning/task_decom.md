@@ -187,8 +187,8 @@ These are tables referenced by §24–47 logic that still need schema + models.
 - [ ] **T-181** [§29] Submission ordering DAG — enforce "distribution → identifiers → rights → marketing"
 - [ ] **T-182** [§30] LabelGrid distribution connector — OAuth setup, metadata push, submission polling
       **Blocked by:** LabelGrid account provisioning
-- [ ] **T-183** [§30] Release assembly service — bundle song(s) into a release row + release_track_record. **This is the sole place `releases` rows get created** per the §24 deliberate separation — generation never does it. Flips `songs_master.status` from `qa_passed` to `assigned_to_release` and populates `release_id`.
-      **Depends:** T-101, T-102
+- [x] **T-183** [§30] Release assembly service — bundle song(s) into a release row + release_track_record. **This is the sole place `releases` rows get created** per the §24 deliberate separation — generation never does it. Flips `songs_master.status` from `qa_passed` to `assigned_to_release` and populates `release_id`. Endpoints: POST/GET /admin/releases, GET /admin/releases/{id} detail, POST/DELETE /admin/releases/{id}/tracks, plus POST /admin/songs/{id}/mark-qa-passed manual bypass until T-162 lands.
+      ✓ shipped 2026-04-12 commit fba0772
 - [ ] **T-184** [§29] ISRC/UPC ingestion — on distributor ACK, pull identifiers and update `songs_master.isrc` + `releases.upc`
       **Depends:** T-182, T-183
 - [ ] **T-185** [§29] Submission status poll worker — 30-min interval for non-terminal submissions
@@ -339,3 +339,4 @@ These are tables referenced by §24–47 logic that still need schema + models.
 - 2026-04-12: Audio self-hosting fix — migration 016 music_generation_audio sidecar, streaming endpoint, Classical song marked expired (commit feb152e)
 - 2026-04-12: PRD §24 clarified — release assembly is a SEPARATE step, not bundled into generation. Status lifecycle enumerated: draft → qa_pending → qa_passed → assigned_to_release → submitted → live.
 - 2026-04-12: T-160 song generation orchestrator — POST /admin/blueprints/{id}/generate-song + generation_orchestrator service + music_generation_calls.song_id FK + poll handler _materialize_song_audio helper (commit 78b1cfa)
+- 2026-04-12: T-183 release assembly — 5 endpoints for releases + tracks + manual qa-pass bypass (commit fba0772)
