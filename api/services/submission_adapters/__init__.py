@@ -18,3 +18,6 @@ from . import mlc  # noqa: F401
 from . import submithub  # noqa: F401
 from . import youtube_content_id  # noqa: F401
 from . import playwright_distributors  # noqa: F401  # tunecore, cd-baby, amuse, unitedmasters
+from . import pros_and_rights  # noqa: F401  # bmi, soundexchange
+from . import sync_and_playlists  # noqa: F401  # musicbed, marmoset, artlist, groover, playlistpush, spotify_editorial, apple_music_for_artists
+from . import tiktok_upload  # noqa: F401
