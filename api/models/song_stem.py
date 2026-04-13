@@ -39,6 +39,9 @@ class SongStemJob(Base):
     )
     source_audio_url: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    # 'full' (download→tempo-lock→Demucs→entry-lock→mix) or 'remix_only'
+    # (reuse cached vocals_only, re-trim + re-mix only). See migration 025.
+    job_type: Mapped[str] = mapped_column(Text, nullable=False, default="full")
     worker_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

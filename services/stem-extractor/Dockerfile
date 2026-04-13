@@ -29,10 +29,18 @@ RUN pip install --no-cache-dir \
     httpx==0.28.1 \
     python-dotenv==1.0.1
 
-# librosa for the tempo-lock / phase-lock pre-pass (BPM detection +
-# onset cross-correlation). Pulls scipy + numba + soundfile; ~200 MB
-# install but bulletproof for beat tracking on full-mix tracks.
+# librosa for the tempo-lock pre-pass (BPM detection), the
+# entry-point pre-pass (pyin pitch verification, agglomerative
+# segmentation, spectral flatness), and the instrumental analysis
+# cache (key detection, duration). Pulls scipy + numba + soundfile;
+# ~200 MB install but bulletproof for MIR tasks.
 RUN pip install --no-cache-dir librosa==0.10.1
+
+# silero-vad for the Suno-side vocal entry detection. ~2 MB PyTorch
+# JIT model bundled with the wheel (no torch.hub fetch at runtime),
+# rejects Demucs drum/bass bleed that naive RMS threshold picks up.
+# PyTorch is already installed above — this is pure Python glue.
+RUN pip install --no-cache-dir silero-vad==5.1
 
 # Pre-download the default Demucs model weights at build time so the
 # first job doesn't pay a ~500MB cold start. 'htdemucs' is the

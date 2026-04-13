@@ -6270,6 +6270,197 @@ async def list_instrumentals(
     }
 
 
+@router.get("/api/v1/admin/instrumentals/{instrumental_id}/analysis")
+async def get_instrumental_analysis(
+    instrumental_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Return cached librosa analysis for an instrumental. Used by the
+    stem-extractor worker to skip re-analysis on repeated use, and by
+    the Songs UI nudge control to show the current detected entry
+    point. Returns empty fields if never analyzed."""
+    import uuid as _uuid
+    from api.models.instrumental import Instrumental
+    try:
+        iid = _uuid.UUID(instrumental_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid instrumental_id")
+    row = (await db.execute(
+        select(Instrumental).where(Instrumental.id == iid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail="not found")
+    return {
+        "instrumental_id": str(iid),
+        "vocal_entry_seconds": row.vocal_entry_seconds,
+        "vocal_entry_source": row.vocal_entry_source,
+        "analysis_json": row.analysis_json,
+        "analyzed_at": row.analyzed_at.isoformat() if row.analyzed_at else None,
+    }
+
+
+@router.post("/api/v1/admin/instrumentals/{instrumental_id}/analysis")
+async def post_instrumental_analysis(
+    instrumental_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Stem-extractor worker posts back auto-detected librosa features
+    for an instrumental on first use. Subsequent jobs read from the
+    cache via GET above. Body:
+      {
+        analysis_json: {...},
+        vocal_entry_seconds: float|null,
+        vocal_entry_source: 'auto'|null
+      }
+    Does NOT overwrite vocal_entry_source='manual' — the CEO's nudge
+    wins over the auto-detector."""
+    import uuid as _uuid
+    from api.models.instrumental import Instrumental
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        iid = _uuid.UUID(instrumental_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid instrumental_id")
+    row = (await db.execute(
+        select(Instrumental).where(Instrumental.id == iid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail="not found")
+
+    row.analysis_json = body.get("analysis_json") or row.analysis_json
+    row.analyzed_at = _dt.now(_tz.utc)
+
+    # Only overwrite the vocal entry if the existing value is not
+    # manual (CEO correction always wins over auto-detect).
+    if row.vocal_entry_source != "manual":
+        if "vocal_entry_seconds" in body:
+            row.vocal_entry_seconds = body["vocal_entry_seconds"]
+        if "vocal_entry_source" in body:
+            row.vocal_entry_source = body["vocal_entry_source"]
+
+    await db.commit()
+    return {
+        "instrumental_id": str(iid),
+        "vocal_entry_seconds": row.vocal_entry_seconds,
+        "vocal_entry_source": row.vocal_entry_source,
+        "analyzed_at": row.analyzed_at.isoformat(),
+    }
+
+
+@router.patch("/api/v1/admin/instrumentals/{instrumental_id}/vocal-entry")
+async def patch_instrumental_vocal_entry(
+    instrumental_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    CEO 'nudge vocal entry' endpoint. Body:
+      {
+        vocal_entry_seconds: float,
+        song_id: uuid (optional — triggers a remix_only re-job for
+                       this song using the cached vocals_only stem,
+                       so the CEO can hear the nudged mix in ~10 s)
+      }
+    Sets vocal_entry_source='manual' so subsequent auto-detect runs
+    don't overwrite it. If song_id is provided, enqueues a remix_only
+    job that uses the stored vocals_only stem from song_stems and
+    re-runs only the ffmpeg trim+mix (skipping 15 min of Demucs).
+    """
+    import uuid as _uuid
+    from api.models.instrumental import Instrumental
+    from datetime import datetime as _dt, timezone as _tz
+    from sqlalchemy import text as _text
+    try:
+        iid = _uuid.UUID(instrumental_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid instrumental_id")
+    if "vocal_entry_seconds" not in body:
+        raise HTTPException(400, detail="vocal_entry_seconds required")
+    try:
+        new_entry = float(body["vocal_entry_seconds"])
+    except (TypeError, ValueError):
+        raise HTTPException(400, detail="vocal_entry_seconds must be a number")
+    if new_entry < 0 or new_entry > 300:
+        raise HTTPException(400, detail="vocal_entry_seconds out of range [0, 300]")
+
+    row = (await db.execute(
+        select(Instrumental).where(Instrumental.id == iid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail="instrumental not found")
+
+    row.vocal_entry_seconds = new_entry
+    row.vocal_entry_source = "manual"
+    row.analyzed_at = _dt.now(_tz.utc)
+    await db.commit()
+
+    remix_job_id = None
+    song_id_raw = body.get("song_id")
+    if song_id_raw:
+        try:
+            sid = _uuid.UUID(song_id_raw)
+        except ValueError:
+            raise HTTPException(400, detail="invalid song_id")
+        # Confirm the song has a cached vocals_only stem — otherwise
+        # remix_only can't run. If missing, instruct the caller to
+        # re-run the full pipeline instead.
+        has_vocals = (await db.execute(
+            _text("""
+                SELECT 1 FROM song_stems
+                WHERE song_id = :sid AND stem_type = 'vocals_only'
+                LIMIT 1
+            """),
+            {"sid": sid},
+        )).scalar()
+        if not has_vocals:
+            raise HTTPException(
+                409,
+                detail=(
+                    "song has no cached vocals_only stem — run the full "
+                    "stem extraction first"
+                ),
+            )
+        # Look up the original music_generation_call_id + source_audio_url
+        # so the remix_only job keeps the full lineage.
+        ref = (await db.execute(
+            _text("""
+                SELECT music_generation_call_id, source_audio_url
+                FROM song_stem_jobs
+                WHERE song_id = :sid AND status = 'done'
+                ORDER BY completed_at DESC
+                LIMIT 1
+            """),
+            {"sid": sid},
+        )).fetchone()
+        if ref is None:
+            raise HTTPException(
+                409, detail="no completed stem job found to base remix on"
+            )
+        new_job = (await db.execute(
+            _text("""
+                INSERT INTO song_stem_jobs
+                    (song_id, music_generation_call_id, source_instrumental_id,
+                     source_audio_url, status, job_type)
+                VALUES (:sid, :cid, :iid, :src, 'pending', 'remix_only')
+                RETURNING id
+            """),
+            {"sid": sid, "cid": ref[0], "iid": iid, "src": ref[1]},
+        )).fetchone()
+        await db.commit()
+        remix_job_id = str(new_job[0])
+
+    return {
+        "instrumental_id": str(iid),
+        "vocal_entry_seconds": row.vocal_entry_seconds,
+        "vocal_entry_source": row.vocal_entry_source,
+        "remix_job_id": remix_job_id,
+    }
+
+
 @router.delete("/api/v1/admin/instrumentals/{instrumental_id}")
 async def delete_instrumental(
     instrumental_id: str,
@@ -7009,7 +7200,8 @@ async def worker_stem_claim_next(
             SELECT j.id, j.song_id, j.source_audio_url, j.source_instrumental_id,
                    j.retry_count,
                    sm.title, ai.stage_name,
-                   i.content_type AS instr_content_type
+                   i.content_type AS instr_content_type,
+                   j.job_type
             FROM song_stem_jobs j
             LEFT JOIN songs_master sm ON sm.song_id = j.song_id
             LEFT JOIN ai_artists ai ON ai.artist_id = sm.primary_artist_id
@@ -7063,6 +7255,7 @@ async def worker_stem_claim_next(
             "retry_count": row[4],
             "song_title": row[5],
             "artist_stage_name": row[6],
+            "job_type": row[8] or "full",
             "worker_id": worker_id,
         }
     }
@@ -7227,7 +7420,7 @@ async def list_song_stems(
     job_row = (await db.execute(
         _text("""
             SELECT id, status, error_message, claimed_at, completed_at,
-                   retry_count, worker_id
+                   retry_count, worker_id, source_instrumental_id, job_type
             FROM song_stem_jobs
             WHERE song_id = :sid
             ORDER BY created_at DESC
@@ -7265,6 +7458,8 @@ async def list_song_stems(
             "completed_at": job_row[4].isoformat() if job_row and job_row[4] else None,
             "retry_count": job_row[5] if job_row else 0,
             "worker_id": job_row[6] if job_row else None,
+            "source_instrumental_id": str(job_row[7]) if job_row and job_row[7] else None,
+            "job_type": job_row[8] if job_row else None,
         },
         "stems": [
             {

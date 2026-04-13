@@ -2,10 +2,12 @@ import { useState } from 'react'
 import {
   Disc3, Loader2, ChevronDown, ChevronUp, CheckCircle2, Music2,
   Clock, FileAudio, AlertCircle, PlayCircle, Layers, Mic2,
+  Crosshair, Minus, Plus, Save,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useSongs, useSong, useMarkQaPassed, useSongStems, getBaseUrl,
+  useInstrumentalAnalysis, useNudgeVocalEntry,
 } from '../hooks/useSoundPulse'
 
 // Reuse the backend-relative → absolute URL helper
@@ -126,7 +128,9 @@ function StemAwareAudioPlayer({ song, masterUrl, masterMeta }) {
       )}
       {job && job.status === 'in_progress' && (
         <div className="flex items-center gap-1.5 text-[10px] text-violet-300">
-          <Loader2 size={10} className="animate-spin" /> Demucs separating vocals + mixing onto original instrumental…
+          <Loader2 size={10} className="animate-spin" /> {job.job_type === 'remix_only'
+            ? 'Remixing vocals onto instrumental…'
+            : 'Demucs separating vocals + mixing onto original instrumental…'}
         </div>
       )}
       {job && job.status === 'failed' && job.error_message && (
@@ -139,6 +143,126 @@ function StemAwareAudioPlayer({ song, masterUrl, masterMeta }) {
           <Loader2 size={10} className="animate-spin" /> Checking for stems…
         </div>
       )}
+
+      {/* Nudge vocal entry — CEO correction for the auto-detected
+          verse-1 start point on the source instrumental. Only shown
+          once the first full stem extraction has completed (the
+          remix_only path requires a cached vocals_only stem). */}
+      {job?.source_instrumental_id && stems.some(s => s.stem_type === 'vocals_only') && (
+        <VocalEntryNudge
+          instrumentalId={job.source_instrumental_id}
+          songId={song.song_id}
+          jobStatus={job.status}
+        />
+      )}
+    </div>
+  )
+}
+
+
+// Nudge control for the instrumental's vocal entry point. Shown when
+// a song has a completed stem job and a source instrumental. The
+// value lives on the instrumentals row (so it's reused across every
+// song that uses this beat); the "save" action here writes the new
+// value + enqueues a remix_only job for this specific song so the CEO
+// can hear the corrected mix without waiting 15 min for Demucs again.
+function VocalEntryNudge({ instrumentalId, songId, jobStatus }) {
+  const { data: analysisData } = useInstrumentalAnalysis(instrumentalId)
+  const analysis = analysisData?.data
+  const nudge = useNudgeVocalEntry()
+  const [localValue, setLocalValue] = useState(null)
+
+  // Initialize local state when server value arrives / changes
+  const serverValue = analysis?.vocal_entry_seconds
+  const source = analysis?.vocal_entry_source
+  const current = localValue !== null ? localValue : (serverValue ?? 0)
+  const dirty = localValue !== null && localValue !== serverValue
+
+  const adjust = (delta) => {
+    setLocalValue(Math.max(0, Number((current + delta).toFixed(3))))
+  }
+
+  const save = () => {
+    if (!dirty) return
+    nudge.mutate(
+      { instrumentalId, vocalEntrySeconds: current, songId },
+      { onSuccess: () => setLocalValue(null) },
+    )
+  }
+
+  const busy = nudge.isPending || jobStatus === 'in_progress' || jobStatus === 'pending'
+
+  return (
+    <div className="mt-2 p-2 rounded border border-zinc-800 bg-zinc-950/60 text-[10px]">
+      <div className="flex items-center gap-1.5 text-zinc-400 mb-1.5">
+        <Crosshair size={10} className="text-violet-300" />
+        <span className="uppercase tracking-wider">Vocal entry on instrumental</span>
+        {source && (
+          <span className={`ml-auto px-1.5 py-0.5 rounded text-[9px] ${
+            source === 'manual' ? 'bg-violet-500/20 text-violet-300' : 'bg-zinc-800 text-zinc-500'
+          }`}>
+            {source === 'manual' ? 'CEO-set' : 'auto-detected'}
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => adjust(-1)}
+          disabled={busy}
+          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
+          title="−1 second"
+        ><Minus size={10} /> 1s</button>
+        <button
+          onClick={() => adjust(-0.5)}
+          disabled={busy}
+          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
+          title="−500 ms"
+        ><Minus size={10} /> 0.5s</button>
+        <button
+          onClick={() => adjust(-0.1)}
+          disabled={busy}
+          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
+          title="−100 ms"
+        ><Minus size={10} /> 0.1s</button>
+        <div className="px-2 py-0.5 mx-1 rounded border border-zinc-800 bg-zinc-900 min-w-[60px] text-center font-mono">
+          {current.toFixed(3)}s
+        </div>
+        <button
+          onClick={() => adjust(0.1)}
+          disabled={busy}
+          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
+          title="+100 ms"
+        ><Plus size={10} /> 0.1s</button>
+        <button
+          onClick={() => adjust(0.5)}
+          disabled={busy}
+          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
+          title="+500 ms"
+        ><Plus size={10} /> 0.5s</button>
+        <button
+          onClick={() => adjust(1)}
+          disabled={busy}
+          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
+          title="+1 second"
+        ><Plus size={10} /> 1s</button>
+        <button
+          onClick={save}
+          disabled={!dirty || busy}
+          className={`ml-2 px-2 py-0.5 rounded border flex items-center gap-1 ${
+            dirty && !busy
+              ? 'bg-violet-500/20 border-violet-500 text-violet-200 hover:bg-violet-500/30'
+              : 'border-zinc-800 text-zinc-600 cursor-not-allowed'
+          }`}
+        >
+          {nudge.isPending ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+          Save &amp; Remix
+        </button>
+      </div>
+      <div className="mt-1.5 text-[9px] text-zinc-500">
+        Nudge where verse 1 starts on the instrumental, then Save & Remix re-runs only
+        the ffmpeg mix (~10 s) using the cached vocals stem. Value is saved to the
+        instrumental so all future songs using this beat inherit the correction.
+      </div>
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 
 export function getApiKey() {
@@ -682,6 +682,48 @@ export function useSongStems(songId) {
       return 15_000
     },
     staleTime: 10_000,
+  })
+}
+
+// Cached librosa analysis for an instrumental (detected BPM, key,
+// vocal entry, etc). Used by the Nudge Vocal Entry control on the
+// Songs page so the CEO can see what the worker auto-detected and
+// correct it if wrong.
+export function useInstrumentalAnalysis(instrumentalId) {
+  return useQuery({
+    queryKey: ['admin', 'instrumentals', instrumentalId, 'analysis'],
+    queryFn: () =>
+      makeRequest('GET', `/admin/instrumentals/${instrumentalId}/analysis`),
+    enabled: !!instrumentalId,
+    staleTime: 5_000,
+  })
+}
+
+// Nudge vocal entry for an instrumental. When songId is provided, the
+// API will enqueue a remix_only stem job that reuses the cached
+// vocals_only stem and only re-runs the ffmpeg mix — ~10 s instead of
+// 15 min. Use cases: (1) auto-detected entry is off by a bar, (2) CEO
+// wants to try a different section as the vocal drop.
+export function useNudgeVocalEntry() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ instrumentalId, vocalEntrySeconds, songId }) =>
+      makeRequest(
+        'PATCH',
+        `/admin/instrumentals/${instrumentalId}/vocal-entry`,
+        {},
+        { vocal_entry_seconds: vocalEntrySeconds, song_id: songId },
+      ),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({
+        queryKey: ['admin', 'instrumentals', variables.instrumentalId, 'analysis'],
+      })
+      if (variables.songId) {
+        qc.invalidateQueries({
+          queryKey: ['admin', 'songs', variables.songId, 'stems'],
+        })
+      }
+    },
   })
 }
 

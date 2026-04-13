@@ -1951,7 +1951,7 @@ live           → archived | taken_down
 
 **Why not Kie.ai's stems endpoint.** Probed 9 variants (`/api/v1/generate/stems`, `/vocal-separation`, `/vocal-removal`, `/audio-separation`, etc). All return 404. Kie.ai is a thin wrapper — Suno's own stems feature isn't passed through.
 
-### Schema (alembic 024)
+### Schema (alembic 024 + 025)
 
 ```sql
 song_stem_jobs (                  -- work queue
@@ -1961,6 +1961,7 @@ song_stem_jobs (                  -- work queue
     source_instrumental_id UUID FK → instrumentals,
     source_audio_url TEXT NOT NULL,   -- Suno output MP3 URL
     status TEXT CHECK IN ('pending','in_progress','done','failed'),
+    job_type TEXT CHECK IN ('full','remix_only') NOT NULL DEFAULT 'full',
     worker_id TEXT, claimed_at, completed_at,
     error_message, retry_count, params_json
 )
@@ -1976,7 +1977,21 @@ song_stems (                      -- output artifacts
     size_bytes INT, duration_seconds FLOAT, loudness_lufs FLOAT,
     UNIQUE (song_id, stem_type)
 )
+
+-- Migration 025 columns on the existing instrumentals table (analysis
+-- cache + CEO override for the entry-point alignment pipeline):
+instrumentals.vocal_entry_seconds  FLOAT        -- where verse 1 starts, seconds from t=0
+instrumentals.vocal_entry_source   TEXT CHECK IN ('auto','manual')
+instrumentals.analysis_json        JSONB        -- {detected_bpm, detected_key_pitch_class,
+                                                -- detected_duration_seconds, vocal_entry_method}
+instrumentals.analyzed_at          TIMESTAMPTZ  -- cache marker; NULL = re-analyze on next use
 ```
+
+### Admin endpoints (migration 025 additions)
+
+- `GET /admin/instrumentals/{id}/analysis` — returns cached analysis payload. Used by the stem-extractor worker to skip re-analysis on repeated use.
+- `POST /admin/instrumentals/{id}/analysis` — worker writeback of detected features. Does NOT overwrite `vocal_entry_source='manual'` — the CEO's nudge always wins over auto-detect.
+- `PATCH /admin/instrumentals/{id}/vocal-entry` — CEO nudge endpoint. Body: `{vocal_entry_seconds, song_id?}`. Sets `vocal_entry_source='manual'` and optionally enqueues a `remix_only` job for the specified song so the new mix is audible in ~10 s.
 
 ### Worker flow
 
@@ -2000,15 +2015,28 @@ song_stems (                      -- output artifacts
    lock was skipped/failed):
      python -m demucs -n htdemucs --mp3 suno_tempoed.mp3
      → demucs_out/htdemucs/suno_tempoed/{vocals,drums,bass,other}.mp3
-8. PHASE-LOCK PRE-MIX PASS (librosa onset cross-correlation):
-   - Load first 16 s of instrumental and tempo-locked Suno full mix
-   - librosa.onset.onset_strength on both (hop=512)
-   - Zero-mean; np.correlate(env_tgt, env_ref, mode='full')
-   - Peak → lag_frames → offset_seconds
-   - If 0.010 < |offset| < 2.0 s:
-       offset > 0 (suno late):  ffmpeg -ss <offset> vocals.mp3 → vocals_phase_locked.mp3
-       offset < 0 (suno early): ffmpeg -af adelay=<ms>|<ms>    → vocals_phase_locked.mp3
-     Sub-10ms is noise; >2s is probably intro-length mismatch, not phase → skip.
+8. ENTRY-POINT-LOCK PRE-MIX PASS (silero-vad + librosa):
+   - (a) Suno side — find vocal entry in the Demucs vocals stem:
+         silero-vad @ 16 kHz → first speech window with min_speech_duration=250ms
+         pyin pitch verification on that window (voiced_prob > 0.5 in 40% of frames)
+         beat_track on vocals stem → snap to nearest beat within 200ms
+         → t_voc_suno (seconds)
+   - (b) Instrumental side — look up cached value, compute on cache miss:
+         GET /admin/instrumentals/{id}/analysis
+         if cache hit (vocal_entry_source='auto' or 'manual'):
+             t_instr_entry = cached.vocal_entry_seconds
+         else:
+             agglomerative segmentation on chroma_cqt → first boundary >2s
+             spectral_flatness jump detection → first frame >1.5× baseline
+             vote between the two; return earlier if they disagree
+             POST /admin/instrumentals/{id}/analysis {vocal_entry_seconds, analysis_json}
+             → populates the cache for all future jobs on this beat
+   - (c) Apply shift:
+         shift = t_instr_entry - t_voc_suno
+         if shift > 0:   ffmpeg adelay (pad silence at start)
+         if shift < 0:   ffmpeg -ss (trim start)
+         |shift| < 10ms: no-op
+       → vocals_entry_locked.mp3
 9. Worker runs the final amix:
      ffmpeg -i vocals_phase_locked.mp3 -i instrumental.mp3
        -filter_complex '[0:a]volume=1.25[v];[1:a]volume=1.0[i];[v][i]amix=...'
@@ -2021,9 +2049,42 @@ song_stems (                      -- output artifacts
 11. API writes one song_stems row per stem, flips job to 'done'
 ```
 
-### Tempo-lock + phase-lock rationale
+### Tempo-lock + entry-point-lock rationale
 
-Suno's add-vocals mode takes the uploaded instrumental as a *beat reference* but does not atomically lock to it — the generated full mix typically drifts by 0.5–2 % in BPM and 50–300 ms in downbeat phase vs. the source. When Demucs vocals are laid over the original instrumental without correction, the two clocks fight each other and the mix sounds "close but off", especially as the song progresses (drift compounds).
+Suno's add-vocals mode takes the uploaded instrumental as a *beat reference* but does not atomically lock to it. Two distinct misalignments show up:
+
+1. **Tempo drift** — Suno's recreated full mix can differ from the source instrumental by 0.5–2 % in BPM. A linear stretch fixes it.
+2. **Structural drift (intro-length mismatch)** — Suno will happily give you a 4-bar intro when your real beat has a 16-bar buildup. Phase-correlating the heads of both files snaps them to t=0 and puts the vocal on top of the wrong bar of the intro. Cross-correlation cannot save this — it's a *structural* problem, not a phase problem. The fix is to align **vocal entry time in the Suno stem** to **intended vocal entry time in the real instrumental** — neither of which is t=0.
+
+**Vocal entry detection stack (Suno side, post-Demucs).** Naive RMS-threshold picks up Demucs drum/bass bleed, breath noise, and ad-libs. We use a three-stage filter instead:
+
+1. **silero-vad** — a ~2 MB PyTorch JIT model trained on voice activity. It looks for voice-*shaped* spectral content, not just energy, so kick drum ghosts and hi-hat bleed are rejected. Runs at >1000× real-time on CPU. Threshold 0.5, min speech duration 250 ms, min silence 150 ms.
+2. **librosa.pyin pitch verification** — on the candidate window, check that the fundamental is stable (fmin=C2 65 Hz, fmax=C6 1047 Hz) with voiced-probability > 0.5 in at least 40% of frames. Singing has a clean pitched fundamental; Demucs leakage has chaotic or no pitch. Drops the remaining false positives.
+3. **Downbeat snap** — `librosa.beat.beat_track` → nearest beat within 200 ms of the detected entry. Ensures the cut always lands on a musical boundary.
+
+On silero-vad unavailability, falls back to `librosa.effects.split` (less accurate, but ships a value).
+
+**Vocal entry detection stack (instrumental side, no vocals to help).** Harder problem — no signal says "verse starts here". Best-effort heuristic using two independent signals:
+
+1. **Agglomerative segmentation on CQT features** — `librosa.segment.agglomerative(chroma_cqt, k=5)`. First boundary > 2 s usually marks the end of the intro.
+2. **Spectral flatness jump** — `librosa.feature.spectral_flatness` 1-second median-smoothed, find first frame where smoothed flatness > 1.5× the baseline (first 2 s median). Captures the "beat drops" moment.
+
+When both signals agree within 2 s, confidence is high. When they disagree, the earlier is used and flagged `low_confidence` so the UI can prompt the CEO to correct it.
+
+**Instrumental feature cache.** Every instrumental is analyzed at most once. On cache miss, the stem-extractor runs the full librosa pass and POSTs the results back to `/admin/instrumentals/{id}/analysis`, which writes:
+- `instrumentals.vocal_entry_seconds` — the auto-detected entry time
+- `instrumentals.vocal_entry_source = 'auto'`
+- `instrumentals.analysis_json` — BPM, key, duration, detection method
+- `instrumentals.analyzed_at` — cache marker
+
+Subsequent jobs using the same instrumental read the cache and skip the librosa instrumental-side analysis entirely. Cuts ~50% of librosa time and makes BPM/key available to the blueprint generator for future prompts.
+
+**CEO override (the nudge control).** When auto-detect gets it wrong, the Songs-page audio panel shows a "Vocal entry on instrumental" row with −1s / −0.5s / −0.1s / +0.1s / +0.5s / +1s buttons and a "Save & Remix" button. Save writes:
+1. `PATCH /admin/instrumentals/{id}/vocal-entry` with `{vocal_entry_seconds, song_id}`.
+2. Sets `vocal_entry_source = 'manual'` so future auto-detect runs do NOT overwrite the CEO's value.
+3. Enqueues a **`remix_only` stem job** for the specific song.
+
+The `remix_only` path is the key to making nudging fast: the worker skips Demucs entirely and reuses the cached `vocals_only` stem from `song_stems`, then only re-runs the trim + ffmpeg mix. **End-to-end under 10 seconds** instead of ~15 minutes for a full pipeline re-run. The CEO can iterate on a mix in a few nudges.
 
 **Why measure BPM on the full Suno mix, not the vocals stem.** Librosa's beat tracker relies on strong onsets (drum hits, bass plucks). Vocals alone — especially held notes — produce weak, ambiguous onsets and BPM estimates that hallucinate half/double-time. The full Suno mix still has Suno's recreated drums + bass, which give a rock-solid BPM reading. So we measure BPM *before* Demucs splits the track, then time-stretch *before* Demucs runs. The vocals stem inherits the locked tempo for free.
 
@@ -2031,7 +2092,18 @@ Suno's add-vocals mode takes the uploaded instrumental as a *beat reference* but
 
 **Why `atempo`, not `rubberband`.** ffmpeg's `rubberband` filter (high-quality time-stretch) requires `--enable-librubberband` at build time, which Debian's stock `ffmpeg` package does not ship. `atempo` is pitch-preserving, built-in, and transparent for the sub-3% corrections we need. Swap to rubberband later if we ever see stretch ratios outside that sweet spot.
 
-**Graceful degradation.** Every step in the pre-pass is wrapped in try/except — any librosa failure, numpy error, or ffmpeg hiccup logs a warning and continues to the next stage using the unmodified audio. A broken tempo lock never blocks a song from reaching `final_mixed`. The `alignment_summary` JSON blob is logged on every job so we can diagnose drift patterns offline.
+**Graceful degradation.** Every step in the pre-pass is wrapped in try/except — any librosa failure, silero-vad unavailability, numpy error, or ffmpeg hiccup logs a warning and continues to the next stage using the unmodified audio. A broken tempo lock or missed entry point never blocks a song from reaching `final_mixed`. The `alignment_summary` JSON blob is logged on every job so we can diagnose drift patterns offline.
+
+### Job types
+
+The `song_stem_jobs.job_type` column dispatches between two worker flows:
+
+| Value | Steps | Wall time | When used |
+|---|---|---|---|
+| `full` (default) | download → tempo-lock → Demucs → entry-point-lock → ffmpeg mix → ack 3 stems | ~2–15 min | First time a song is extracted. Auto-enqueued from `_enqueue_stem_job_if_needed` when a Suno add-vocals poll returns success. |
+| `remix_only` | download cached vocals_only + instrumental → entry-point-lock → ffmpeg mix → ack just `final_mixed` | ~5–10 s | After a CEO nudges the vocal entry point via the Songs-page UI. Triggered by `PATCH /admin/instrumentals/{id}/vocal-entry` with `song_id`. |
+
+The `remix_only` path is fundamentally why the nudge UX works — without it, every correction would cost 15 minutes of Demucs wall time and the CEO would stop iterating after one try.
 
 ### Admin endpoints
 
