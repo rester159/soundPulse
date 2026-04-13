@@ -6325,9 +6325,23 @@ async def _generate_song_with_instrumental_core(
     if not genre_for_prompt:
         genre_for_prompt = artist.primary_genre
 
-    # Fresh smart_prompt with artist.edge_profile
-    from api.services.smart_prompt import generate_smart_prompt
+    # ---- LYRICS RESOLUTION ----
+    # The orchestrator needs an actual STYLE + LYRICS block to pass to
+    # Suno. Three possible sources in priority order:
+    #   1. Blueprint path: fresh smart_prompt(genre, edge_profile).
+    #      Requires breakout_events rows for the genre (breakout-data-
+    #      driven path). If it works we use it verbatim.
+    #   2. Blueprint path fallback: the blueprint's cached
+    #      smart_prompt_text (hand-written or from a prior gen).
+    #   3. Freeform path: call generate_freeform_lyrics(artist,
+    #      instrumental, blueprint) which is a dedicated lyric-writer
+    #      LLM action that respects voice_dna.vocal_mode,
+    #      edge_profile, hook isolation rule, earworm rule, and the
+    #      artist's persona/lyrical DNA. This is the critical path
+    #      when there's no breakout data for the genre (e.g. hip-hop
+    #      which has no breakout_events in our DB yet).
     fresh_text: str | None = None
+    from api.services.smart_prompt import generate_smart_prompt
     try:
         fresh = await generate_smart_prompt(
             db,
@@ -6338,11 +6352,34 @@ async def _generate_song_with_instrumental_core(
         if fresh and fresh.get("prompt"):
             fresh_text = fresh["prompt"]
     except Exception:
-        logger.exception("[instrumental-gen] fresh smart_prompt failed")
+        logger.exception("[instrumental-gen] smart_prompt path failed")
+
+    # If smart_prompt returned None (e.g. no breakout data), or we're
+    # on the freeform path, fall through to the dedicated lyrics writer.
+    if not fresh_text:
+        from api.services.freeform_lyrics import generate_freeform_lyrics
+        try:
+            freeform = await generate_freeform_lyrics(
+                db,
+                artist=artist,
+                instrumental=instrumental,
+                blueprint=blueprint,
+            )
+            if freeform.get("prompt"):
+                fresh_text = freeform["prompt"]
+                logger.info(
+                    "[instrumental-gen] freeform_lyrics succeeded — vocal_mode=%s title=%s",
+                    freeform.get("vocal_mode"), freeform.get("title"),
+                )
+            else:
+                logger.warning(
+                    "[instrumental-gen] freeform_lyrics returned no prompt: %s",
+                    freeform.get("error"),
+                )
+        except Exception:
+            logger.exception("[instrumental-gen] freeform_lyrics raised")
 
     # Assemble the blueprint-shaped dict the orchestrator expects.
-    # If the caller didn't pass a blueprint, synthesize one from the
-    # artist + instrumental so the orchestrator still works.
     if blueprint is not None:
         blueprint_dict = {
             "smart_prompt_text": fresh_text or blueprint.smart_prompt_text,
@@ -6351,13 +6388,25 @@ async def _generate_song_with_instrumental_core(
             "target_themes": blueprint.target_themes or [],
         }
     else:
+        # Freeform fallback text is LAST resort — only hit when both
+        # smart_prompt AND freeform_lyrics failed. This produces a
+        # style-only prompt with no lyric content, which the CEO
+        # flagged as nonsensical, so we log loudly when it triggers.
+        if not fresh_text:
+            logger.error(
+                "[instrumental-gen] CRITICAL: no lyrics source worked for %s — "
+                "falling back to style-only prompt which will produce nonsense",
+                artist.stage_name,
+            )
+            fresh_text = (
+                f"STYLE: modern {genre_for_prompt} song for {artist.stage_name}, "
+                f"{(artist.voice_dna or {}).get('timbre_core', 'distinctive vocal')}, "
+                f"vocal_mode={(artist.voice_dna or {}).get('vocal_mode', 'sung')}, "
+                f"{instrumental.tempo_bpm or '?'} BPM {instrumental.key_hint or ''}"
+                "\n\nLYRICS:\n[Verse 1]\n(no lyrics generated — LLM path failed)"
+            )
         blueprint_dict = {
-            "smart_prompt_text": fresh_text or (
-                f"modern {genre_for_prompt} song for {artist.stage_name} — "
-                f"leverage {artist.voice_dna.get('timbre_core', 'distinctive vocal') if artist.voice_dna else 'distinctive vocal'} "
-                f"on a {instrumental.tempo_bpm or '?'} BPM "
-                f"{instrumental.key_hint or ''} backing track"
-            ),
+            "smart_prompt_text": fresh_text,
             "primary_genre": genre_for_prompt,
             "genre_id": genre_for_prompt,
             "target_themes": [],
@@ -6394,12 +6443,18 @@ async def _generate_song_with_instrumental_core(
         key_hint=instrumental.key_hint,
         model_variant=model_variant,
     )
+    # Pull vocal_mode off the artist's voice_dna JSONB — Jai-X = rapped,
+    # Kira Lune = sung, etc. Defaults to 'sung' if the field is missing.
+    artist_vocal_mode = None
+    if artist.voice_dna and isinstance(artist.voice_dna, dict):
+        artist_vocal_mode = artist.voice_dna.get("vocal_mode")
     try:
         task = await adapter.generate_with_instrumental(
             gen_params,
             instrumental_url=upload_url,
             title=title,
             vocal_gender=vocal_gender,
+            vocal_mode=artist_vocal_mode,
         )
     except ProviderError as e:
         raise HTTPException(503, detail=str(e))

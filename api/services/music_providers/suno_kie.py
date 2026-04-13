@@ -139,6 +139,7 @@ class SunoKieAdapter(ProviderAdapter):
         title: str,
         vocal_gender: str | None = None,
         negative_tags: str | None = None,
+        vocal_mode: str | None = None,
     ) -> GenerationTask:
         """
         Call Kie.ai's /api/v1/generate/add-vocals endpoint — upload an
@@ -177,8 +178,22 @@ class SunoKieAdapter(ProviderAdapter):
                     raw = raw[:idx] + raw[end + 2:]
         prompt = raw.strip()[:4800]  # add-vocals accepts richer prompts
 
-        # Build compact style descriptor (200 char cap)
+        # Build compact style descriptor (200 char cap). Vocal mode
+        # goes FIRST so Suno doesn't default to melodic singing — a
+        # rapped artist like Jai-X needs 'RAPPED VOCALS, spoken flow'
+        # at the head of the style string or Suno produces melodic
+        # hip-hop with sung hooks.
         style_bits: list[str] = []
+        if vocal_mode == "rapped":
+            style_bits.append("RAPPED VOCALS — spoken-flow bars, no melisma, no sung chorus")
+        elif vocal_mode == "sung":
+            style_bits.append("SUNG VOCALS with melodic hook")
+        elif vocal_mode == "spoken":
+            style_bits.append("SPOKEN WORD delivery")
+        elif vocal_mode == "chanted":
+            style_bits.append("CHANTED group-vocal hook")
+        elif vocal_mode == "mixed":
+            style_bits.append("RAPPED verses, SUNG chorus")
         if params.genre_hint:
             style_bits.append(params.genre_hint)
         if params.tempo_bpm:
@@ -189,11 +204,20 @@ class SunoKieAdapter(ProviderAdapter):
             style_bits.append(", ".join(params.mood_tags[:3]))
         style = ", ".join(style_bits)[:200] if style_bits else "modern pop"
 
+        # Default negative tags — add singing-specific exclusions for
+        # rapped mode so Suno doesn't drift into melodic territory.
+        effective_negative_tags = negative_tags
+        if not effective_negative_tags:
+            if vocal_mode == "rapped":
+                effective_negative_tags = "sung vocals, melodic singing, melisma, autotune, vocal runs, pop hook, lo-fi, amateur"
+            else:
+                effective_negative_tags = "lo-fi, distorted, amateur"
+
         payload: dict[str, Any] = {
             "prompt": prompt,
             "title": (title or "Untitled")[:80],
             "style": style,
-            "negativeTags": negative_tags or "lo-fi, distorted, amateur",
+            "negativeTags": effective_negative_tags,
             "uploadUrl": instrumental_url,
             "model": params.model_variant or DEFAULT_MODEL,
             "callBackUrl": os.environ.get(
