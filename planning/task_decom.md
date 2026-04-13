@@ -76,8 +76,8 @@ These are complete as of 2026-04-12. Listed here so the "what's built" story rea
 
 These are tables referenced by §24–47 logic that still need schema + models.
 
-- [ ] **T-100** [§17] `songs_master` migration (~95 fields per PRD DDL) + SQLAlchemy model + admin list endpoint
-      **Acceptance:** `POST /admin/songs` inserts a row, `GET /admin/songs/{id}` returns it, every field from PRD DDL present, unique constraint on ISRC.
+- [x] **T-100** [§17] `songs_master` migration (~80 fields per PRD DDL) + SQLAlchemy model + admin endpoints
+      **Acceptance:** `POST /admin/songs` inserts a row, `GET /admin/songs/{id}` returns it, every field from PRD DDL present, unique constraint on ISRC. ✓ shipped 2026-04-12 commit cc82211
 - [ ] **T-101** [§17] `releases` migration + model
       **Depends:** T-100
 - [ ] **T-102** [§17] `release_track_record` migration + model
@@ -333,3 +333,4 @@ These are tables referenced by §24–47 logic that still need schema + models.
 ## Completion log
 
 - 2026-04-12: T-001 through T-058 marked done (Phase 0 snapshot)
+- 2026-04-12: T-100 `songs_master` migration 014, model, 4 admin endpoints (commit cc82211)
