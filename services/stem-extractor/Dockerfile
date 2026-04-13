@@ -29,6 +29,11 @@ RUN pip install --no-cache-dir \
     httpx==0.28.1 \
     python-dotenv==1.0.1
 
+# librosa for the tempo-lock / phase-lock pre-pass (BPM detection +
+# onset cross-correlation). Pulls scipy + numba + soundfile; ~200 MB
+# install but bulletproof for beat tracking on full-mix tracks.
+RUN pip install --no-cache-dir librosa==0.10.1
+
 # Pre-download the default Demucs model weights at build time so the
 # first job doesn't pay a ~500MB cold start. 'htdemucs' is the
 # default hybrid-transformer model, best quality for 4-stem separation.

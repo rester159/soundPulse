@@ -163,6 +163,103 @@ def _duration_seconds(path: Path) -> float | None:
         return None
 
 
+# ---- Tempo-lock / phase-lock pre-pass --------------------------------
+#
+# Suno's output is beat-referenced to the uploaded instrumental but not
+# atomically locked — small BPM drift (typically <2%) and small
+# downbeat offsets leak through. When we mix Demucs'd vocals onto the
+# original instrumental the two clocks fight each other and it sounds
+# "close but off". This pre-pass fixes both:
+#
+#   1. BPM lock: measure Suno full-mix BPM and instrumental BPM, then
+#      time-stretch Suno (pitch-preserving ffmpeg atempo) to the
+#      instrumental's tempo BEFORE running Demucs. Vocals stem inherits
+#      the locked tempo for free.
+#
+#   2. Phase lock: cross-correlate the onset envelopes of the stretched
+#      Suno full-mix and the instrumental over the first 16 s to find
+#      the downbeat offset. Trim or pad the vocals stem by that offset
+#      before the final amix.
+#
+# Both steps are non-fatal: any failure in librosa / BPM estimation
+# falls back to the old unlocked mix with a warning.
+
+def _detect_bpm(path: Path) -> float:
+    """Return estimated BPM via librosa beat tracker. Reliable on full
+    mixes (drums + bass give strong onsets); DO NOT call on isolated
+    vocal stems — the estimator will hallucinate."""
+    import librosa
+    y, sr = librosa.load(str(path), sr=None, mono=True)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    # librosa 0.10 returns a 0-d numpy array; coerce to float
+    return float(tempo if not hasattr(tempo, "item") else tempo.item())
+
+
+def _time_stretch_ffmpeg(in_path: Path, out_path: Path, ratio: float) -> None:
+    """Time-stretch in_path so its tempo is multiplied by ratio, using
+    ffmpeg's atempo filter. Preserves pitch. atempo supports 0.5–2.0
+    in a single pass; for 1–3% drift it's well within the sweet spot."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(in_path),
+        "-filter:a", f"atempo={ratio:.6f}",
+        "-b:a", "192k",
+        str(out_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg atempo failed: {result.stderr[-400:]}")
+
+
+def _compute_phase_offset(reference_path: Path, target_path: Path) -> float:
+    """
+    Return seconds to advance the target to align it with the reference,
+    via onset-envelope cross-correlation over the first 16 s.
+
+      +  target is LATE vs reference → trim this many seconds from
+         target's start
+      -  target is EARLY vs reference → pad abs(this) seconds of
+         silence at target's start
+
+    Use the full (non-stemmed) Suno mix as target and the user's
+    instrumental as reference — both have drums/bass for reliable
+    onset detection.
+    """
+    import librosa
+    import numpy as np
+    y_ref, sr = librosa.load(str(reference_path), sr=None, mono=True, duration=16.0)
+    y_tgt, _ = librosa.load(str(target_path), sr=sr, mono=True, duration=16.0)
+    hop = 512
+    env_ref = librosa.onset.onset_strength(y=y_ref, sr=sr, hop_length=hop)
+    env_tgt = librosa.onset.onset_strength(y=y_tgt, sr=sr, hop_length=hop)
+    # Zero-mean so the DC component doesn't bias the correlation peak
+    env_ref = env_ref - env_ref.mean()
+    env_tgt = env_tgt - env_tgt.mean()
+    corr = np.correlate(env_tgt, env_ref, mode="full")
+    # For np.correlate(a, b, mode='full'), index (len(b)-1) is lag 0.
+    lag_frames = int(corr.argmax()) - (len(env_ref) - 1)
+    return float(lag_frames * hop / sr)
+
+
+def _trim_or_pad_start(in_path: Path, out_path: Path, *,
+                      trim_start_seconds: float = 0.0,
+                      pad_start_seconds: float = 0.0) -> None:
+    """Shift content at the start of an audio file via ffmpeg. Use
+    trim_start to advance (cut silence/drift off the head); use
+    pad_start to delay (insert silence at the head)."""
+    cmd = ["ffmpeg", "-y"]
+    if trim_start_seconds > 0:
+        cmd += ["-ss", f"{trim_start_seconds:.4f}"]
+    cmd += ["-i", str(in_path)]
+    if pad_start_seconds > 0:
+        delay_ms = int(pad_start_seconds * 1000)
+        cmd += ["-af", f"adelay={delay_ms}|{delay_ms}"]
+    cmd += ["-b:a", "192k", str(out_path)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg trim/pad failed: {result.stderr[-400:]}")
+
+
 # ---- Demucs separation ----
 
 def _run_demucs(input_path: Path, out_dir: Path) -> dict[str, Path]:
@@ -253,13 +350,74 @@ def process_job(job: dict) -> None:
                 log.warning("instrumental download failed (%s) — will skip mix step", e)
                 instr_path = None
 
-        # 3. Run Demucs
+        # 3. Tempo-lock pre-pass: stretch Suno full mix to the
+        #    instrumental's tempo before Demucs. Skip if no
+        #    instrumental, if the ratio is within noise, or if the
+        #    ratio is outside a sanity band (|Δ|>10% almost always
+        #    means the estimator picked a half/double-time octave).
+        demucs_input = suno_path
+        alignment_note: dict = {}
+        if instr_path is not None and instr_path.exists():
+            try:
+                suno_bpm = _detect_bpm(suno_path)
+                instr_bpm = _detect_bpm(instr_path)
+                ratio = instr_bpm / suno_bpm if suno_bpm > 0 else 1.0
+                alignment_note.update(
+                    suno_bpm=round(suno_bpm, 2),
+                    instr_bpm=round(instr_bpm, 2),
+                    tempo_ratio=round(ratio, 5),
+                )
+                log.info("BPM: suno=%.2f instr=%.2f ratio=%.4f",
+                         suno_bpm, instr_bpm, ratio)
+                if abs(ratio - 1.0) > 0.001 and 0.9 < ratio < 1.1:
+                    stretched = tmp / "suno_tempoed.mp3"
+                    _time_stretch_ffmpeg(suno_path, stretched, ratio)
+                    demucs_input = stretched
+                    alignment_note["tempo_locked"] = True
+                    log.info("tempo-locked suno → %.2f BPM (ratio %.4f)",
+                             instr_bpm, ratio)
+                else:
+                    alignment_note["tempo_locked"] = False
+            except Exception as e:
+                log.warning("tempo-lock pre-pass failed (%s) — using raw suno", e)
+                alignment_note["tempo_lock_error"] = str(e)[:200]
+
+        # 4. Run Demucs on the (possibly tempo-locked) Suno mix
         out_dir = tmp / "demucs_out"
         out_dir.mkdir()
-        stems_paths = _run_demucs(suno_path, out_dir)
+        stems_paths = _run_demucs(demucs_input, out_dir)
         vocal_path = stems_paths["vocals"]
 
-        # 4. Mix vocals + original instrumental (if we have one)
+        # 5. Phase-lock pre-mix pass: measure the downbeat offset
+        #    between the Demucs input (= what the vocals were split
+        #    from) and the real instrumental, then trim/pad the vocals
+        #    stem so their beat 1s line up. Skip if offset is subcent
+        #    (noise floor) or >2 s (probably an intro-length mismatch,
+        #    not a phase problem).
+        if instr_path is not None and instr_path.exists():
+            try:
+                offset_seconds = _compute_phase_offset(instr_path, demucs_input)
+                alignment_note["phase_offset_seconds"] = round(offset_seconds, 4)
+                log.info("phase offset: suno is %+.3f s vs instrumental",
+                         offset_seconds)
+                if 0.010 < abs(offset_seconds) < 2.0:
+                    aligned_vocals = tmp / "vocals_phase_locked.mp3"
+                    if offset_seconds > 0:
+                        _trim_or_pad_start(vocal_path, aligned_vocals,
+                                          trim_start_seconds=offset_seconds)
+                    else:
+                        _trim_or_pad_start(vocal_path, aligned_vocals,
+                                          pad_start_seconds=-offset_seconds)
+                    vocal_path = aligned_vocals
+                    alignment_note["phase_locked"] = True
+                    log.info("phase-locked vocals by %+.3f s", offset_seconds)
+                else:
+                    alignment_note["phase_locked"] = False
+            except Exception as e:
+                log.warning("phase-lock pre-pass failed (%s) — mixing as-is", e)
+                alignment_note["phase_lock_error"] = str(e)[:200]
+
+        # 6. Mix vocals + original instrumental (if we have one)
         final_mixed_path: Path | None = None
         if instr_path is not None and instr_path.exists():
             final_mixed_path = tmp / "final_mixed.mp3"
@@ -268,6 +426,9 @@ def process_job(job: dict) -> None:
             except Exception as e:
                 log.warning("ffmpeg mix failed: %s — final_mixed will not be stored", e)
                 final_mixed_path = None
+
+        if alignment_note:
+            log.info("alignment summary: %s", json.dumps(alignment_note))
 
         # 5. Build stems payload
         stems_payload: list[dict] = [

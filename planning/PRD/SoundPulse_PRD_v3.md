@@ -1988,17 +1988,50 @@ song_stems (                      -- output artifacts
 5. Worker downloads:
    - Suno output (source_audio_url) → suno.mp3
    - User's original instrumental (source_instrumental_url) → instrumental.mp3
-6. Worker runs: python -m demucs -n htdemucs --mp3 suno.mp3
-   → demucs_out/htdemucs/suno/{vocals,drums,bass,other}.mp3
-7. Worker runs: ffmpeg -i vocals.mp3 -i instrumental.mp3
-   -filter_complex '[0:a]volume=1.25[v];[1:a]volume=1.0[i];[v][i]amix=...'
-   → final_mixed.mp3
-   (Vocals boosted +25% so they sit on top without fighting the beat.
-    Tuning knob in services/stem-extractor/worker.py::_ffmpeg_mix)
-8. Base64-encode suno_original + vocals_only + final_mixed and POST
-   to /admin/worker/stem-ack/{job_id}
-9. API writes one song_stems row per stem, flips job to 'done'
+6. TEMPO-LOCK PRE-PASS (librosa + ffmpeg atempo):
+   - librosa.beat.beat_track(suno.mp3) → suno_bpm
+   - librosa.beat.beat_track(instrumental.mp3) → instr_bpm
+   - ratio = instr_bpm / suno_bpm
+   - If |ratio − 1| > 0.001 and ratio ∈ (0.9, 1.1):
+       ffmpeg -i suno.mp3 -filter:a atempo=<ratio> → suno_tempoed.mp3
+     atempo preserves pitch; ratios outside (0.9, 1.1) are almost
+     always half/double-time estimator octave errors → skip.
+7. Worker runs Demucs on the tempo-locked track (or raw if tempo
+   lock was skipped/failed):
+     python -m demucs -n htdemucs --mp3 suno_tempoed.mp3
+     → demucs_out/htdemucs/suno_tempoed/{vocals,drums,bass,other}.mp3
+8. PHASE-LOCK PRE-MIX PASS (librosa onset cross-correlation):
+   - Load first 16 s of instrumental and tempo-locked Suno full mix
+   - librosa.onset.onset_strength on both (hop=512)
+   - Zero-mean; np.correlate(env_tgt, env_ref, mode='full')
+   - Peak → lag_frames → offset_seconds
+   - If 0.010 < |offset| < 2.0 s:
+       offset > 0 (suno late):  ffmpeg -ss <offset> vocals.mp3 → vocals_phase_locked.mp3
+       offset < 0 (suno early): ffmpeg -af adelay=<ms>|<ms>    → vocals_phase_locked.mp3
+     Sub-10ms is noise; >2s is probably intro-length mismatch, not phase → skip.
+9. Worker runs the final amix:
+     ffmpeg -i vocals_phase_locked.mp3 -i instrumental.mp3
+       -filter_complex '[0:a]volume=1.25[v];[1:a]volume=1.0[i];[v][i]amix=...'
+       → final_mixed.mp3
+     (Vocals boosted +25% so they sit on top without fighting the beat.
+      Tuning knob in services/stem-extractor/worker.py::_ffmpeg_mix)
+10. Base64-encode suno_original (the UNMODIFIED Suno download — the
+    tempo-locked intermediate is discarded) + vocals_only + final_mixed
+    and POST to /admin/worker/stem-ack/{job_id}
+11. API writes one song_stems row per stem, flips job to 'done'
 ```
+
+### Tempo-lock + phase-lock rationale
+
+Suno's add-vocals mode takes the uploaded instrumental as a *beat reference* but does not atomically lock to it — the generated full mix typically drifts by 0.5–2 % in BPM and 50–300 ms in downbeat phase vs. the source. When Demucs vocals are laid over the original instrumental without correction, the two clocks fight each other and the mix sounds "close but off", especially as the song progresses (drift compounds).
+
+**Why measure BPM on the full Suno mix, not the vocals stem.** Librosa's beat tracker relies on strong onsets (drum hits, bass plucks). Vocals alone — especially held notes — produce weak, ambiguous onsets and BPM estimates that hallucinate half/double-time. The full Suno mix still has Suno's recreated drums + bass, which give a rock-solid BPM reading. So we measure BPM *before* Demucs splits the track, then time-stretch *before* Demucs runs. The vocals stem inherits the locked tempo for free.
+
+**Why pitch-shift is NOT in the pipeline.** Pitch-shifting vocals by more than ~1 semitone produces audible formant warping (chipmunk effect). Suno already uses the user instrumental as a key reference, so key drift is rare in practice. If a future song comes out in the wrong key, fix it at the source (regenerate with a more specific key prompt) rather than shifting post-hoc.
+
+**Why `atempo`, not `rubberband`.** ffmpeg's `rubberband` filter (high-quality time-stretch) requires `--enable-librubberband` at build time, which Debian's stock `ffmpeg` package does not ship. `atempo` is pitch-preserving, built-in, and transparent for the sub-3% corrections we need. Swap to rubberband later if we ever see stretch ratios outside that sweet spot.
+
+**Graceful degradation.** Every step in the pre-pass is wrapped in try/except — any librosa failure, numpy error, or ffmpeg hiccup logs a warning and continues to the next stage using the unmodified audio. A broken tempo lock never blocks a song from reaching `final_mixed`. The `alignment_summary` JSON blob is logged on every job so we can diagnose drift patterns offline.
 
 ### Admin endpoints
 
@@ -2010,13 +2043,17 @@ song_stems (                      -- output artifacts
 
 ### Performance
 
-CPU-only PyTorch 2.2 on a Railway default container, `htdemucs` model, ~3-minute track:
-- Download: 2-5 s
-- Demucs separation: 90-180 s
-- ffmpeg mix: 3-5 s
-- **Total per job: ~2-3 minutes**
+CPU-only PyTorch 2.2 on a Railway default container (shared vCPU), `htdemucs` model, ~2–3-minute track. Observed end-to-end on a 132 s Suno output:
+- Download (suno + instrumental): ~1 s
+- **Tempo-lock pre-pass** (librosa BPM × 2 + atempo stretch): ~8–15 s
+- Demucs separation: 90–900 s (varies wildly with container's shared-CPU neighbour noise; ~14 min observed on first production job, ~3 min on a dedicated core)
+- **Phase-lock pre-pass** (librosa onset cross-correlation + ffmpeg trim/pad): ~3–5 s
+- ffmpeg mix: 2–4 s
+- Ack POST (3 base64 stems): ~1 s
 
-The model weights are pre-downloaded at Docker build time (~500 MB) so the first job after a cold start doesn't pay the download cost.
+**Total per job: ~2–15 minutes** (Demucs dominates — lock passes add <20 s combined).
+
+The model weights are pre-downloaded at Docker build time (~500 MB) so the first job after a cold start doesn't pay the download cost. Librosa's numba JIT pays a one-time ~5–10 s compile cost on the first `beat_track` call after boot, then is hot forever.
 
 ### Storage footprint per song
 
@@ -2045,10 +2082,13 @@ Baseline: ~6-10 MB per song. With extras: ~12-16 MB. For a 1000-song catalog tha
 
 ### Known limitations + future work
 
-- **Vocal timing drift.** Suno's recreated beat has the same tempo/key as the user upload but may drift slightly in structure (intro length, bar count). The extracted vocal is aligned to Suno's beat, not the user's. When laid over the user's instrumental, structural drift can produce offset by 100-300ms at section boundaries. Mitigation: tighter ffmpeg alignment via cross-correlation (not shipped v1).
-- **Demucs CPU latency.** 2-3 minutes per job is acceptable for our volume (~dozens/day) but becomes a bottleneck if the catalog grows past hundreds/day. Upgrade path: GPU Railway service or swap in a lighter model (`htdemucs_ft`, `mdx_extra`).
+- **Structural drift beyond the 16 s phase window.** Phase-lock uses the first 16 s of audio to find a single offset. If Suno's output has a longer intro, adds a bar somewhere in the middle, or resolves a section boundary differently, we lose sync later in the song even though the head is locked. Next step if this bites: multi-window DTW (dynamic time warping) that stretches non-linearly across the full duration — doable but ~10× the CPU cost of the current pre-pass.
+- **Key (pitch) mismatch is not corrected.** We deliberately don't pitch-shift vocals — formant warping sounds worse than the occasional semitone drift. If Suno comes back in the wrong key, regenerate rather than post-process.
+- **BPM estimator can pick half/double-time.** Librosa's beat tracker occasionally returns 160 BPM on a 80 BPM track (or vice versa). Guarded by the `0.9 < ratio < 1.1` clamp — outside that band we skip the stretch entirely. Fallback path is the raw-Suno mix, which is still ≥ the pre-pipeline baseline.
+- **Demucs CPU latency.** 3–15 min per job on Railway's shared CPU is acceptable for our volume (~dozens/day) but becomes a bottleneck if the catalog grows past hundreds/day. Upgrade path: GPU Railway service or swap in a lighter model (`htdemucs_ft`, `mdx_extra_q`).
 - **Extras storage disabled by default.** Setting `STEM_STORE_EXTRAS=1` doubles storage; leave off unless we need drums/bass for a remix flow or stem submission.
 - **No per-stem loudness normalization yet.** `loudness_lufs` column exists but the worker doesn't populate it — follow-up can run librosa RMS at ack time.
+- **Alignment telemetry only in logs.** The `alignment_summary` JSON (BPMs, ratio, phase offset, locked flags) lives only in worker stdout for now. A `song_stem_jobs.alignment_json` column would surface it in the Songs UI — trivial migration whenever we want it.
 
 ---
 
