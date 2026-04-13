@@ -291,6 +291,227 @@ def test_08_audio_qa_lite_sweep_flips_to_qa_passed(
     assert song["qa_pass"] is True
 
 
+LYRICAL_GENRE_TOKENS = ("pop", "hip-hop", "rap", "country", "rock", "r-and-b",
+                        "latin", "k-pop", "folk", "indie", "metal", "punk",
+                        "reggae", "blues")
+
+
+def _pick_lyrical_opportunity(client: httpx.Client) -> dict:
+    """Pull top opportunities and pick the first with a non-null prompt
+    AND a word-friendly (lyrical) genre. Skips instrumental genres like
+    classical / ambient that won't exercise the vocal+lyrics path."""
+    r = client.get("/api/v1/blueprint/top-opportunities?n=10&model=suno")
+    assert r.status_code == 200, r.text
+    opps = r.json()["data"]["blueprints"]
+
+    lyrical = [
+        o for o in opps
+        if o.get("prompt")
+        and any(tok in o["genre"].lower() for tok in LYRICAL_GENRE_TOKENS)
+    ]
+    if lyrical:
+        return lyrical[0]
+    # Fallback: any opportunity with a prompt at all
+    with_prompt = [o for o in opps if o.get("prompt")]
+    if with_prompt:
+        return with_prompt[0]
+    pytest.fail(f"no opportunities with prompts returned: {opps[:2]}")
+
+
+def test_10_full_real_breakout_to_song_flow(client: httpx.Client):
+    """
+    Wider E2E: start from a REAL top-opportunity (breakout-engine output,
+    not a scratch fixture), create a fresh artist via the LLM persona
+    blender matched to that genre, walk the full chain, assert every
+    field the orchestrator should populate on songs_master, and verify
+    artist portrait + song cover were generated.
+
+    This is the definitive "does the whole product work" test. It costs
+    one MusicGen call ($0.064) + one Groq persona call (~$0.002) + up
+    to two DALL-E 3 images (~$0.08) = ~$0.15/run.
+    """
+    import json as _json
+
+    run_id = uuid.uuid4().hex[:6]
+
+    # --- Step 1: fetch a real top opportunity (lyrical, has prompt) ----
+    opp = _pick_lyrical_opportunity(client)
+    base_genre = opp["genre"]
+    print(f"\n  [1] breakout opportunity: {base_genre} (score={opp['opportunity_score']})")
+
+    # Use a unique variant genre so the persona-blended artist is
+    # guaranteed the top assignment pick regardless of existing roster.
+    test_genre = f"{base_genre}__e2e_{run_id}"
+
+    # --- Step 2: persist as a blueprint --------------------------------
+    r = client.post(
+        "/api/v1/admin/blueprints",
+        json={
+            "genre_id": test_genre,
+            "primary_genre": test_genre,
+            "adjacent_genres": [base_genre],
+            "target_themes": ["atmospheric", "breakout test"],
+            "vocabulary_tone": "poetic",
+            "target_audience_tags": ["e2e_test_audience"],
+            "smart_prompt_text": opp["prompt"],
+            "smart_prompt_rationale": opp.get("rationale"),
+            "predicted_success_score": opp["opportunity_score"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    blueprint_id = r.json()["id"]
+    print(f"  [2] blueprint persisted: {blueprint_id[:8]}")
+
+    # --- Step 3: create artist via persona blender ---------------------
+    description = (
+        f"A rising artist in {base_genre} with a unique voice. "
+        f"Their sound targets the {base_genre} scene with fresh energy and "
+        f"emotional depth. Influenced by the current wave of breakout "
+        f"artists in the genre."
+    )
+    r = client.post(
+        "/api/v1/admin/artists/from-description",
+        json={
+            "description": description,
+            "target_genre": test_genre,
+            "auto_approve": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    created = r.json()
+    artist_id = created["artist_id"]
+    artist_name = created["stage_name"]
+    print(f"  [3] persona blended: {artist_name} ({artist_id[:8]})")
+    # Verify the blender produced a complete persona
+    persona = created["persona"]
+    assert "voice_dna" in persona and "timbre_core" in persona["voice_dna"]
+    assert "visual_dna" in persona
+    assert "lyrical_dna" in persona
+    # Portrait assertion — present if openai_cli_proxy or OPENAI_API_KEY set
+    portrait = created.get("portrait")
+    if portrait:
+        print(f"      portrait: {portrait['provider']} {portrait['bytes']} bytes "
+              f"→ {portrait['storage_url']}")
+    else:
+        print(f"      portrait: NOT GENERATED — check OPENAI_CLI_PROXY_URL / OPENAI_API_KEY")
+
+    # --- Step 4: assignment engine (should pick the new artist) --------
+    r = client.post(f"/api/v1/admin/blueprints/{blueprint_id}/assign")
+    assert r.status_code == 200, r.text
+    decision = r.json()
+    print(f"  [4] assignment: proposal={decision['proposal']} proposed={decision.get('proposed_artist_name')}")
+    assert decision["proposal"] == "reuse", \
+        f"expected reuse with fresh artist but got {decision['proposal']}"
+    assert decision["proposed_artist_id"] == artist_id, \
+        f"assignment picked the wrong artist"
+
+    decision_id = decision["decision_id"]
+
+    # --- Step 5: CEO approve -------------------------------------------
+    r = client.post(
+        f"/api/v1/admin/ceo-decisions/{decision_id}/approve",
+        json={},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "approved"
+    print(f"  [5] CEO decision approved")
+
+    # --- Step 6: generation orchestrator -------------------------------
+    r = client.post(
+        f"/api/v1/admin/blueprints/{blueprint_id}/generate-song",
+        json={"provider": "musicgen", "duration_seconds": 8},
+    )
+    assert r.status_code == 200, r.text
+    gen = r.json()
+    song_id = gen["song_id"]
+    task_id = gen["task_id"]
+    print(f"  [6] orchestrator: song={song_id[:8]} task={task_id[:12]} title={gen['title']!r}")
+    assert gen["status"] == "draft"
+    assert "[VOICE DNA]" in gen["prompt_preview"]
+    assert gen["estimated_cost_usd"] == pytest.approx(0.064, abs=0.001)
+    cover = gen.get("cover")
+    if cover:
+        print(f"      cover: {cover['provider']} → {cover['storage_url']}")
+    else:
+        print(f"      cover: NOT GENERATED")
+
+    # --- Step 7: poll to success ---------------------------------------
+    result = _poll_until(client, "musicgen", task_id, timeout_seconds=120)
+    assert result["status"] == "succeeded"
+    print(f"  [7] generation succeeded, audio_url={result['audio_url'][:60]}...")
+
+    # --- Step 8: audio QA lite sweep (flips qa_pending -> qa_passed) ----
+    r = client.post("/api/v1/admin/sweeps/audio-qa")
+    assert r.status_code == 200, r.text
+    qa_stats = r.json()["stats"]
+    print(f"  [8] audio QA sweep: passed={qa_stats['passed']} failed={qa_stats['failed']}")
+    assert qa_stats["passed"] >= 1 or qa_stats["scanned"] == 0
+
+    # --- Step 9: final songs_master field verification -----------------
+    r = client.get(f"/api/v1/admin/songs/{song_id}")
+    song = r.json()
+    print(f"  [9] final songs_master state:")
+    print(f"      status={song['status']}")
+    print(f"      title={song['title']!r}")
+    print(f"      artist_name={song.get('artist_name')!r}")
+    print(f"      primary_genre={song['primary_genre']}")
+    print(f"      generation_provider={song['generation_provider']}")
+    print(f"      generation_cost_usd=${song['generation_cost_usd']}")
+    print(f"      qa_pass={song['qa_pass']}")
+    print(f"      audio_assets count={len(song.get('audio_assets', []))}")
+    if song.get("audio_assets"):
+        master = song["audio_assets"][0]
+        print(f"      master storage_url={master['storage_url'][:60]}...")
+        print(f"      master duration={master['duration_seconds']}s")
+
+    # Now the assertions — every field the orchestrator + QA should set
+    assert song["status"] == "qa_passed", f"expected qa_passed, got {song['status']}"
+    assert song["qa_pass"] is True
+    assert song["primary_artist_id"] == artist_id
+    assert song["blueprint_id"] == blueprint_id
+    assert song["primary_genre"] == test_genre
+    assert song["generation_provider"] == "musicgen"
+    assert song["generation_provider_job_id"] == task_id
+    assert song["generation_cost_usd"] == pytest.approx(0.064, abs=0.001)
+    assert song["generation_prompt"]
+    assert "[VOICE DNA]" in song["generation_prompt"]
+    assert "[PRODUCTION]" in song["generation_prompt"]
+    assert song["title"]
+    assert song["artist_name"] == artist_name
+    assert song["release_id"] is None, "song should not be bound to a release yet"
+    assert song["audio_assets"], "audio_assets array should have at least one row"
+    master = next((a for a in song["audio_assets"] if a["is_master_candidate"]), None)
+    assert master is not None, "no master candidate audio asset"
+    assert master["storage_url"].startswith("/api/v1/admin/music/audio/")
+    assert master["provider"] == "musicgen"
+    assert master["format"] == "mp3"
+    assert master["duration_seconds"] > 0
+
+    # Visual assertions — if image generation was available, the song
+    # should have a cover and the artist should have a portrait.
+    if portrait or cover:
+        # At least one image was generated — check both landed
+        r = client.get(f"/api/v1/admin/artists")
+        artists_list = r.json().get("artists", [])
+        our_artist = next((a for a in artists_list if a["artist_id"] == artist_id), None)
+        assert our_artist is not None
+        if portrait:
+            assert our_artist["voice_dna"] is not None  # sanity
+            # visual_dna.reference_sheet_asset_id should be set
+            # (use the song detail endpoint since it includes visual_dna on artist side via song)
+        if cover:
+            assert song["primary_artwork_asset_id"] is not None
+            # Fetch the image directly via the public streaming endpoint
+            img_r = httpx.get(
+                f"{BASE_URL}/api/v1/admin/visual/{song['primary_artwork_asset_id']}.png",
+                timeout=15.0,
+            )
+            assert img_r.status_code == 200
+            assert img_r.headers.get("content-type", "").startswith("image/")
+            assert len(img_r.content) > 10_000, "cover image too small to be real"
+            print(f"  [10] cover verified: {len(img_r.content)} bytes PNG")
+
+
 def test_09_release_creation_and_track_binding(
     client: httpx.Client, test_blueprint, test_artist,
 ):

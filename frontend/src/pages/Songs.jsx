@@ -54,9 +54,22 @@ function SongDetailPanel({ songId, onQaPassed }) {
   if (!song) return null
 
   const master = song.audio_assets?.find(a => a.is_master_candidate) || song.audio_assets?.[0]
+  const coverUrl = song.primary_artwork_asset_id
+    ? resolveAudioUrl(`/api/v1/admin/visual/${song.primary_artwork_asset_id}.png`)
+    : null
 
   return (
     <div className="space-y-4 bg-zinc-950/40 p-4 border-t border-zinc-800">
+      {/* Cover art */}
+      {coverUrl && (
+        <div className="flex justify-center">
+          <img
+            src={coverUrl}
+            alt={song.title}
+            className="w-64 h-64 rounded-lg object-cover border border-zinc-700 shadow-lg"
+          />
+        </div>
+      )}
       {/* Audio player */}
       {master && master.storage_url && (
         <div className="space-y-1">
@@ -130,13 +143,20 @@ function MetaBox({ label, value }) {
 }
 
 function SongRow({ song, expanded, onToggle, onQaPassed }) {
+  const coverUrl = song.primary_artwork_asset_id
+    ? resolveAudioUrl(`/api/v1/admin/visual/${song.primary_artwork_asset_id}.png`)
+    : null
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden">
       <button
         onClick={onToggle}
         className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-900/60 transition-colors text-left"
       >
-        <FileAudio size={14} className="text-zinc-600 flex-shrink-0" />
+        {coverUrl ? (
+          <img src={coverUrl} alt="" className="w-10 h-10 rounded object-cover border border-zinc-700 flex-shrink-0" />
+        ) : (
+          <FileAudio size={14} className="text-zinc-600 flex-shrink-0" />
+        )}
         <div className="flex-1 min-w-0">
           <div className="text-sm font-semibold text-zinc-100 truncate">{song.title}</div>
           <div className="text-[10px] text-zinc-500 truncate">

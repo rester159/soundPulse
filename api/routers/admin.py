@@ -3914,6 +3914,48 @@ async def _has_stored_audio(db: AsyncSession, call_id) -> bool:
     return r.scalar() is not None
 
 
+@router.get("/api/v1/admin/visual/{asset_id}.png")
+async def visual_asset_stream(
+    asset_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Stream a self-hosted visual asset (artist portrait, song cover) by
+    asset_id. Open endpoint — HTML5 <img> can load it directly. Cached
+    aggressively since the bytes never change.
+    """
+    import uuid as _uuid
+    from fastapi.responses import Response
+    from sqlalchemy import text as _text
+
+    try:
+        aid = _uuid.UUID(asset_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid asset_id")
+
+    r = await db.execute(
+        _text("""
+            SELECT image_bytes, content_type, size_bytes
+            FROM visual_asset_blobs
+            WHERE asset_id = :aid
+            LIMIT 1
+        """),
+        {"aid": aid},
+    )
+    row = r.fetchone()
+    if row is None:
+        raise HTTPException(404, detail="image not found")
+
+    return Response(
+        content=bytes(row[0]),
+        media_type=row[1] or "image/png",
+        headers={
+            "Content-Length": str(row[2]),
+            "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )
+
+
 @router.get("/api/v1/admin/music/audio/{provider}/{task_id}.mp3")
 async def music_audio_stream(
     provider: str,
@@ -4220,6 +4262,43 @@ async def create_artist_from_description(
         await db.rollback()
         raise HTTPException(409, detail=f"artist creation failed (duplicate stage_name?): {e}")
     await db.refresh(row)
+
+    # Generate + store a portrait via openai_cli_proxy (or OpenAI direct fallback)
+    from sqlalchemy import text as _text
+    from api.services.image_generator import (
+        build_artist_portrait_prompt,
+        generate_and_store_image,
+    )
+    portrait_prompt = build_artist_portrait_prompt(persona)
+    portrait = await generate_and_store_image(
+        db,
+        artist_id=row.artist_id,
+        asset_type="reference_sheet",
+        prompt=portrait_prompt,
+    )
+    portrait_info = None
+    if portrait is not None:
+        # Stamp visual_dna.reference_sheet_asset_id on the artist row
+        updated_visual = dict(row.visual_dna or {})
+        updated_visual["reference_sheet_asset_id"] = str(portrait.asset_id)
+        await db.execute(
+            _text("""
+                UPDATE ai_artists
+                SET visual_dna = CAST(:vdna AS jsonb), updated_at = NOW()
+                WHERE artist_id = :aid
+            """),
+            {"vdna": json.dumps(updated_visual), "aid": row.artist_id},
+        )
+        await db.commit()
+        portrait_info = {
+            "asset_id": str(portrait.asset_id),
+            "storage_url": portrait.storage_url,
+            "provider": portrait.provider,
+            "bytes": portrait.bytes_len,
+        }
+    else:
+        logger.warning("[artists] portrait generation skipped for %s", row.stage_name)
+
     return {
         "artist_id": str(row.artist_id),
         "stage_name": row.stage_name,
@@ -4227,6 +4306,7 @@ async def create_artist_from_description(
         "roster_status": row.roster_status,
         "ceo_approved": row.ceo_approved,
         "persona": persona,
+        "portrait": portrait_info,
         "created_at": row.created_at.isoformat(),
     }
 
@@ -4855,6 +4935,44 @@ async def generate_song_for_blueprint(
         logger.exception("[orchestrator] persistence failed")
         raise HTTPException(500, detail=f"persistence failed: {e}")
 
+    # Generate + store a cover image
+    from api.services.image_generator import (
+        build_song_cover_prompt,
+        generate_and_store_image,
+    )
+    cover_prompt = build_song_cover_prompt(
+        title=title,
+        genre=blueprint.primary_genre or blueprint.genre_id,
+        artist_visual=artist.visual_dna,
+        themes=blueprint.target_themes,
+    )
+    cover = await generate_and_store_image(
+        db,
+        artist_id=artist.artist_id,
+        asset_type="song_artwork",
+        prompt=cover_prompt,
+    )
+    cover_info = None
+    if cover is not None:
+        await db.execute(
+            _text("""
+                UPDATE songs_master
+                SET primary_artwork_asset_id = :asset_id,
+                    artwork_brief = :brief,
+                    updated_at = NOW()
+                WHERE song_id = :sid
+            """),
+            {"asset_id": cover.asset_id, "brief": cover_prompt[:500], "sid": song.song_id},
+        )
+        await db.commit()
+        cover_info = {
+            "asset_id": str(cover.asset_id),
+            "storage_url": cover.storage_url,
+            "provider": cover.provider,
+        }
+    else:
+        logger.warning("[orchestrator] cover generation skipped for song %s", song.song_id)
+
     return {
         "song_id": str(song.song_id),
         "task_id": task.task_id,
@@ -4863,6 +4981,7 @@ async def generate_song_for_blueprint(
         "title": title,
         "status": "draft",
         "prompt_preview": final_prompt[:200],
+        "cover": cover_info,
     }
 
 
@@ -5288,6 +5407,7 @@ def _song_to_dict(row, full: bool = False) -> dict:
         "iswc": row.iswc,
         "distributor": row.distributor,
         "actual_release_date": row.actual_release_date.isoformat() if row.actual_release_date else None,
+        "primary_artwork_asset_id": str(row.primary_artwork_asset_id) if row.primary_artwork_asset_id else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
     if not full:

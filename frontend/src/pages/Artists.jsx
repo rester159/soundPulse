@@ -5,8 +5,18 @@ import {
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  useAIArtists, useSongs, useCreateArtistFromDescription,
+  useAIArtists, useSongs, useCreateArtistFromDescription, getBaseUrl,
 } from '../hooks/useSoundPulse'
+
+function resolveBackendUrl(url) {
+  if (!url) return url
+  if (/^https?:\/\//i.test(url)) return url
+  if (url.startsWith('/api/v1/')) {
+    const base = getBaseUrl().replace(/\/api\/v1\/?$/, '')
+    return base + url
+  }
+  return url
+}
 
 function DNABlock({ icon: Icon, title, data, color = 'violet' }) {
   if (!data || Object.keys(data).length === 0) return null
@@ -63,15 +73,28 @@ function ArtistCard({ artist, expanded, onToggle }) {
     </span>
   )
 
+  const portraitAssetId = artist.visual_dna?.reference_sheet_asset_id
+  const portraitUrl = portraitAssetId
+    ? resolveBackendUrl(`/api/v1/admin/visual/${portraitAssetId}.png`)
+    : null
+
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
       <button
         onClick={onToggle}
         className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-900/60 transition-colors text-left"
       >
-        <div className="w-9 h-9 rounded-full bg-gradient-to-br from-violet-500/30 to-cyan-500/30 flex items-center justify-center text-zinc-200 font-bold flex-shrink-0">
-          {artist.stage_name?.[0] || '?'}
-        </div>
+        {portraitUrl ? (
+          <img
+            src={portraitUrl}
+            alt={artist.stage_name}
+            className="w-10 h-10 rounded-full object-cover border border-zinc-700 flex-shrink-0"
+          />
+        ) : (
+          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-violet-500/30 to-cyan-500/30 flex items-center justify-center text-zinc-200 font-bold flex-shrink-0">
+            {artist.stage_name?.[0] || '?'}
+          </div>
+        )}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-bold text-zinc-100 truncate">{artist.stage_name}</span>
@@ -91,6 +114,15 @@ function ArtistCard({ artist, expanded, onToggle }) {
 
       {expanded && (
         <div className="border-t border-zinc-800 p-4 space-y-3 bg-zinc-950/40">
+          {portraitUrl && (
+            <div className="flex justify-center">
+              <img
+                src={portraitUrl}
+                alt={artist.stage_name}
+                className="w-64 h-64 rounded-lg object-cover border border-zinc-700"
+              />
+            </div>
+          )}
           {/* Audience tags */}
           {artist.audience_tags?.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
