@@ -4472,7 +4472,7 @@ async def create_artist_from_persona(
 
     # Generate + store portrait (single view — user can click
     # "Generate 8-view sheet" separately if they want the full PRD §20)
-    portrait_prompt = build_artist_portrait_prompt(persona)
+    portrait_prompt = build_artist_portrait_prompt(persona, primary_genre=body.target_genre)
     portrait_error: str | None = None
     portrait = None
     try:
@@ -4626,7 +4626,7 @@ async def create_artist_from_description(
         build_artist_portrait_prompt,
         generate_and_store_image,
     )
-    portrait_prompt = build_artist_portrait_prompt(persona)
+    portrait_prompt = build_artist_portrait_prompt(persona, primary_genre=body.target_genre)
     portrait = await generate_and_store_image(
         db,
         artist_id=row.artist_id,
@@ -4718,7 +4718,7 @@ async def generate_reference_sheet(
         "visual_dna": artist.visual_dna or {},
         "fashion_dna": artist.fashion_dna or {},
     }
-    view_prompts = build_8_view_prompts(persona)
+    view_prompts = build_8_view_prompts(persona, primary_genre=artist.primary_genre)
 
     results: list[dict] = []
     front_asset_id: _uuid.UUID | None = None
@@ -4964,7 +4964,7 @@ async def regenerate_artist_portrait(
         "visual_dna": artist.visual_dna or {},
         "fashion_dna": artist.fashion_dna or {},
     }
-    prompt = build_artist_portrait_prompt(persona)
+    prompt = build_artist_portrait_prompt(persona, primary_genre=artist.primary_genre)
     portrait = await generate_and_store_image(
         db,
         artist_id=aid,

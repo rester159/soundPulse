@@ -309,16 +309,61 @@ def _format_palette(palette: Any) -> str | None:
     return ", ".join(unique)
 
 
+GENRE_EDITORIAL_REFERENCE = {
+    # Maps a top-level genre token to the editorial reference that unlocks
+    # the right visual latent in gpt-image-1. Generic "fashion editorial"
+    # averages to beige stock photography — naming a specific publication
+    # or artist teaser forces the model into the right style pocket.
+    "k-pop": "HYBE / SM Entertainment comeback concept teaser, Vogue Korea cover, NewJeans + IVE + LE SSERAFIM styling reference, stage-ready idol fashion",
+    "j-pop": "Vogue Japan cover, Tokyo Harajuku editorial, YOASOBI / Ado concept teaser",
+    "c-pop": "Vogue China cover, Shanghai high-fashion editorial",
+    "pop": "Vogue / Rolling Stone cover, Sabrina Carpenter / Olivia Rodrigo album teaser, pop-star styling",
+    "hip-hop": "Complex Magazine cover, GQ Hip-Hop issue, Ice Spice / Central Cee / Don Toliver album teaser",
+    "rap": "Complex Magazine cover, XXL Freshman cover, drill/trap artist editorial",
+    "r&b": "GQ / i-D cover, SZA / Kehlani / Snoh Aalegra album concept shoot",
+    "reggae": "Dazed Magazine Caribbean issue, Popcaan / Masicka concept teaser, modern Kingston dancehall luxe editorial — NOT a rasta stereotype, NOT a beach tourism photo",
+    "dancehall": "Dazed Magazine Caribbean issue, Popcaan / Masicka concept teaser, modern Kingston dancehall luxe",
+    "afrobeats": "Vogue Nigeria / GQ South Africa cover, Burna Boy / Rema / Tems concept teaser",
+    "latin": "Vogue México / GQ Latin America cover, Bad Bunny / Rauw Alejandro / Karol G album teaser",
+    "country": "Rolling Stone Country issue, Wrangler / Stetson editorial, Zach Bryan / Tyler Childers / Sierra Ferrell concept shoot",
+    "rock": "Rolling Stone cover, NME / Kerrang!, modern rock star editorial",
+    "indie": "Dazed / i-D / The Face cover, bedroom-pop / alt-pop concept shoot",
+    "electronic": "Dazed / Mixmag cover, techno / house artist editorial",
+    "dance": "Dazed / Mixmag cover, festival-ready styling",
+    "k-r&b": "Dazed Korea cover, DEAN / Crush concept teaser",
+}
+
+
+def _editorial_reference_for_genre(primary_genre: str | None) -> str:
+    """Pick the right editorial reference for a genre string like 'pop.k-pop'
+    or 'caribbean.reggae.dancehall'. Tries the full string first, then each
+    descending token, then falls back to a generic 'Vogue cover' reference."""
+    if not primary_genre:
+        return "Vogue / Rolling Stone cover editorial"
+    s = primary_genre.lower()
+    # Try each dotted token from most specific to least
+    tokens: list[str] = []
+    parts = s.split(".")
+    for i in range(len(parts), 0, -1):
+        tokens.append(parts[i - 1])  # each segment on its own
+        tokens.append(".".join(parts[:i]))  # full dotted path
+    for tok in tokens:
+        if tok in GENRE_EDITORIAL_REFERENCE:
+            return GENRE_EDITORIAL_REFERENCE[tok]
+    return "Vogue / Rolling Stone cover editorial"
+
+
 def _subject_description(persona: dict) -> str:
     """
-    Compose the full "real human being, X" descriptor used by every prompt.
-    Pulls ALL the rich visual/fashion fields — face, body, hair, ethnicity,
-    gender, age, signature outfit, color palette, fabric inspirations,
-    silhouette, styling mood, accessories, footwear. Ignored fields just
-    get skipped — no "if one is present" shortcut like the old builder.
+    Compose the "real human being, X" descriptor used by every prompt.
+
+    Pulls the face/body/hair/ethnicity/gender/age fields that identify
+    WHO the person is. Outfit/palette/styling is now composed separately
+    in build_artist_portrait_prompt so we can make editorial choices
+    (pick one hero garment, lead with the styling_mood, etc) instead
+    of cramming a flat list into this descriptor.
     """
     visual = persona.get("visual_dna") or {}
-    fashion = persona.get("fashion_dna") or {}
 
     parts: list[str] = []
     if (gender := persona.get("gender_presentation")):
@@ -334,157 +379,196 @@ def _subject_description(persona: dict) -> str:
     if (hair := visual.get("hair_signature")):
         parts.append(hair)
 
-    subject = ", ".join(parts) if parts else "musician"
-
-    # OUTFIT — exploit every fashion field the schema defines.
-    # Bug fix: fashion_style_summary lives in visual_dna, NOT fashion_dna.
-    # The old builder looked in fashion_dna and silently dropped it.
-    outfit_bits: list[str] = []
-    if (summary := visual.get("fashion_style_summary")):
-        outfit_bits.append(summary)
-    if isinstance(fashion.get("core_garments"), list) and fashion["core_garments"]:
-        outfit_bits.append("core pieces: " + ", ".join(fashion["core_garments"]))
-    if isinstance(fashion.get("fabric_inspirations"), list) and fashion["fabric_inspirations"]:
-        outfit_bits.append("fabrics: " + ", ".join(fashion["fabric_inspirations"]))
-    if (silhouette := fashion.get("silhouette")):
-        outfit_bits.append(f"silhouette: {silhouette}")
-    if isinstance(fashion.get("accessories"), list) and fashion["accessories"]:
-        outfit_bits.append("accessories: " + ", ".join(fashion["accessories"]))
-    if isinstance(fashion.get("footwear"), list) and fashion["footwear"]:
-        outfit_bits.append("footwear: " + ", ".join(fashion["footwear"]))
-    if (styling_mood := fashion.get("styling_mood")):
-        outfit_bits.append(f"styling mood: {styling_mood}")
-
-    outfit = ""
-    if outfit_bits:
-        outfit = " — OUTFIT: " + "; ".join(outfit_bits)
-
-    # PALETTE — translate hex codes to color names the model understands.
-    palette_str = _format_palette(visual.get("color_palette"))
-    palette = f" COLOR PALETTE: {palette_str} (these colors MUST appear in the outfit, backdrop, or lighting)." if palette_str else ""
-
-    return subject + outfit + palette
+    return ", ".join(parts) if parts else "musician"
 
 
-def build_artist_portrait_prompt(persona: dict) -> str:
+def _compose_outfit_brief(persona: dict) -> tuple[str, str]:
     """
-    Turn a persona dict into a gpt-image-1 portrait prompt that produces
-    a PHOTOREALISTIC result — a candid editorial photograph of an actual
-    person, not illustration or AI art.
+    Return (hero_outfit_line, styling_detail_block).
 
-    gpt-image-1 (like DALL-E before it) has a strong default tendency
-    toward illustrative output. Countering that requires: explicit
-    "photograph" language, camera specifics (body + lens), lighting,
-    skin-texture cues, AND explicit anti-illustration directives.
-
-    Every rich field in the persona — fashion_style_summary, color_palette,
-    fabric_inspirations, silhouette, accessories, footwear, styling_mood,
-    art_direction — flows through _subject_description. Dropping any of
-    them is a bug; the persona schema exists to drive real distinctiveness.
+    Picks ONE hero garment from fashion_dna.core_garments[0] instead of
+    listing all three — previous builder crammed 3 competing silhouettes
+    into one prompt and gpt-image-1 averaged them to a plain tee + blazer.
+    Supports the hero outfit with accessories, footwear, fabrics, and the
+    styling_mood as a top-level reference.
     """
     visual = persona.get("visual_dna") or {}
+    fashion = persona.get("fashion_dna") or {}
+
+    # HERO garment — one specific piece the model can lock onto
+    core = fashion.get("core_garments") or []
+    hero = core[0] if isinstance(core, list) and core else None
+
+    summary = visual.get("fashion_style_summary") or ""
+    hero_line = ""
+    if hero and summary:
+        hero_line = f"Hero look: {hero}, as part of a {summary} aesthetic"
+    elif hero:
+        hero_line = f"Hero look: {hero}"
+    elif summary:
+        hero_line = f"Aesthetic: {summary}"
+
+    # STYLING DETAIL — fabrics, supporting garments, accessories, footwear,
+    # palette — everything else in one compact block
+    detail_bits: list[str] = []
+    if isinstance(core, list) and len(core) > 1:
+        detail_bits.append("supporting pieces: " + ", ".join(core[1:]))
+    if isinstance(fashion.get("fabric_inspirations"), list) and fashion["fabric_inspirations"]:
+        detail_bits.append("fabrics: " + ", ".join(fashion["fabric_inspirations"]))
+    if (silhouette := fashion.get("silhouette")):
+        detail_bits.append(f"silhouette: {silhouette}")
+    if isinstance(fashion.get("accessories"), list) and fashion["accessories"]:
+        detail_bits.append("accessories: " + ", ".join(fashion["accessories"]))
+    if isinstance(fashion.get("footwear"), list) and fashion["footwear"]:
+        detail_bits.append("footwear: " + ", ".join(fashion["footwear"]))
+
+    palette_str = _format_palette(visual.get("color_palette"))
+    if palette_str:
+        detail_bits.append(f"color palette: {palette_str} (all three colors must be VISIBLE in the frame)")
+
+    return hero_line, "; ".join(detail_bits)
+
+
+def build_artist_portrait_prompt(persona: dict, primary_genre: str | None = None) -> str:
+    """
+    Build a FASHION EDITORIAL / CONCEPT TEASER prompt for gpt-image-1.
+
+    The old prompt said "candid photograph + documentary realism + head
+    and shoulders" which fought the high-fashion outfit directives and
+    produced safe, generic results. This version leads with the genre's
+    specific editorial reference (HYBE concept teaser for K-pop, Complex
+    cover for hip-hop, Dazed Caribbean issue for reggae), uses 3/4 body
+    framing so the outfit is actually visible, and picks ONE hero garment
+    instead of listing three competing silhouettes.
+
+    Realism is still photographic but we stop pretending this is a street
+    candid — it's a styled, intentional image of a pop artist.
+    """
+    visual = persona.get("visual_dna") or {}
+    fashion = persona.get("fashion_dna") or {}
     subject = _subject_description(persona)
+    hero_line, styling_detail = _compose_outfit_brief(persona)
+    styling_mood = fashion.get("styling_mood") or ""
+    scene = visual.get("art_direction") or "styled outdoor set with intentional backdrop matching the concept"
+    editorial_reference = _editorial_reference_for_genre(primary_genre)
 
-    # The art_direction field often says things like "moody urban night
-    # photography" which IS photographic — fold it in as scene context.
-    scene = visual.get("art_direction") or "natural daylight studio setting"
+    # Build the prompt with fashion leading and realism supporting.
+    lines = [
+        f"EDITORIAL SHOOT TYPE: {editorial_reference}.",
+        f"This is a styled magazine cover / concept teaser of a pop artist — NOT a street candid, NOT a documentary photo. The subject is posed with intent, wardrobe is the primary storyline.",
+        "",
+        f"SUBJECT: {subject}",
+        "",
+    ]
+    if styling_mood:
+        lines.append(f"STYLING MOOD: {styling_mood}")
+    if hero_line:
+        lines.append(hero_line + ".")
+    if styling_detail:
+        lines.append(f"Styling detail: {styling_detail}.")
+    lines += [
+        "",
+        f"SCENE: {scene}",
+        "",
+        "FRAMING: 3/4 body or full-body shot — the viewer MUST see the hero garment, silhouette, and footwear. Do NOT crop at the shoulders. Pose is confident, posed-for-the-camera, idol-level styled (not a selfie, not a snapshot).",
+        "",
+        "CAMERA + LIGHTING: shot on Canon EOS R5 with 50mm f/1.4 for 3/4 body or 35mm for full body, softbox key + rim light, editorial magazine lighting (not golden hour street photography), crisp sharp focus on the face AND the wardrobe.",
+        "",
+        "REALISM: photographic — real human skin with texture and pores, not plastic AI-art smoothness. But this is a polished fashion shoot, not a handheld snapshot — makeup is camera-ready, hair is styled, clothes are pressed.",
+        "",
+        "HARD RULES:",
+        "- If this is a K-pop artist, the result must read as a K-pop idol, not a 'generic Asian person in streetwear'. Study NewJeans, IVE, LE SSERAFIM, aespa, ENHYPEN, Stray Kids concept teasers for reference.",
+        "- If this is a reggae / dancehall artist, the result must read as modern Kingston swagger (Popcaan, Masicka, Skillibeng), NOT rasta beanies / tie-dye / 'One Love' tourist clichés.",
+        "- If this is a hip-hop artist, the result must read as Complex / XXL Freshman-level cover quality.",
+        "- Hero garment must be clearly visible and match the description exactly.",
+        "- All colors from the palette must appear in the frame.",
+        "- No illustration, no cartoon, no 3D render, no CGI, no anime. Photographic only.",
+        "- No text, no watermarks, no logos, no graphic overlays.",
+    ]
+    return "\n".join(lines)
 
-    return (
-        f"I NEED a real, unedited candid editorial photograph. "
-        f"Subject: a real human being — {subject}. "
-        f"Scene / art direction: {scene}. "
-        f"The outfit must be clearly visible and styled with intent — "
-        f"this is a FASHION EDITORIAL shoot where the wardrobe is the point, "
-        f"not a passport photo. Hero garment reads first, accessories "
-        f"support, palette carries through the whole frame. "
-        f"This is a professional editorial portrait photograph, "
-        f"shot on a Canon EOS R5 with an 85mm f/1.4 prime lens, "
-        f"full frame, shallow depth of field, natural soft lighting, "
-        f"golden hour or softbox key light, "
-        f"head and shoulders framing, direct eye contact with the lens. "
-        f"Skin shows natural texture, pores, subtle imperfections, "
-        f"authentic human details. Sharp focus on the eyes. "
-        f"Documentary realism, unretouched, film grain acceptable, "
-        f"in the style of a Vogue or Rolling Stone cover shoot. "
-        f"DO NOT generate illustration. "
-        f"DO NOT generate cartoon, anime, or stylized art. "
-        f"DO NOT generate 3D render, CGI, or digital painting. "
-        f"DO NOT generate AI-art-looking smooth plastic skin. "
-        f"DO NOT default to a generic plain t-shirt + blazer look if "
-        f"the persona specifies richer styling. "
-        f"This MUST look like an actual photograph of a real person "
-        f"that could appear in a physical magazine. "
-        f"No text, no watermarks, no logos, no graphic overlays."
-    )
 
-
-def build_8_view_prompts(persona: dict) -> list[tuple[str, str]]:
+def build_8_view_prompts(
+    persona: dict, primary_genre: str | None = None
+) -> list[tuple[str, str]]:
     """
     PRD §20 — produce 8 per-angle prompts that describe the SAME subject
     from 8 canonical angles. Used to build the artist reference sheet.
 
-    Every view uses the same rich _subject_description so outfit, color
-    palette, fabric, silhouette, and accessories stay consistent across
-    all 8 angles. Face consistency is locked via gpt-image-1's /edits
-    endpoint with a reference image (handled in the router).
+    All 8 views share the same editorial reference, hero outfit, styling
+    mood, and color palette so the shots read as one cohesive concept
+    teaser — not 8 random documentary stills. Face consistency is locked
+    via gpt-image-1's /edits endpoint with a reference image (handled in
+    the router).
     """
     subject = _subject_description(persona)
+    hero_line, styling_detail = _compose_outfit_brief(persona)
     visual = persona.get("visual_dna") or {}
-    scene = visual.get("art_direction") or "natural daylight studio setting"
+    fashion = persona.get("fashion_dna") or {}
+    styling_mood = fashion.get("styling_mood") or ""
+    scene = visual.get("art_direction") or "styled set with intentional backdrop"
+    editorial_reference = _editorial_reference_for_genre(primary_genre)
 
-    # Shared photo-realism preamble (same across all 8 views)
-    photo_style = (
-        "Shot on Canon EOS R5 with 85mm f/1.4 prime lens, full frame, "
-        "natural soft lighting, sharp focus, visible skin texture and pores, "
-        "authentic human details, documentary realism, editorial magazine quality"
+    # Shared preamble — fashion editorial, not documentary
+    preamble_parts = [
+        f"EDITORIAL SHOOT TYPE: {editorial_reference}.",
+        f"This is one of 8 views from a single styled concept teaser shoot — SAME subject, SAME outfit, SAME makeup, SAME hair across all 8 angles.",
+        f"SUBJECT: {subject}.",
+    ]
+    if styling_mood:
+        preamble_parts.append(f"STYLING MOOD: {styling_mood}.")
+    if hero_line:
+        preamble_parts.append(hero_line + ".")
+    if styling_detail:
+        preamble_parts.append(f"Styling detail: {styling_detail}.")
+    preamble_parts.append(f"SCENE: {scene}.")
+    preamble_parts.append(
+        "This is a polished magazine-cover-quality fashion shoot (not a street candid). "
+        "Shot on Canon EOS R5 + 50mm f/1.4, softbox + rim light, crisp sharp focus, "
+        "real photographic skin texture but camera-ready makeup and hair."
     )
+    preamble = " ".join(preamble_parts) + " "
 
     anti_illustration = (
-        "DO NOT generate illustration, cartoon, 3D render, CGI, or AI-art plastic skin. "
-        "DO NOT default to a plain t-shirt + blazer if the persona specifies richer styling. "
-        "This MUST look like an actual photograph of a real person. "
-        "No text, no watermarks, no graphic overlays."
-    )
-
-    preamble = (
-        f"I NEED a real candid editorial photograph. Subject: a real human being — {subject}. "
-        f"Scene / art direction: {scene}. "
-        f"The outfit is the point of this shoot — clearly visible, styled with intent, "
-        f"hero garment reads first, palette carries through. "
+        "HARD RULES: no illustration, no cartoon, no 3D render, no CGI, no anime. "
+        "If K-pop, must read as a K-pop idol (reference NewJeans, IVE, LE SSERAFIM). "
+        "If reggae/dancehall, must read as Kingston luxe swagger — NEVER rasta stereotype. "
+        "Hero garment must match the description exactly. Palette colors must appear. "
+        "No text, no watermarks, no logos."
     )
 
     views: list[tuple[str, str]] = [
         ("front",
-         f"{preamble}Framing: straight-on FRONT view, head and shoulders, subject facing the camera directly, "
-         f"eyes looking into the lens. {photo_style}. {anti_illustration}"),
+         f"{preamble}Framing: straight-on FRONT view, 3/4 body shot (waist-up or thigh-up), subject facing the camera directly, "
+         f"eyes looking into the lens, confident idol pose. The full hero outfit, silhouette, and accessories must be visible. {anti_illustration}"),
 
         ("side_l",
-         f"{preamble}Framing: LEFT PROFILE side view, subject facing to the camera's right, showing the left side of the face clearly, "
-         f"head and shoulders framing. {photo_style}. {anti_illustration}"),
+         f"{preamble}Framing: LEFT PROFILE side view, 3/4 body, subject facing to the camera's right showing the left side of the face, "
+         f"outfit and silhouette visible from the side. {anti_illustration}"),
 
         ("side_r",
-         f"{preamble}Framing: RIGHT PROFILE side view, subject facing to the camera's left, showing the right side of the face clearly, "
-         f"head and shoulders framing. {photo_style}. {anti_illustration}"),
+         f"{preamble}Framing: RIGHT PROFILE side view, 3/4 body, subject facing to the camera's left showing the right side of the face, "
+         f"outfit and silhouette visible from the side. {anti_illustration}"),
 
         ("back",
-         f"{preamble}Framing: BACK view, subject facing away from the camera, showing the back of the head and shoulders, "
-         f"hair and neckline visible. {photo_style}. {anti_illustration}"),
+         f"{preamble}Framing: BACK view, 3/4 body, subject facing away from the camera, "
+         f"back of hair, neckline, and rear of the outfit visible (show back details of the garment). {anti_illustration}"),
 
         ("top_l",
-         f"{preamble}Framing: HIGH-ANGLE shot from UPPER LEFT, camera positioned above and to the left, looking down at the subject, "
-         f"subject's face tilted up slightly toward the lens. {photo_style}. {anti_illustration}"),
+         f"{preamble}Framing: HIGH-ANGLE 3/4 body shot from UPPER LEFT, camera positioned above and to the left, looking down, "
+         f"subject's face tilted up slightly toward the lens. Outfit still visible. {anti_illustration}"),
 
         ("top_r",
-         f"{preamble}Framing: HIGH-ANGLE shot from UPPER RIGHT, camera positioned above and to the right, looking down at the subject, "
-         f"subject's face tilted up slightly toward the lens. {photo_style}. {anti_illustration}"),
+         f"{preamble}Framing: HIGH-ANGLE 3/4 body shot from UPPER RIGHT, camera positioned above and to the right, looking down, "
+         f"subject's face tilted up slightly toward the lens. Outfit still visible. {anti_illustration}"),
 
         ("bottom_l",
-         f"{preamble}Framing: LOW-ANGLE shot from LOWER LEFT, camera positioned below and to the left, looking up at the subject, "
-         f"dramatic heroic angle. {photo_style}. {anti_illustration}"),
+         f"{preamble}Framing: LOW-ANGLE 3/4 body shot from LOWER LEFT, camera positioned below and to the left, looking up, "
+         f"dramatic heroic angle, emphasizes legs/footwear. {anti_illustration}"),
 
         ("bottom_r",
-         f"{preamble}Framing: LOW-ANGLE shot from LOWER RIGHT, camera positioned below and to the right, looking up at the subject, "
-         f"dramatic heroic angle. {photo_style}. {anti_illustration}"),
+         f"{preamble}Framing: LOW-ANGLE 3/4 body shot from LOWER RIGHT, camera positioned below and to the right, looking up, "
+         f"dramatic heroic angle, emphasizes legs/footwear. {anti_illustration}"),
     ]
     return views
 
