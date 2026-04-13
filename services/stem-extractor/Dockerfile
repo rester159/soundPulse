@@ -1,5 +1,10 @@
 FROM python:3.11-slim
 
+# REBUILD MARKER: bump when you need to force Railway to re-evaluate
+# the cached Dockerfile layers. Increment this integer.
+#   rev: 2 — pin librosa 0.10.2.post1 + scipy<1.14 + mdx_extra_q default
+ARG REBUILD_REV=2
+
 # Demucs needs ffmpeg + libsndfile. Install system deps first.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
