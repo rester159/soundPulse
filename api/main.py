@@ -84,6 +84,9 @@ app.include_router(instrumentals_public.router)
 # Import marketing_agents so its @register_adapter decorators run
 # and the press_release + social_media adapters replace the stubs.
 from api.services import marketing_agents  # noqa: F401
+# Import submission_adapters package so each adapter module's
+# @register_adapter decorator fires at boot.
+from api.services import submission_adapters  # noqa: F401
 
 
 @app.get("/")
