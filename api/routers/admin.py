@@ -7287,9 +7287,10 @@ async def stream_song_stem(
     song_id: str,
     stem_type_with_ext: str,
     db: AsyncSession = Depends(get_db),
-    _admin: ApiKey = Depends(require_admin),
 ):
-    """Stream a single stem by (song_id, stem_type)."""
+    """Stream a single stem by (song_id, stem_type). Open endpoint (no
+    X-API-Key) so HTML5 <audio> can load it without custom headers —
+    same posture as /admin/music/audio/{provider}/{task_id}.mp3."""
     import uuid as _uuid
     from fastapi.responses import Response
     from sqlalchemy import text as _text
