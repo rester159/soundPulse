@@ -354,6 +354,85 @@ export function useHydrationHistory(hours = 24) {
   })
 }
 
+// Songs, releases, generation orchestrator (§17, §24, §30)
+export function useSongs({ status = null, artistId = null, limit = 50 } = {}) {
+  return useQuery({
+    queryKey: ['admin', 'songs', status, artistId, limit],
+    queryFn: () => {
+      const params = { limit }
+      if (status) params.status = status
+      if (artistId) params.primary_artist_id = artistId
+      return makeRequest('GET', '/admin/songs', params)
+    },
+    refetchInterval: 15_000,
+    staleTime: 5_000,
+  })
+}
+
+export function useSong(songId) {
+  return useQuery({
+    queryKey: ['admin', 'songs', songId],
+    queryFn: () => makeRequest('GET', `/admin/songs/${songId}`),
+    enabled: !!songId,
+    staleTime: 10_000,
+  })
+}
+
+export function useMarkQaPassed() {
+  return useMutation({
+    mutationFn: ({ songId }) =>
+      makeRequest('POST', `/admin/songs/${songId}/mark-qa-passed`, {}, {}),
+  })
+}
+
+export function useGenerateSongForBlueprint() {
+  return useMutation({
+    mutationFn: ({ blueprintId, body }) =>
+      makeRequest('POST', `/admin/blueprints/${blueprintId}/generate-song`, {}, body),
+  })
+}
+
+export function useReleases({ status = null, artistId = null } = {}) {
+  return useQuery({
+    queryKey: ['admin', 'releases', status, artistId],
+    queryFn: () => {
+      const params = {}
+      if (status) params.status = status
+      if (artistId) params.artist_id = artistId
+      return makeRequest('GET', '/admin/releases', params)
+    },
+    staleTime: 15_000,
+  })
+}
+
+export function useRelease(releaseId) {
+  return useQuery({
+    queryKey: ['admin', 'releases', releaseId],
+    queryFn: () => makeRequest('GET', `/admin/releases/${releaseId}`),
+    enabled: !!releaseId,
+  })
+}
+
+export function useCreateRelease() {
+  return useMutation({
+    mutationFn: ({ body }) => makeRequest('POST', '/admin/releases', {}, body),
+  })
+}
+
+export function useAddTrackToRelease() {
+  return useMutation({
+    mutationFn: ({ releaseId, body }) =>
+      makeRequest('POST', `/admin/releases/${releaseId}/tracks`, {}, body),
+  })
+}
+
+export function useRemoveTrackFromRelease() {
+  return useMutation({
+    mutationFn: ({ releaseId, songId }) =>
+      makeRequest('DELETE', `/admin/releases/${releaseId}/tracks/${songId}`),
+  })
+}
+
 // Music generation provider hooks (§24, §56)
 export function useMusicProviders() {
   return useQuery({

@@ -5048,6 +5048,7 @@ async def get_song_master(
     _admin: ApiKey = Depends(require_admin),
 ):
     import uuid as _uuid
+    from sqlalchemy import text as _text
     from api.models.songs_master import SongMaster
     try:
         sid = _uuid.UUID(song_id)
@@ -5058,7 +5059,50 @@ async def get_song_master(
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail="song not found")
-    return _song_to_dict(row, full=True)
+
+    # Attached audio_assets — pick the master candidate if there is one
+    assets_result = await db.execute(
+        _text("""
+            SELECT asset_id, provider, provider_job_id, format, duration_seconds,
+                   storage_url, is_master_candidate, loudness_lufs, created_at
+            FROM audio_assets
+            WHERE song_id = :sid
+            ORDER BY is_master_candidate DESC, created_at DESC
+        """),
+        {"sid": sid},
+    )
+    audio_assets = [
+        {
+            "asset_id": str(a[0]),
+            "provider": a[1],
+            "provider_job_id": a[2],
+            "format": a[3],
+            "duration_seconds": a[4],
+            "storage_url": a[5],
+            "is_master_candidate": a[6],
+            "loudness_lufs": a[7],
+            "created_at": a[8].isoformat() if a[8] else None,
+        }
+        for a in assets_result.fetchall()
+    ]
+
+    # Attached artist stage_name + release title for display
+    meta = (await db.execute(
+        _text("""
+            SELECT a.stage_name, r.title
+            FROM songs_master s
+            LEFT JOIN ai_artists a ON a.artist_id = s.primary_artist_id
+            LEFT JOIN releases r ON r.id = s.release_id
+            WHERE s.song_id = :sid
+        """),
+        {"sid": sid},
+    )).fetchone()
+
+    detail = _song_to_dict(row, full=True)
+    detail["audio_assets"] = audio_assets
+    detail["artist_name"] = meta[0] if meta else None
+    detail["release_title"] = meta[1] if meta else None
+    return detail
 
 
 @router.patch("/api/v1/admin/songs/{song_id}")
