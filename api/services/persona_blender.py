@@ -31,6 +31,46 @@ artist persona as a JSON object matching the schema below. Every field is
 mandatory. Be specific and internally consistent — a gravelly-voiced outlaw
 country singer should not have a "cute K-pop" visual direction.
 
+GENRE-ACCURATE DEMOGRAPHICS — READ THIS CAREFULLY:
+
+  The artist's ethnicity, age range, and visual presentation MUST reflect
+  the genre's cultural home and the demographics of the reference artists
+  listed below, UNLESS the user's description explicitly overrides it.
+
+  Default heritage by genre (when the description doesn't specify):
+    K-pop / K-R&B               → Korean, or Korean-American/Korean diaspora
+    J-pop / city-pop            → Japanese, or Japanese diaspora
+    C-pop / Mandopop            → Chinese, Taiwanese, or Hong Kong
+    Afrobeats / Amapiano        → Nigerian, Ghanaian, South African, West African
+    Reggae / dancehall          → Jamaican, Afro-Caribbean
+    Reggaeton / Latin urban     → Puerto Rican, Dominican, Colombian, Mexican
+    Bollywood / Desi hip-hop    → Indian, Pakistani, South Asian diaspora
+    Bhangra / Punjabi pop       → Punjabi, Sikh, South Asian
+    Flamenco / Latin pop        → Spanish, Latin American
+    Highlife / Azonto           → Ghanaian, West African
+    Arabic pop / Khaleeji       → Levantine, Gulf Arab, North African
+    Country / Americana         → American, typically white rural or Black Southern
+    Bluegrass / Appalachian     → White Appalachian American
+    Hip-hop / trap / drill      → Black American, or matches the specific scene
+                                   (UK drill → Black British; Brazilian funk → Afro-Brazilian)
+    R&B / neo-soul              → predominantly Black American, mixed-heritage
+    Indie / bedroom pop         → globally diverse — follow reference artists
+    Electronic / techno / house → globally diverse — follow reference artists
+
+  If reference artists are provided below, your ethnicity_heritage MUST be
+  consistent with theirs. If the reference list is empty, use the defaults
+  above. Never output a generic "ambiguous" or "mixed" heritage unless the
+  genre demands it.
+
+  Age range: 20-30 is typical for breakthrough AI artists. Go younger
+  (18-22) for K-pop/drill/hyperpop; older (28-40) for country/reggae/jazz.
+  Match the genre's typical breakthrough age.
+
+  Gender presentation: pick "female", "male", or "non_binary" based on the
+  description; if unspecified, match the majority presentation of the
+  reference artists, then default to whatever creates a more distinctive
+  persona in the current roster.
+
 STAGE NAME RULES — THIS IS CRITICAL. Read carefully:
 
   GOOD names (use these as a quality bar):
@@ -77,13 +117,16 @@ Schema (return EXACTLY this shape, valid JSON, no markdown fences, no prose):
 {
   "stage_name_alternatives": ["string", "string", "string", "string", "string"],
   "stage_name": "string — equals stage_name_alternatives[0], your top pick",
-  "legal_name": "string — real-sounding legal name, distinct from stage_name",
+  "legal_name": "string — real-sounding legal name in the artist's own language/script convention (e.g. Korean-romanized for K-pop, Spanish for reggaeton, Jamaican-English for reggae)",
   "primary_genre": "string — echoes the target genre",
   "adjacent_genres": ["string", "string", "string"],
   "influences": ["string (real artist name)", "..."],
   "anti_influences": ["string (real artist name to explicitly NOT sound like)"],
   "audience_tags": ["string like gen_z | rural | female_lean | latin | ..."],
   "content_rating": "clean | mild | explicit",
+  "age": 24,
+  "gender_presentation": "female | male | non_binary",
+  "ethnicity_heritage": "string — SPECIFIC heritage that matches the genre and reference artists (e.g. 'Korean', 'Jamaican', 'Nigerian Yoruba', 'Mexican-American', 'Punjabi', 'Black American / Southern US'). Do NOT write vague answers like 'mixed' or 'international'.",
   "voice_dna": {
     "timbre_core": "one-line description of vocal timbre",
     "range_estimate": "e.g. A2-E4 chest, falsetto to A4",
@@ -214,6 +257,21 @@ async def blend_persona(
     for key in ("stage_name", "legal_name", "primary_genre", "voice_dna", "visual_dna"):
         if key not in persona:
             raise ValueError(f"persona missing required field: {key}")
+
+    # Demographics: hard-require heritage so the portrait has something to
+    # anchor on. Gender + age are softer — default if missing.
+    if not (persona.get("ethnicity_heritage") or "").strip():
+        raise ValueError(
+            "persona missing ethnicity_heritage — portrait will be ungrounded. "
+            "Retry the blend."
+        )
+    if not persona.get("gender_presentation"):
+        persona["gender_presentation"] = "female"  # arbitrary but deterministic
+    if not isinstance(persona.get("age"), int):
+        try:
+            persona["age"] = int(persona.get("age") or 25)
+        except (TypeError, ValueError):
+            persona["age"] = 25
 
     # Ensure stage_name_alternatives is present + non-empty; if the LLM
     # skipped it, synthesize from the top stage_name so downstream code
