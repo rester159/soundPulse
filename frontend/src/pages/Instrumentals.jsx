@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import {
   Sliders, Loader2, Upload, Trash2, Music2, Play,
-  Zap, Hash, AlertCircle, CheckCircle2, Sparkles, X,
+  Zap, Hash, AlertCircle, CheckCircle2, Sparkles, X, FileAudio,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -32,8 +32,32 @@ function UploadForm({ onDone }) {
   const [genreHint, setGenreHint] = useState('')
   const [notes, setNotes] = useState('')
   const [error, setError] = useState(null)
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef(null)
   const upload = useUploadInstrumental()
   const qc = useQueryClient()
+
+  const openFilePicker = () => {
+    fileInputRef.current?.click()
+  }
+
+  const handleFileChange = (f) => {
+    if (!f) return
+    setFile(f)
+    setError(null)
+    // Auto-fill title from filename if title is empty
+    if (!title.trim()) {
+      const name = f.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ')
+      setTitle(name)
+    }
+  }
+
+  const handleDrop = (e) => {
+    e.preventDefault()
+    setDragOver(false)
+    const f = e.dataTransfer.files?.[0]
+    if (f) handleFileChange(f)
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -65,10 +89,56 @@ function UploadForm({ onDone }) {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4 space-y-3">
+    <form onSubmit={handleSubmit} className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4 space-y-4">
       <div className="flex items-center gap-2 text-sm font-medium text-zinc-300">
         <Upload size={14} /> Upload Instrumental
       </div>
+
+      {/* Hidden native file input — triggered by the dropzone click */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/flac,audio/x-flac,audio/ogg,audio/aac,audio/mp4,audio/x-m4a,.mp3,.wav,.flac,.ogg,.aac,.m4a"
+        onChange={(e) => handleFileChange(e.target.files?.[0])}
+        className="hidden"
+      />
+
+      {/* Big obvious drop/click zone */}
+      <button
+        type="button"
+        onClick={openFilePicker}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        className={`w-full border-2 border-dashed rounded-lg p-6 flex flex-col items-center gap-2 transition-colors cursor-pointer ${
+          dragOver
+            ? 'border-violet-500 bg-violet-500/10'
+            : file
+              ? 'border-emerald-500/50 bg-emerald-500/5 hover:bg-emerald-500/10'
+              : 'border-zinc-700 bg-zinc-950/50 hover:border-violet-500 hover:bg-zinc-900'
+        }`}
+      >
+        {file ? (
+          <>
+            <FileAudio size={28} className="text-emerald-400" />
+            <div className="text-sm font-medium text-zinc-100">{file.name}</div>
+            <div className="text-[11px] text-zinc-500">
+              {formatBytes(file.size)} · {file.type || 'audio'}
+            </div>
+            <div className="text-[10px] text-violet-400 mt-1">click to choose a different file</div>
+          </>
+        ) : (
+          <>
+            <Upload size={28} className="text-zinc-500" />
+            <div className="text-sm font-medium text-zinc-200">
+              Click to choose an audio file
+            </div>
+            <div className="text-[11px] text-zinc-500">
+              or drag and drop · mp3 / wav / flac / ogg / aac / m4a · max 40MB
+            </div>
+          </>
+        )}
+      </button>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-xs text-zinc-400">
@@ -79,15 +149,6 @@ function UploadForm({ onDone }) {
             onChange={(e) => setTitle(e.target.value)}
             placeholder="e.g. Kingston Rooftop Beat"
             className="w-full mt-1 px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-500"
-          />
-        </label>
-        <label className="text-xs text-zinc-400">
-          File (mp3/wav/flac, max 40MB) <span className="text-rose-400">*</span>
-          <input
-            type="file"
-            accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/flac,audio/x-flac,audio/ogg,audio/aac,audio/mp4,audio/x-m4a,.mp3,.wav,.flac,.ogg,.aac,.m4a"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-            className="w-full mt-1 px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100 file:mr-3 file:px-3 file:py-1 file:bg-zinc-800 file:text-zinc-300 file:border-0 file:rounded file:text-xs"
           />
         </label>
         <label className="text-xs text-zinc-400">
@@ -139,14 +200,19 @@ function UploadForm({ onDone }) {
         </div>
       )}
 
-      <div className="flex items-center justify-end gap-2 pt-1">
+      <div className="flex items-center justify-between gap-2 pt-1">
+        <div className="text-[11px] text-zinc-500">
+          {!file && 'Pick an audio file above to enable submission'}
+          {file && !title.trim() && 'Title is auto-filled from the filename — you can edit it'}
+          {file && title.trim() && 'Ready to submit'}
+        </div>
         <button
           type="submit"
-          disabled={upload.isPending}
-          className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm rounded flex items-center gap-2 transition-colors"
+          disabled={upload.isPending || !file || !title.trim()}
+          className="px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed text-white text-sm font-medium rounded flex items-center gap-2 transition-colors"
         >
           {upload.isPending ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-          {upload.isPending ? 'Uploading…' : 'Upload'}
+          {upload.isPending ? 'Uploading…' : 'Submit upload'}
         </button>
       </div>
     </form>
