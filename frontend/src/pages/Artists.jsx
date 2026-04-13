@@ -18,6 +18,17 @@ function resolveBackendUrl(url) {
   return url
 }
 
+function formatDnaValue(value) {
+  if (value === null || value === undefined) return null
+  if (Array.isArray(value)) return value.join(', ')
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+function humanizeKey(k) {
+  return k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
 function DNABlock({ icon: Icon, title, data, color = 'violet' }) {
   if (!data || Object.keys(data).length === 0) return null
   const colorCls = {
@@ -27,14 +38,31 @@ function DNABlock({ icon: Icon, title, data, color = 'violet' }) {
     emerald: 'border-emerald-500/30 bg-emerald-500/5 text-emerald-200',
     rose:    'border-rose-500/30 bg-rose-500/5 text-rose-200',
   }[color]
+  // Skip UUID-ish fields — they're implementation details, not human-readable
+  const skipKeys = new Set([
+    'reference_sheet_asset_id', 'seed_song_id', 'suno_persona_id',
+    'reference_song_ids', 'consistency_strategy',
+  ])
+  const entries = Object.entries(data)
+    .filter(([k, v]) => !skipKeys.has(k) && v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => [humanizeKey(k), formatDnaValue(v)])
+    .filter(([, v]) => v && v !== '{}' && v !== '[]')
+
+  if (entries.length === 0) return null
+
   return (
     <div className={`rounded border ${colorCls} p-3`}>
       <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-semibold mb-2 opacity-80">
         <Icon size={11} /> {title}
       </div>
-      <pre className="text-[10px] text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-y-auto">
-        {JSON.stringify(data, null, 2)}
-      </pre>
+      <div className="space-y-1.5">
+        {entries.map(([label, val]) => (
+          <div key={label} className="text-[11px] leading-snug">
+            <span className="text-zinc-500 font-semibold">{label}:</span>{' '}
+            <span className="text-zinc-200">{val}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -134,10 +162,12 @@ function ArtistCard({ artist, expanded, onToggle }) {
             </div>
           )}
 
-          {/* DNA JSONs */}
+          {/* DNA blocks */}
           <div className="grid grid-cols-2 gap-2">
-            <DNABlock icon={Mic}      title="Voice DNA"   data={artist.voice_dna}   color="violet" />
-            <DNABlock icon={BookOpen} title="Lyrical DNA" data={artist.lyrical_dna} color="cyan" />
+            <DNABlock icon={Mic}      title="Voice DNA"    data={artist.voice_dna}    color="violet" />
+            <DNABlock icon={BookOpen} title="Lyrical DNA"  data={artist.lyrical_dna}  color="cyan" />
+            <DNABlock icon={Palette}  title="Visual DNA"   data={artist.visual_dna}   color="amber" />
+            <DNABlock icon={Users}    title="Persona"      data={artist.persona_dna}  color="emerald" />
           </div>
 
           {/* Recent songs */}

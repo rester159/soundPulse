@@ -11,9 +11,9 @@ Steps proven:
   2. CEO gate decision row lands in ceo_decisions
   3. CEO approve endpoint flips blueprint to assigned + sets artist FK
   4. Generation orchestrator creates songs_master draft + submits to provider
-  5. Provider poll transitions song draft → qa_pending + creates audio_assets
+  5. Provider poll transitions song draft -> qa_pending + creates audio_assets
   6. Audio bytes are self-hosted (reachable without provider delivery URL)
-  7. Audio QA lite sweep flips qa_pending → qa_passed
+  7. Audio QA lite sweep flips qa_pending -> qa_passed
   8. Release creation + track binding transitions song to assigned_to_release
 
 Uses only endpoints, no ORM. This is a smoke test, not a unit test.
@@ -59,7 +59,9 @@ def client():
             "X-API-Key": ADMIN_KEY,
             "Content-Type": "application/json",
         },
-        timeout=30.0,
+        # 120s — long enough for LLM + DALL-E combo calls in the
+        # orchestrator / artist creation paths
+        timeout=120.0,
     ) as c:
         yield c
 
@@ -391,7 +393,7 @@ def test_10_full_real_breakout_to_song_flow(client: httpx.Client):
     portrait = created.get("portrait")
     if portrait:
         print(f"      portrait: {portrait['provider']} {portrait['bytes']} bytes "
-              f"→ {portrait['storage_url']}")
+              f"-> {portrait['storage_url']}")
     else:
         print(f"      portrait: NOT GENERATED — check OPENAI_CLI_PROXY_URL / OPENAI_API_KEY")
 
@@ -431,7 +433,7 @@ def test_10_full_real_breakout_to_song_flow(client: httpx.Client):
     assert gen["estimated_cost_usd"] == pytest.approx(0.064, abs=0.001)
     cover = gen.get("cover")
     if cover:
-        print(f"      cover: {cover['provider']} → {cover['storage_url']}")
+        print(f"      cover: {cover['provider']} -> {cover['storage_url']}")
     else:
         print(f"      cover: NOT GENERATED")
 

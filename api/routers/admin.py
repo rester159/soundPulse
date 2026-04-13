@@ -4241,7 +4241,10 @@ async def create_artist_from_description(
     row = AIArtist(
         stage_name=persona.get("stage_name"),
         legal_name=persona.get("legal_name") or persona.get("stage_name"),
-        primary_genre=persona.get("primary_genre") or body.target_genre,
+        # The caller's target_genre is authoritative — the LLM tends to
+        # simplify ugly genre ids (e.g. "pop__e2e_abc123" -> "pop") which
+        # breaks the assignment engine's exact-match score.
+        primary_genre=body.target_genre,
         adjacent_genres=persona.get("adjacent_genres") or None,
         influences=persona.get("influences") or None,
         anti_influences=persona.get("anti_influences") or None,
@@ -4328,12 +4331,20 @@ async def list_ai_artists(
             {
                 "artist_id": str(r.artist_id),
                 "stage_name": r.stage_name,
+                "legal_name": r.legal_name,
                 "primary_genre": r.primary_genre,
                 "adjacent_genres": r.adjacent_genres,
+                "influences": r.influences,
+                "anti_influences": r.anti_influences,
                 "song_count": r.song_count,
                 "audience_tags": r.audience_tags,
+                "content_rating": r.content_rating,
                 "voice_dna": r.voice_dna,
+                "visual_dna": r.visual_dna,
+                "fashion_dna": r.fashion_dna,
                 "lyrical_dna": r.lyrical_dna,
+                "persona_dna": r.persona_dna,
+                "social_dna": r.social_dna,
                 "ceo_approved": r.ceo_approved,
                 "created_at": r.created_at.isoformat(),
             }
