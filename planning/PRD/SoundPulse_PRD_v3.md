@@ -1619,6 +1619,24 @@ Multiple `audio_assets` per song are allowed (regeneration attempts). Best is ma
 
 If QA (§25) fails, regenerate with same prompt up to 3 attempts. After 3 failures, escalate to CEO (decision_type: `generation_failure`).
 
+### Release assembly is a separate step (deliberate)
+
+Generation writes a `songs_master` row in `draft` status with a `NULL` `release_id`. It does **not** create a `releases` row or a `release_track_record`. That binding happens later in §30 when the user (or the Distribution / Submissions Agent) decides which release a passing-QA song belongs to — a single, an EP cut, part of an album, or a surprise drop.
+
+**Why separate:** one song can live as a post-QA draft for days or weeks before the release strategy is finalized, and the same song might be promoted from "pending" to "lead single" without regeneration. Forcing release creation at generation time bakes a decision that PRD §27's "generate once, transform outward per target service" principle explicitly wants to defer.
+
+The status transitions for a song are:
+
+```
+draft          → qa_pending   (orchestrator submits to provider)
+qa_pending     → qa_passed    (§25 audio QA succeeds)
+qa_pending     → qa_failed    (retry up to 3x, then escalate)
+qa_passed      → assigned_to_release  (§30 release assembly binds release_id)
+assigned_to_release → submitted       (§28 distribution submission)
+submitted      → live         (distributor confirms publication)
+live           → archived | taken_down
+```
+
 ---
 
 ## §25. Audio QA

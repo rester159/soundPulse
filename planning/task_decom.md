@@ -154,8 +154,9 @@ These are tables referenced by §24–47 logic that still need schema + models.
 
 ### P1.E — Song production pipeline (PRD §24–27)
 
-- [ ] **T-160** [§24] Blueprint → generation orchestrator — reads `blueprint.assigned_artist_id`, builds full prompt including `voice_dna_summary` + `voice_state_reference_block`, calls music provider, writes `audio_assets` + updates `songs_master`
-      **Depends:** T-100, T-103, T-128, T-133
+- [ ] **T-160** [§24] Blueprint → generation orchestrator — reads `blueprint.assigned_artist_id`, fetches artist + optional `artist_voice_state`, builds full prompt (`voice_dna_summary` + optional `voice_state_reference_block` + `blueprint.smart_prompt_text`), calls music provider via registry, persists `songs_master` row in `draft` status bound to blueprint+artist, persists `music_generation_calls` + audio bytes on success. **Does NOT create a `releases` row** — that binding happens in T-183 per PRD §24 explicit decision. Status starts at `draft`; QA transitions it to `qa_passed`; release assignment is the next gate.
+      **Depends:** T-100, T-103, T-128 (or artist stub), T-133 (or null-voice-state path)
+      **Acceptance:** POST /admin/blueprints/{id}/generate-song returns `{song_id, task_id, provider}`; `songs_master` row exists with `status=draft`, `release_id=NULL`, `generation_provider_job_id` set; follow-up poll lands audio_assets row + flips status to `qa_pending` when provider succeeds.
 - [ ] **T-161** [§24] Regeneration retry policy — up to 3 QA-failed attempts, then escalate to CEO via T-150
       **Depends:** T-160, T-104, T-150
 - [ ] **T-162** [§25] Audio QA service — Essentia/Librosa checks for tempo, key, energy, silence, clipping, loudness normalization, lyric intelligibility, vocal prominence
@@ -187,7 +188,7 @@ These are tables referenced by §24–47 logic that still need schema + models.
 - [ ] **T-181** [§29] Submission ordering DAG — enforce "distribution → identifiers → rights → marketing"
 - [ ] **T-182** [§30] LabelGrid distribution connector — OAuth setup, metadata push, submission polling
       **Blocked by:** LabelGrid account provisioning
-- [ ] **T-183** [§30] Release assembly service — bundle song(s) into a release row + release_track_record
+- [ ] **T-183** [§30] Release assembly service — bundle song(s) into a release row + release_track_record. **This is the sole place `releases` rows get created** per the §24 deliberate separation — generation never does it. Flips `songs_master.status` from `qa_passed` to `assigned_to_release` and populates `release_id`.
       **Depends:** T-101, T-102
 - [ ] **T-184** [§29] ISRC/UPC ingestion — on distributor ACK, pull identifiers and update `songs_master.isrc` + `releases.upc`
       **Depends:** T-182, T-183
@@ -334,3 +335,7 @@ These are tables referenced by §24–47 logic that still need schema + models.
 
 - 2026-04-12: T-001 through T-058 marked done (Phase 0 snapshot)
 - 2026-04-12: T-100 `songs_master` migration 014, model, 4 admin endpoints (commit cc82211)
+- 2026-04-12: T-100 6/6 smoke test verified + 409 polish on ISRC conflict (commit 0034434)
+- 2026-04-12: T-101..T-112 entity batch — migration 015, 13 tables + songs_master deferred FKs (commit feb152e)
+- 2026-04-12: Audio self-hosting fix — migration 016 music_generation_audio sidecar, streaming endpoint, Classical song marked expired (commit feb152e)
+- 2026-04-12: PRD §24 clarified — release assembly is a SEPARATE step, not bundled into generation. Status lifecycle enumerated: draft → qa_pending → qa_passed → assigned_to_release → submitted → live.
