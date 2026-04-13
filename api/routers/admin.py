@@ -6302,6 +6302,111 @@ async def generate_song_with_instrumental(
     }
 
 
+# ---------------------------------------------------------------------
+# Genre traits — Task #93
+#   Multi-dimensional profile per genre (edginess, meme density,
+#   earworm demand, etc). Seeded by migration 020; CEO can override.
+#   Read by smart_prompt.py to scale behavior per genre.
+# ---------------------------------------------------------------------
+
+@router.get("/api/v1/admin/genre-traits")
+async def list_genre_traits(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Return every genre_traits row. Used by the admin UI to show the
+    matrix and let the CEO bulk-edit."""
+    from api.models.genre_traits import GenreTraits
+    rows = (
+        await db.execute(
+            select(GenreTraits).order_by(GenreTraits.genre_id.asc())
+        )
+    ).scalars().all()
+    return {
+        "count": len(rows),
+        "traits": [
+            {
+                "id": str(r.id),
+                "genre_id": r.genre_id,
+                "edginess": r.edginess,
+                "meme_density": r.meme_density,
+                "earworm_demand": r.earworm_demand,
+                "sonic_experimentation": r.sonic_experimentation,
+                "lyrical_complexity": r.lyrical_complexity,
+                "vocal_processing": r.vocal_processing,
+                "tempo_range_bpm": r.tempo_range_bpm,
+                "key_mood": r.key_mood,
+                "default_edge_profile": r.default_edge_profile,
+                "vocabulary_era": r.vocabulary_era,
+                "pop_culture_sources": r.pop_culture_sources,
+                "instrumentation_palette": r.instrumentation_palette,
+                "structural_conventions": r.structural_conventions,
+                "notes": r.notes,
+                "updated_by": r.updated_by,
+                "is_system_default": r.is_system_default,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.put("/api/v1/admin/genre-traits/{genre_id:path}")
+async def update_genre_traits(
+    genre_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Update a genre_traits row — used by the CEO to override defaults.
+    Flips is_system_default=FALSE so subsequent seeds don't clobber."""
+    from api.models.genre_traits import GenreTraits
+    from sqlalchemy import text as _text
+    row = (
+        await db.execute(
+            select(GenreTraits).where(GenreTraits.genre_id == genre_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail=f"genre_traits for '{genre_id}' not found")
+
+    allowed_int_fields = {
+        "edginess", "meme_density", "earworm_demand",
+        "sonic_experimentation", "lyrical_complexity", "vocal_processing",
+    }
+    for k in allowed_int_fields:
+        if k in body and body[k] is not None:
+            v = int(body[k])
+            if v < 0 or v > 100:
+                raise HTTPException(400, detail=f"{k} must be 0-100")
+            setattr(row, k, v)
+
+    if "tempo_range_bpm" in body and isinstance(body["tempo_range_bpm"], list) and len(body["tempo_range_bpm"]) == 2:
+        row.tempo_range_bpm = [int(body["tempo_range_bpm"][0]), int(body["tempo_range_bpm"][1])]
+
+    for k in ("key_mood", "default_edge_profile", "vocabulary_era", "structural_conventions", "notes"):
+        if k in body and body[k] is not None:
+            setattr(row, k, str(body[k]))
+
+    for k in ("pop_culture_sources", "instrumentation_palette"):
+        if k in body and isinstance(body[k], list):
+            setattr(row, k, [str(x) for x in body[k]])
+
+    row.is_system_default = False
+    row.updated_by = body.get("updated_by") or "ceo_admin_ui"
+    await db.execute(
+        _text("UPDATE genre_traits SET updated_at = NOW() WHERE id = :id"),
+        {"id": row.id},
+    )
+    await db.commit()
+    await db.refresh(row)
+    return {
+        "genre_id": row.genre_id,
+        "is_system_default": row.is_system_default,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
 @router.post("/api/v1/admin/pop-culture/refresh")
 async def pop_culture_refresh(
     db: AsyncSession = Depends(get_db),

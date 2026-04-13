@@ -34,6 +34,10 @@ from api.models.genre_feature_delta import GenreFeatureDelta
 from api.models.genre_lyrical_analysis import GenreLyricalAnalysis
 from api.services.gap_finder import find_gaps
 from api.services.llm_client import llm_chat
+from api.services.genre_traits_service import (
+    format_traits_for_smart_prompt,
+    resolve_genre_traits,
+)
 from api.services.pop_culture_scraper import (
     fetch_references_for_prompt,
     format_references_block,
@@ -268,7 +272,12 @@ async def generate_smart_prompt(
     safe-but-still-interesting middle. Drives pop-culture reference
     filtering so a clean_edge persona never sees savage references.
     """
-    effective_edge = edge_profile or "flirty_edge"
+    # Resolve genre traits BEFORE everything else so the edge profile
+    # and meme density filters can use them. If caller didn't pass an
+    # edge_profile, default to the genre's preferred tier from
+    # genre_traits (e.g. reggae → savage_edge, country → clean_edge).
+    genre_traits = await resolve_genre_traits(db, genre)
+    effective_edge = edge_profile or genre_traits.default_edge_profile or "flirty_edge"
     today = date.today()
     window_start = today - timedelta(days=30)
 
@@ -333,13 +342,31 @@ async def generate_smart_prompt(
     # artist edge profile. Genre is typically dotted (pop.k-pop); we pass
     # the top-level token so 'pop' references surface for k-pop too.
     top_genre = genre.split(".", 1)[0] if "." in genre else genre
-    pop_refs = await fetch_references_for_prompt(
-        db,
-        genre=top_genre,
-        edge_profile=effective_edge,
-        limit=8,
-    )
+
+    # Gate on meme_density — if the genre has low meme tolerance
+    # (bluegrass, classical, outlaw country), don't inject live TikTok
+    # references at all. Concrete storytelling is better for those.
+    if genre_traits.meme_density >= 25:
+        pop_refs = await fetch_references_for_prompt(
+            db,
+            genre=top_genre,
+            edge_profile=effective_edge,
+            limit=8,
+        )
+        # Also filter by genre_traits.pop_culture_sources if set — so a
+        # reggae request only surfaces brand+slang+lyric_phrase refs,
+        # not gaming or white-lotus-style memes.
+        if genre_traits.pop_culture_sources:
+            allowed = set(genre_traits.pop_culture_sources)
+            pop_refs = [r for r in pop_refs if r.get("type") in allowed]
+    else:
+        pop_refs = []
     pop_culture_block = format_references_block(pop_refs, effective_edge)
+
+    # Always prepend the genre traits block so the LLM knows the
+    # dimensions to respect.
+    traits_block = format_traits_for_smart_prompt(genre_traits)
+    pop_culture_block = traits_block + "\n\n" + pop_culture_block
 
     # ---- Build the LLM prompt ----
     prompt_text = SMART_PROMPT_TEMPLATE.format(
