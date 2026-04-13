@@ -254,3 +254,145 @@ def health_check():
     except Exception as e:
         logger.exception("Health check failed")
         return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------
+# Autonomous pipeline sweeps — PRD §29 Phase 3 fully-automatic path
+# ---------------------------------------------------------------------
+
+@app.task(name="scrapers.tasks.run_metadata_projection_sweep")
+def run_metadata_projection_sweep():
+    """Walk qa_passed songs without an ISRC and project metadata."""
+    try:
+        from api.database import get_db_context
+        from api.services.metadata_projection import project_metadata_for_song
+        from api.models.ai_artist import AIArtist
+        from api.models.songs_master import SongMaster
+        from sqlalchemy import select
+
+        async def _run():
+            async with get_db_context() as db:
+                songs = (await db.execute(
+                    select(SongMaster).where(
+                        SongMaster.status == "qa_passed",
+                        SongMaster.isrc.is_(None),
+                    ).limit(25)
+                )).scalars().all()
+                projected = 0
+                for s in songs:
+                    artist = (await db.execute(
+                        select(AIArtist).where(AIArtist.artist_id == s.primary_artist_id)
+                    )).scalar_one_or_none()
+                    if artist:
+                        try:
+                            await project_metadata_for_song(db, song=s, artist=artist)
+                            projected += 1
+                        except Exception as e:
+                            logger.exception("metadata projection failed for %s", s.song_id)
+                return {"scanned": len(songs), "projected": projected}
+
+        loop = asyncio.new_event_loop()
+        r = loop.run_until_complete(_run())
+        loop.close()
+        return r
+    except Exception as e:
+        logger.exception("metadata projection sweep failed")
+        return {"error": str(e)}
+
+
+@app.task(name="scrapers.tasks.run_downstream_pipeline_sweep")
+def run_downstream_pipeline_sweep():
+    """
+    Walk qa_passed songs with metadata projected and dispatch them
+    through the downstream pipeline (distributors, PROs, sync,
+    playlists, marketing). This is the autonomous loop that makes
+    the entire submission side run itself.
+    """
+    try:
+        from api.database import get_db_context
+        from api.services.submissions_agent import sweep_downstream_pipeline
+
+        async def _run():
+            async with get_db_context() as db:
+                return await sweep_downstream_pipeline(db, limit=10)
+
+        loop = asyncio.new_event_loop()
+        r = loop.run_until_complete(_run())
+        loop.close()
+        return r
+    except Exception as e:
+        logger.exception("downstream pipeline sweep failed")
+        return {"error": str(e)}
+
+
+@app.task(name="scrapers.tasks.run_audio_qa_full_sweep")
+def run_audio_qa_full_sweep():
+    """Run librosa-backed audio QA on qa_passed songs missing tempo_bpm."""
+    try:
+        from api.database import get_db_context
+        from api.services.audio_qa_full import full_qa_for_song
+        from api.models.songs_master import SongMaster
+        from sqlalchemy import select
+
+        async def _run():
+            async with get_db_context() as db:
+                songs = (await db.execute(
+                    select(SongMaster).where(
+                        SongMaster.status == "qa_passed",
+                        SongMaster.tempo_bpm.is_(None),
+                    ).limit(20)
+                )).scalars().all()
+                done = 0
+                for s in songs:
+                    r = await full_qa_for_song(db, song_id=s.song_id)
+                    if r.get("status") == "done":
+                        done += 1
+                return {"scanned": len(songs), "analyzed": done}
+
+        loop = asyncio.new_event_loop()
+        r = loop.run_until_complete(_run())
+        loop.close()
+        return r
+    except Exception as e:
+        logger.exception("audio qa full sweep failed")
+        return {"error": str(e)}
+
+
+@app.task(name="scrapers.tasks.run_duplicate_detection_sweep")
+def run_duplicate_detection_sweep():
+    """Cosine similarity over MFCC-13 embeddings to flag duplicates."""
+    try:
+        from api.database import get_db_context
+        from api.services.duplicate_detection import run_duplicate_sweep
+
+        async def _run():
+            async with get_db_context() as db:
+                return await run_duplicate_sweep(db)
+
+        loop = asyncio.new_event_loop()
+        r = loop.run_until_complete(_run())
+        loop.close()
+        return r
+    except Exception as e:
+        logger.exception("duplicate detection sweep failed")
+        return {"error": str(e)}
+
+
+@app.task(name="scrapers.tasks.run_pop_culture_refresh")
+def run_pop_culture_refresh():
+    """Weekly pop-culture reference harvest via Gemini flash."""
+    try:
+        from api.database import get_db_context
+        from api.services.pop_culture_scraper import refresh_pop_culture_references
+
+        async def _run():
+            async with get_db_context() as db:
+                return await refresh_pop_culture_references(db, caller="celery_beat")
+
+        loop = asyncio.new_event_loop()
+        r = loop.run_until_complete(_run())
+        loop.close()
+        return r
+    except Exception as e:
+        logger.exception("pop culture refresh failed")
+        return {"error": str(e)}

@@ -79,8 +79,30 @@ app.config_from_object({
         },
         "spotify-audio-enrich-daily": {
             "task": "scrapers.tasks.run_scraper",
-            "schedule": crontab(minute=0, hour=5),  # 5am UTC daily, after main scrapes
+            "schedule": crontab(minute=0, hour=5),
             "args": ("spotify_audio",),
+        },
+
+        # --- Phase 3 production pipeline autonomous sweeps ---
+        "audio-qa-full-every-2h": {
+            "task": "scrapers.tasks.run_audio_qa_full_sweep",
+            "schedule": crontab(minute=5, hour="*/2"),
+        },
+        "metadata-projection-every-2h": {
+            "task": "scrapers.tasks.run_metadata_projection_sweep",
+            "schedule": crontab(minute=10, hour="*/2"),
+        },
+        "duplicate-detection-daily": {
+            "task": "scrapers.tasks.run_duplicate_detection_sweep",
+            "schedule": crontab(minute=20, hour=2),
+        },
+        "downstream-pipeline-every-3h": {
+            "task": "scrapers.tasks.run_downstream_pipeline_sweep",
+            "schedule": crontab(minute=30, hour="*/3"),
+        },
+        "pop-culture-refresh-weekly": {
+            "task": "scrapers.tasks.run_pop_culture_refresh",
+            "schedule": crontab(minute=0, hour=9, day_of_week=1),
         },
     },
 })
