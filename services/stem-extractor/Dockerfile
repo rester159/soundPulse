@@ -42,10 +42,15 @@ RUN pip install --no-cache-dir librosa==0.10.1
 # PyTorch is already installed above — this is pure Python glue.
 RUN pip install --no-cache-dir silero-vad==5.1
 
-# Pre-download the default Demucs model weights at build time so the
-# first job doesn't pay a ~500MB cold start. 'htdemucs' is the
-# default hybrid-transformer model, best quality for 4-stem separation.
-RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
+# Pre-download BOTH Demucs model weights at build time so cold start
+# is free regardless of which model the worker picks at runtime.
+#  - mdx_extra_q (default): ~2-3x faster on CPU, small quality hit
+#    on the vocals stem; comfortably fits in the 30min timeout on
+#    Railway's shared vCPU even for 3min+ songs.
+#  - htdemucs: best quality hybrid-transformer, kept as a fallback
+#    when DEMUCS_MODEL=htdemucs is set explicitly (dedicated CPU /
+#    quality-first jobs).
+RUN python -c "from demucs.pretrained import get_model; get_model('mdx_extra_q'); get_model('htdemucs')"
 
 COPY worker.py /app/
 

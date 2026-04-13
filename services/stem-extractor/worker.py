@@ -59,7 +59,15 @@ API_BASE = (os.environ.get("SOUNDPULSE_API") or "http://localhost:8000").rstrip(
 API_KEY = os.environ.get("API_ADMIN_KEY", "").strip()
 WORKER_ID = os.environ.get("WORKER_ID", socket.gethostname())
 POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "30"))
-DEMUCS_MODEL = os.environ.get("DEMUCS_MODEL", "htdemucs")
+# mdx_extra_q is ~2-3x faster than htdemucs on CPU with a small
+# quality hit on the vocals stem — worth it on Railway's shared
+# vCPU where htdemucs on a ~3min track can brush the 30min wall.
+# Override with DEMUCS_MODEL=htdemucs if you're on a dedicated box.
+DEMUCS_MODEL = os.environ.get("DEMUCS_MODEL", "mdx_extra_q")
+# Hard cap on the Demucs subprocess. Set high enough to survive
+# shared-CPU contention on Railway, but still bounded so a bug
+# doesn't hang a worker forever. 30 min = 3x the typical p95.
+DEMUCS_TIMEOUT_SEC = int(os.environ.get("DEMUCS_TIMEOUT_SEC", "1800"))
 STORE_EXTRAS = os.environ.get("STEM_STORE_EXTRAS", "0") == "1"
 
 if not API_KEY:
@@ -533,7 +541,9 @@ def _run_demucs(input_path: Path, out_dir: Path) -> dict[str, Path]:
         "--mp3",  # output mp3 so our final payload is already small
         str(input_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=DEMUCS_TIMEOUT_SEC,
+    )
     if result.returncode != 0:
         raise RuntimeError(
             f"demucs exit {result.returncode}: "
