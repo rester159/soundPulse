@@ -17,3 +17,4 @@ from . import distrokid  # noqa: F401
 from . import mlc  # noqa: F401
 from . import submithub  # noqa: F401
 from . import youtube_content_id  # noqa: F401
+from . import playwright_distributors  # noqa: F401  # tunecore, cd-baby, amuse, unitedmasters
