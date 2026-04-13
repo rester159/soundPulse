@@ -4192,6 +4192,375 @@ async def list_ai_artists(
     }
 
 
+class ReleaseCreateRequest(BaseModel):
+    artist_id: str
+    title: str
+    release_type: str = "single"  # single | EP | album | compilation
+    release_date: str | None = None  # ISO date
+    pre_save_date: str | None = None
+    distributor: str | None = None
+    territory_rights: list[str] | None = None  # ISO country codes, default WORLD
+
+
+class ReleaseAddTrackRequest(BaseModel):
+    song_id: str
+    track_number: int = 1
+    is_lead_single: bool = False
+
+
+@router.post("/api/v1/admin/releases")
+async def create_release(
+    body: ReleaseCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """T-183: create a release in 'planning' status. Tracks are added separately."""
+    import uuid as _uuid
+    from datetime import date as _date
+    from sqlalchemy import text as _text
+
+    try:
+        artist_uuid = _uuid.UUID(body.artist_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid artist_id")
+
+    valid_types = {"single", "EP", "album", "compilation"}
+    if body.release_type not in valid_types:
+        raise HTTPException(400, detail=f"release_type must be one of {valid_types}")
+
+    rel_date = _date.fromisoformat(body.release_date) if body.release_date else None
+    pre_save = _date.fromisoformat(body.pre_save_date) if body.pre_save_date else None
+
+    r = await db.execute(
+        _text("""
+            INSERT INTO releases
+              (artist_id, title, release_type, release_date, pre_save_date,
+               distributor, territory_rights, status)
+            VALUES (:aid, :title, :rtype, :rdate, :pdate, :dist, :tr, 'planning')
+            RETURNING id, status, created_at
+        """),
+        {
+            "aid": artist_uuid,
+            "title": body.title,
+            "rtype": body.release_type,
+            "rdate": rel_date,
+            "pdate": pre_save,
+            "dist": body.distributor,
+            "tr": body.territory_rights or ["WORLD"],
+        },
+    )
+    row = r.fetchone()
+    await db.commit()
+    return {
+        "id": str(row[0]),
+        "artist_id": body.artist_id,
+        "title": body.title,
+        "release_type": body.release_type,
+        "status": row[1],
+        "created_at": row[2].isoformat(),
+        "track_count": 0,
+    }
+
+
+@router.get("/api/v1/admin/releases")
+async def list_releases(
+    status: str | None = None,
+    artist_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    from sqlalchemy import text as _text
+    where = []
+    params = {}
+    if status:
+        where.append("r.status = :status")
+        params["status"] = status
+    if artist_id:
+        import uuid as _uuid
+        try:
+            params["aid"] = _uuid.UUID(artist_id)
+        except ValueError:
+            raise HTTPException(400, detail="invalid artist_id")
+        where.append("r.artist_id = :aid")
+    where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+
+    q = f"""
+        SELECT r.id, r.artist_id, r.title, r.release_type, r.release_date,
+               r.status, r.distributor, r.upc, r.created_at,
+               COUNT(rtr.id) AS track_count,
+               a.stage_name
+        FROM releases r
+        LEFT JOIN release_track_record rtr ON rtr.release_id = r.id
+        LEFT JOIN ai_artists a ON a.artist_id = r.artist_id
+        {where_clause}
+        GROUP BY r.id, a.stage_name
+        ORDER BY r.created_at DESC
+        LIMIT 100
+    """
+    result = await db.execute(_text(q), params)
+    rows = result.fetchall()
+    return {
+        "releases": [
+            {
+                "id": str(row[0]),
+                "artist_id": str(row[1]),
+                "artist_name": row[10],
+                "title": row[2],
+                "release_type": row[3],
+                "release_date": row[4].isoformat() if row[4] else None,
+                "status": row[5],
+                "distributor": row[6],
+                "upc": row[7],
+                "created_at": row[8].isoformat(),
+                "track_count": row[9],
+            }
+            for row in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.get("/api/v1/admin/releases/{release_id}")
+async def get_release(
+    release_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    try:
+        rid = _uuid.UUID(release_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid release_id")
+
+    r = await db.execute(
+        _text("""
+            SELECT r.id, r.artist_id, r.title, r.release_type, r.release_date,
+                   r.pre_save_date, r.status, r.distributor, r.distributor_release_id,
+                   r.upc, r.territory_rights, r.created_at, a.stage_name
+            FROM releases r
+            LEFT JOIN ai_artists a ON a.artist_id = r.artist_id
+            WHERE r.id = :rid
+        """),
+        {"rid": rid},
+    )
+    row = r.fetchone()
+    if row is None:
+        raise HTTPException(404, detail="release not found")
+
+    t = await db.execute(
+        _text("""
+            SELECT rtr.song_id, rtr.track_number, rtr.is_lead_single,
+                   s.title, s.status, s.duration_seconds, s.isrc, s.generation_provider
+            FROM release_track_record rtr
+            JOIN songs_master s ON s.song_id = rtr.song_id
+            WHERE rtr.release_id = :rid
+            ORDER BY rtr.track_number
+        """),
+        {"rid": rid},
+    )
+    tracks = [
+        {
+            "song_id": str(tr[0]),
+            "track_number": tr[1],
+            "is_lead_single": tr[2],
+            "title": tr[3],
+            "status": tr[4],
+            "duration_seconds": tr[5],
+            "isrc": tr[6],
+            "generation_provider": tr[7],
+        }
+        for tr in t.fetchall()
+    ]
+    return {
+        "id": str(row[0]),
+        "artist_id": str(row[1]),
+        "artist_name": row[12],
+        "title": row[2],
+        "release_type": row[3],
+        "release_date": row[4].isoformat() if row[4] else None,
+        "pre_save_date": row[5].isoformat() if row[5] else None,
+        "status": row[6],
+        "distributor": row[7],
+        "distributor_release_id": row[8],
+        "upc": row[9],
+        "territory_rights": row[10],
+        "created_at": row[11].isoformat(),
+        "tracks": tracks,
+        "track_count": len(tracks),
+    }
+
+
+# Statuses that a song can have and still be eligible for release binding.
+# Tightens to {qa_passed} once T-162 audio QA is wired — for now we accept
+# qa_pending and draft too so the orchestrator can be smoke-tested before
+# the QA service lands.
+_BINDABLE_SONG_STATUSES = {"draft", "qa_pending", "qa_passed"}
+
+
+@router.post("/api/v1/admin/releases/{release_id}/tracks")
+async def add_track_to_release(
+    release_id: str,
+    body: ReleaseAddTrackRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Bind a song to a release. Creates release_track_record, sets
+    songs_master.release_id and status='assigned_to_release'.
+
+    Validates: release exists, song exists, song is in a bindable
+    status, song is not already bound to a different release, song's
+    artist matches the release's artist.
+    """
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        rid = _uuid.UUID(release_id)
+        sid = _uuid.UUID(body.song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid release_id or song_id")
+
+    rel = (await db.execute(
+        _text("SELECT id, artist_id, status FROM releases WHERE id = :rid"),
+        {"rid": rid},
+    )).fetchone()
+    if rel is None:
+        raise HTTPException(404, detail="release not found")
+
+    song = (await db.execute(
+        _text("""
+            SELECT song_id, primary_artist_id, status, release_id
+            FROM songs_master WHERE song_id = :sid
+        """),
+        {"sid": sid},
+    )).fetchone()
+    if song is None:
+        raise HTTPException(404, detail="song not found")
+    if song[3] is not None and song[3] != rid:
+        raise HTTPException(409, detail=f"song already bound to release {song[3]}")
+    if song[2] not in _BINDABLE_SONG_STATUSES:
+        raise HTTPException(
+            409,
+            detail=f"song status '{song[2]}' is not bindable "
+                   f"(must be one of {sorted(_BINDABLE_SONG_STATUSES)})",
+        )
+    if song[1] != rel[1]:
+        raise HTTPException(
+            409,
+            detail="song.primary_artist_id does not match release.artist_id — "
+                   "cross-artist releases are not supported yet",
+        )
+
+    try:
+        await db.execute(
+            _text("""
+                INSERT INTO release_track_record (song_id, release_id, track_number, is_lead_single)
+                VALUES (:sid, :rid, :tn, :lead)
+                ON CONFLICT (release_id, track_number) DO NOTHING
+            """),
+            {"sid": sid, "rid": rid, "tn": body.track_number, "lead": body.is_lead_single},
+        )
+        await db.execute(
+            _text("""
+                UPDATE songs_master
+                SET release_id = :rid,
+                    status = 'assigned_to_release',
+                    updated_at = NOW()
+                WHERE song_id = :sid
+            """),
+            {"rid": rid, "sid": sid},
+        )
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(409, detail=f"integrity constraint: {str(e.orig)[:200]}")
+
+    return {
+        "release_id": str(rid),
+        "song_id": str(sid),
+        "track_number": body.track_number,
+        "is_lead_single": body.is_lead_single,
+        "song_status": "assigned_to_release",
+    }
+
+
+@router.delete("/api/v1/admin/releases/{release_id}/tracks/{song_id}")
+async def remove_track_from_release(
+    release_id: str,
+    song_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Unbind a song from a release (mistake correction). Reverts song to qa_pending."""
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+
+    try:
+        rid = _uuid.UUID(release_id)
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid ids")
+
+    r = await db.execute(
+        _text("DELETE FROM release_track_record WHERE release_id = :rid AND song_id = :sid RETURNING 1"),
+        {"rid": rid, "sid": sid},
+    )
+    if r.scalar() is None:
+        raise HTTPException(404, detail="track binding not found")
+
+    await db.execute(
+        _text("""
+            UPDATE songs_master
+            SET release_id = NULL, status = 'qa_pending', updated_at = NOW()
+            WHERE song_id = :sid
+        """),
+        {"sid": sid},
+    )
+    await db.commit()
+    return {"release_id": str(rid), "song_id": str(sid), "removed": True}
+
+
+@router.post("/api/v1/admin/songs/{song_id}/mark-qa-passed")
+async def mark_song_qa_passed(
+    song_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Manual bypass: flip a song from qa_pending to qa_passed without
+    running real QA. Used for testing the release assembly path until
+    T-162 Essentia/Librosa-based QA service lands.
+    """
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+
+    try:
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid song_id")
+
+    r = await db.execute(
+        _text("""
+            UPDATE songs_master
+            SET status = 'qa_passed', qa_pass = TRUE, updated_at = NOW()
+            WHERE song_id = :sid AND status IN ('draft', 'qa_pending')
+            RETURNING status
+        """),
+        {"sid": sid},
+    )
+    row = r.fetchone()
+    if row is None:
+        raise HTTPException(
+            409,
+            detail="song not found or not in a bypass-eligible status (draft|qa_pending)",
+        )
+    await db.commit()
+    return {"song_id": str(sid), "status": row[0], "qa_pass": True, "bypass": True}
+
+
 class GenerateSongRequest(BaseModel):
     provider: str = "musicgen"
     duration_seconds: int = 30
