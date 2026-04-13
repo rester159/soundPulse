@@ -1,0 +1,10 @@
+{
+  "name": "portal-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "SoundPulse portal submission worker — polls /admin/worker/claim-next, drives external portals via BlackTip, posts results back via /admin/worker/ack or /admin/worker/fail",
+  "dependencies": {
+    "black-tip": "file:/opt/blacktip"
+  }
+}
