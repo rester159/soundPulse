@@ -34,7 +34,13 @@ RUN pip install --no-cache-dir \
 # segmentation, spectral flatness), and the instrumental analysis
 # cache (key detection, duration). Pulls scipy + numba + soundfile;
 # ~200 MB install but bulletproof for MIR tasks.
-RUN pip install --no-cache-dir librosa==0.10.1
+#
+# PIN: 0.10.2.post1 is the first release that handles scipy>=1.13.
+# The old 0.10.1 broke at runtime with
+#   "module 'scipy.signal' has no attribute 'hann'"
+# because scipy 1.13 removed the deprecated top-level hann import.
+# Belt-and-braces: also pin scipy to a known-good range.
+RUN pip install --no-cache-dir "scipy>=1.11,<1.14" "librosa==0.10.2.post1"
 
 # silero-vad for the Suno-side vocal entry detection. ~2 MB PyTorch
 # JIT model bundled with the wheel (no torch.hub fetch at runtime),
