@@ -160,16 +160,25 @@ class UdioPiAPIAdapter(ProviderAdapter):
         audio_url: str | None = None
         duration_seconds: float | None = None
         if status == GenerationStatus.SUCCEEDED:
-            output = data.get("output") or []
-            # Udio returns 2 clips per generation per PiAPI docs.
-            # We take the first one as the master candidate.
-            if isinstance(output, list) and output:
-                first = output[0]
-                audio_url = first.get("audio_url") or first.get("url")
+            output = data.get("output") or {}
+            # Udio via PiAPI returns:
+            #   output.songs = [ {song_path, image_path, duration, title, lyrics, tags, ...}, ... ]
+            # Two clips per call. We take the first one as the master
+            # candidate. song_path is the audio URL, image_path is cover art.
+            songs = []
+            if isinstance(output, dict):
+                songs = output.get("songs") or []
+            elif isinstance(output, list):
+                songs = output
+
+            if songs:
+                first = songs[0] if isinstance(songs[0], dict) else {}
+                audio_url = (
+                    first.get("song_path")      # Udio specific
+                    or first.get("audio_url")   # Suno compatibility
+                    or first.get("url")
+                )
                 duration_seconds = first.get("duration") or first.get("duration_seconds")
-            elif isinstance(output, dict):
-                audio_url = output.get("audio_url") or output.get("url")
-                duration_seconds = output.get("duration") or output.get("duration_seconds")
 
         error = None
         if status == GenerationStatus.FAILED:
