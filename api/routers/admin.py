@@ -6346,6 +6346,25 @@ async def project_song_metadata(
     return result
 
 
+@router.post("/api/v1/admin/sweeps/duplicate-detection")
+async def sweep_duplicate_detection(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Walk every song with an MFCC-13 embedding in song_qa_reports and
+    compute cosine similarity against every other song. Flag pairs
+    above 0.95 as hard duplicates (likely CEO rejection needed) and
+    0.85 as soft (monitor). Writes duplication_risk_score back onto
+    songs_master.
+
+    O(n²) — fine for catalog sizes up to a few thousand songs. At
+    scale we'd swap in FAISS or pgvector.
+    """
+    from api.services.duplicate_detection import run_duplicate_sweep
+    return await run_duplicate_sweep(db)
+
+
 @router.post("/api/v1/admin/songs/{song_id}/audio-qa-full")
 async def run_full_audio_qa(
     song_id: str,
