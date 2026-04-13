@@ -505,6 +505,13 @@ export function useAIArtists(rosterStatus = 'active') {
   })
 }
 
+export function useCreateArtistFromDescription() {
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/artists/from-description', {}, body),
+  })
+}
+
 export function useBlueprints({ status = null, limit = 50 } = {}) {
   return useQuery({
     queryKey: ['admin', 'blueprints', status, limit],

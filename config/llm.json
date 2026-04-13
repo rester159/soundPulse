@@ -40,11 +40,20 @@
       "max_tokens": 2000,
       "price_per_million_input_usd": 0.59,
       "price_per_million_output_usd": 0.79
+    },
+    "persona_default": {
+      "provider": "groq",
+      "model": "llama-3.3-70b-versatile",
+      "temperature": 0.8,
+      "max_tokens": 2500,
+      "price_per_million_input_usd": 0.59,
+      "price_per_million_output_usd": 0.79
     }
   },
   "actions": {
     "assistant_chat": "assistant_default",
     "lyrical_analysis": "analysis_default",
-    "smart_prompt_generation": "smart_prompt_default"
+    "smart_prompt_generation": "smart_prompt_default",
+    "persona_blender": "persona_default"
   }
 }

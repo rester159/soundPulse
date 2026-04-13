@@ -4,7 +4,9 @@ import {
   Mic, Palette, BookOpen, Hash, Plus, X,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useAIArtists, useSongs } from '../hooks/useSoundPulse'
+import {
+  useAIArtists, useSongs, useCreateArtistFromDescription,
+} from '../hooks/useSoundPulse'
 
 function DNABlock({ icon: Icon, title, data, color = 'violet' }) {
   if (!data || Object.keys(data).length === 0) return null
@@ -119,8 +121,90 @@ function ArtistCard({ artist, expanded, onToggle }) {
   )
 }
 
+function CreateFromDescriptionForm({ onCreated, onCancel }) {
+  const [description, setDescription] = useState('')
+  const [genre, setGenre] = useState('')
+  const [autoApprove, setAutoApprove] = useState(false)
+  const create = useCreateArtistFromDescription()
+  const qc = useQueryClient()
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    if (!description || !genre) return
+    try {
+      await create.mutateAsync({
+        body: {
+          description,
+          target_genre: genre,
+          auto_approve: autoApprove,
+        },
+      })
+      qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
+      onCreated?.()
+    } catch (_) { /* surfaced via create.error */ }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="rounded-xl border border-violet-500/40 bg-violet-500/5 p-4 space-y-3 mb-4">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-semibold text-zinc-100">Create artist from description</div>
+        <button type="button" onClick={onCancel} className="text-zinc-500 hover:text-zinc-200">
+          <X size={14} />
+        </button>
+      </div>
+      <div>
+        <label className="text-[10px] text-zinc-500 block mb-1">Natural-language description</label>
+        <textarea
+          value={description}
+          onChange={e => setDescription(e.target.value)}
+          placeholder="e.g. melancholy bedroom-pop girl from Portland, writes about longing and rainy streets, plays bass and writes in her journal, Phoebe Bridgers energy but more dreamy"
+          rows={3}
+          className="w-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1.5 resize-none"
+          required
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="text-[10px] text-zinc-500 block mb-1">Target genre</label>
+          <input
+            type="text"
+            value={genre}
+            onChange={e => setGenre(e.target.value)}
+            placeholder="pop.bedroom-pop"
+            className="w-full bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1.5"
+            required
+          />
+        </div>
+        <label className="flex items-end gap-1.5 text-[10px] text-zinc-400 cursor-pointer pb-1.5">
+          <input
+            type="checkbox"
+            checked={autoApprove}
+            onChange={e => setAutoApprove(e.target.checked)}
+            className="accent-violet-500"
+          />
+          Auto-approve (skip CEO gate)
+        </label>
+      </div>
+      <button
+        type="submit"
+        disabled={!description || !genre || create.isPending}
+        className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-medium rounded"
+      >
+        {create.isPending ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+        {create.isPending ? 'Blending persona via LLM...' : 'Create artist'}
+      </button>
+      {create.error && (
+        <div className="text-[10px] text-rose-300">
+          {String(create.error?.response?.data?.detail || create.error?.message)}
+        </div>
+      )}
+    </form>
+  )
+}
+
 export default function Artists() {
   const [expandedId, setExpandedId] = useState(null)
+  const [showNew, setShowNew] = useState(false)
   const { data, isLoading, isError, error } = useAIArtists('active')
 
   const artists = data?.data?.artists || []
@@ -137,7 +221,22 @@ export default function Artists() {
             The AI roster. Each row is one artist with full DNA (voice, visual, lyrical, persona, social) plus their catalog.
           </p>
         </div>
+        {!showNew && (
+          <button
+            onClick={() => setShowNew(true)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg"
+          >
+            <Plus size={14} /> New artist
+          </button>
+        )}
       </div>
+
+      {showNew && (
+        <CreateFromDescriptionForm
+          onCreated={() => setShowNew(false)}
+          onCancel={() => setShowNew(false)}
+        />
+      )}
 
       {isLoading && (
         <div className="flex items-center justify-center py-20 text-zinc-500 gap-2">

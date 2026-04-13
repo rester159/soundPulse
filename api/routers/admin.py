@@ -4160,6 +4160,77 @@ async def create_ai_artist(
     }
 
 
+class ArtistFromDescriptionRequest(BaseModel):
+    description: str
+    target_genre: str
+    content_rating: str = "mild"
+    auto_approve: bool = False  # skip CEO gate for testing; default keeps gate
+
+
+@router.post("/api/v1/admin/artists/from-description")
+async def create_artist_from_description(
+    body: ArtistFromDescriptionRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    T-127-lite: LLM-driven artist creation shortcut.
+
+    Takes a natural-language description + target genre and produces a
+    full ai_artists row via Groq. Bypasses the §18-19 reference-artist
+    scraping pipeline until that's built.
+    """
+    from api.models.ai_artist import AIArtist
+    from api.services.persona_blender import blend_persona
+
+    try:
+        persona = await blend_persona(
+            db=db,
+            description=body.description,
+            target_genre=body.target_genre,
+            caller="admin.from_description",
+        )
+    except ValueError as e:
+        raise HTTPException(502, detail=f"persona generation failed: {e}")
+    except Exception as e:
+        logger.exception("[persona_blender] unexpected failure")
+        raise HTTPException(502, detail=f"persona generation failed: {e}")
+
+    row = AIArtist(
+        stage_name=persona.get("stage_name"),
+        legal_name=persona.get("legal_name") or persona.get("stage_name"),
+        primary_genre=persona.get("primary_genre") or body.target_genre,
+        adjacent_genres=persona.get("adjacent_genres") or None,
+        influences=persona.get("influences") or None,
+        anti_influences=persona.get("anti_influences") or None,
+        voice_dna=persona["voice_dna"],
+        visual_dna=persona["visual_dna"],
+        fashion_dna=persona.get("fashion_dna"),
+        lyrical_dna=persona.get("lyrical_dna"),
+        persona_dna=persona.get("persona_dna"),
+        social_dna=persona.get("social_dna"),
+        audience_tags=persona.get("audience_tags") or None,
+        content_rating=persona.get("content_rating") or body.content_rating,
+        ceo_approved=body.auto_approve,
+    )
+    db.add(row)
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(409, detail=f"artist creation failed (duplicate stage_name?): {e}")
+    await db.refresh(row)
+    return {
+        "artist_id": str(row.artist_id),
+        "stage_name": row.stage_name,
+        "primary_genre": row.primary_genre,
+        "roster_status": row.roster_status,
+        "ceo_approved": row.ceo_approved,
+        "persona": persona,
+        "created_at": row.created_at.isoformat(),
+    }
+
+
 @router.get("/api/v1/admin/artists")
 async def list_ai_artists(
     roster_status: str = "active",
