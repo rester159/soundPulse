@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import {
   Sliders, Loader2, Upload, Trash2, Music2, Play,
   Zap, Hash, AlertCircle, CheckCircle2, Sparkles, X, FileAudio,
@@ -7,7 +7,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   useInstrumentals, useUploadInstrumental, useDeleteInstrumental,
   useBlueprints, useAIArtists, useGenerateInstrumentalSongForArtist,
-  getBaseUrl,
+  useMusicPoll, getBaseUrl,
 } from '../hooks/useSoundPulse'
 
 function formatBytes(b) {
@@ -247,6 +247,27 @@ function BlueprintPickerModal({ instrumental, onClose }) {
   const [title, setTitle] = useState('')
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
+  const [elapsedSec, setElapsedSec] = useState(0)
+  const [submittedAt, setSubmittedAt] = useState(null)
+
+  // Poll the generation task once we have a task_id. useMusicPoll auto-
+  // polls while status is pending/processing and stops at terminal.
+  const poll = useMusicPoll('suno_kie', result?.task_id, { enabled: !!result?.task_id })
+  const pollState = poll.data?.data
+  const pollStatus = pollState?.status
+  const audioUrl = pollState?.audio_url
+  const pollError = pollState?.error
+
+  // Elapsed-seconds ticker while a task is in flight
+  useEffect(() => {
+    if (!submittedAt || pollStatus === 'succeeded' || pollStatus === 'failed') return
+    const iv = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - submittedAt) / 1000))
+    }, 1000)
+    return () => clearInterval(iv)
+  }, [submittedAt, pollStatus])
+
+  const inFlight = !!result?.task_id && pollStatus !== 'succeeded' && pollStatus !== 'failed'
 
   const artists = artistsData?.data?.artists || []
   const allBlueprints = (bpData?.data?.blueprints || bpData?.data || []).filter(b => b.id)
@@ -260,6 +281,8 @@ function BlueprintPickerModal({ instrumental, onClose }) {
   const handleGenerate = async () => {
     setError(null)
     setResult(null)
+    setElapsedSec(0)
+    setSubmittedAt(null)
     if (!selectedArtist) { setError('Pick an artist'); return }
     try {
       const res = await generate.mutateAsync({
@@ -272,10 +295,30 @@ function BlueprintPickerModal({ instrumental, onClose }) {
         },
       })
       setResult(res?.data)
+      setSubmittedAt(Date.now())
       qc.invalidateQueries({ queryKey: ['admin', 'instrumentals'] })
     } catch (e) {
       setError(e?.response?.data?.detail || e?.message || 'generation failed')
     }
+  }
+
+  const handleReset = () => {
+    setResult(null)
+    setSubmittedAt(null)
+    setElapsedSec(0)
+    setError(null)
+    generate.reset()
+  }
+
+  const fmtElapsed = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  const resolveUrl = (url) => {
+    if (!url) return url
+    if (/^https?:\/\//i.test(url)) return url
+    if (url.startsWith('/api/v1/')) {
+      const base = getBaseUrl().replace(/\/api\/v1\/?$/, '')
+      return base + url
+    }
+    return url
   }
 
   return (
@@ -430,21 +473,71 @@ function BlueprintPickerModal({ instrumental, onClose }) {
             </div>
           )}
 
+          {/* In-flight progress display */}
           {result && (
-            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded p-3 text-[11px] text-emerald-300 space-y-1">
-              <div className="flex items-center gap-1"><CheckCircle2 size={12} /> Submitted to Kie.ai add-vocals</div>
-              <div>artist: {result.artist_stage_name}</div>
-              <div>song_id: {result.song_id}</div>
-              <div>task_id: {result.task_id}</div>
-              <div className="text-emerald-400/60">poll via /admin/music/generate/suno_kie/{result.task_id}</div>
+            <div className={`border rounded-lg p-3 text-[11px] space-y-2 ${
+              pollStatus === 'succeeded' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+              : pollStatus === 'failed' ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+              : 'bg-violet-500/10 border-violet-500/30 text-violet-300'
+            }`}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  {pollStatus === 'succeeded' && <><CheckCircle2 size={14} /> Ready to play</>}
+                  {pollStatus === 'failed' && <><AlertCircle size={14} /> Generation failed</>}
+                  {(pollStatus === 'pending' || !pollStatus) && <><Loader2 size={14} className="animate-spin" /> Queued at Suno — waiting to start…</>}
+                  {pollStatus === 'processing' && <><Loader2 size={14} className="animate-spin" /> Suno generating…</>}
+                </div>
+                <div className="tabular-nums font-mono">
+                  {fmtElapsed(elapsedSec)}
+                </div>
+              </div>
+
+              {/* Progress bar — fills smoothly while in flight; Kie.ai Suno
+                  typically takes 60-180s so we cap at 210s linear progress
+                  and freeze at 95% if it runs over, then jump to 100% on
+                  terminal. */}
+              {inFlight && (
+                <div className="w-full h-1 bg-zinc-800 rounded overflow-hidden">
+                  <div
+                    className="h-full bg-violet-500 transition-all duration-1000"
+                    style={{ width: `${Math.min(95, (elapsedSec / 210) * 100)}%` }}
+                  />
+                </div>
+              )}
+
+              <div className="text-[10px] opacity-70 font-mono">
+                artist: {result.artist_stage_name} · song_id: {result.song_id?.slice(0, 8)} · task: {result.task_id?.slice(0, 12)}
+              </div>
+
+              {pollStatus === 'succeeded' && audioUrl && (
+                <div className="space-y-1 pt-1">
+                  <audio
+                    controls
+                    src={resolveUrl(audioUrl)}
+                    className="w-full"
+                    style={{ filter: 'invert(0.9) hue-rotate(180deg)' }}
+                  />
+                  <div className="text-[10px] opacity-70">
+                    {pollState?.duration_seconds?.toFixed(1)}s · ${pollState?.actual_cost_usd?.toFixed(3)}
+                  </div>
+                </div>
+              )}
+
+              {pollStatus === 'failed' && (
+                <div className="text-[11px]">
+                  {pollError || 'unknown error'}
+                </div>
+              )}
             </div>
           )}
 
           <div className="flex items-center justify-between gap-2 pt-2 border-t border-zinc-800">
             <div className="text-[11px] text-zinc-500">
-              {!selectedArtist && 'Pick an artist to enable submission'}
-              {selectedArtist && !selectedBlueprint && `Generating for ${selectedArtist.stage_name} in freeform mode`}
-              {selectedArtist && selectedBlueprint && `${selectedArtist.stage_name} · ${selectedBlueprint.primary_genre || 'blueprint'}`}
+              {!selectedArtist && !result && 'Pick an artist to enable submission'}
+              {selectedArtist && !result && !selectedBlueprint && `Generating for ${selectedArtist.stage_name} in freeform mode`}
+              {selectedArtist && !result && selectedBlueprint && `${selectedArtist.stage_name} · ${selectedBlueprint.primary_genre || 'blueprint'}`}
+              {inFlight && `${selectedArtist?.stage_name} · Kie.ai Suno usually finishes in ~60-180s`}
+              {pollStatus === 'succeeded' && 'Finished — song is in the Songs page'}
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -453,13 +546,24 @@ function BlueprintPickerModal({ instrumental, onClose }) {
               >
                 Close
               </button>
+              {pollStatus === 'failed' && (
+                <button
+                  onClick={handleReset}
+                  className="px-3 py-2 text-xs text-violet-300 hover:text-violet-200 underline"
+                >
+                  Retry
+                </button>
+              )}
               <button
                 onClick={handleGenerate}
-                disabled={!selectedArtist || generate.isPending}
-                className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm rounded flex items-center gap-2 transition-colors"
+                disabled={!selectedArtist || generate.isPending || inFlight || pollStatus === 'succeeded'}
+                className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed text-white text-sm rounded flex items-center gap-2 transition-colors"
               >
-                {generate.isPending ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                {generate.isPending ? 'Submitting…' : 'Generate song ($0.06)'}
+                {generate.isPending || inFlight ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                {generate.isPending ? 'Submitting…'
+                  : inFlight ? `Generating… ${fmtElapsed(elapsedSec)}`
+                  : pollStatus === 'succeeded' ? 'Done'
+                  : 'Generate song ($0.06)'}
               </button>
             </div>
           </div>

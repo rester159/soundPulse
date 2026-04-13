@@ -4402,6 +4402,164 @@ async def preview_persona(
     }
 
 
+@router.post("/api/v1/admin/artists/create-manual")
+async def create_artist_manual(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Create an AI artist from a fully hand-filled payload — no LLM, no
+    reference-artist lookup. For the CEO who wants to add an artist
+    directly via the admin UI.
+
+    Body accepts the same shape as the persona_blender output:
+      stage_name, legal_name, primary_genre (all required)
+      age, gender_presentation, ethnicity_heritage, edge_profile
+      adjacent_genres, influences, anti_influences, audience_tags
+      content_rating
+      voice_dna, visual_dna, fashion_dna, lyrical_dna, persona_dna, social_dna
+      generate_portrait (default true) — fire gpt-image-1 portrait after create
+      ceo_approved (default true — manual creates are CEO-trusted by default)
+    """
+    from api.models.ai_artist import AIArtist
+    from sqlalchemy import text as _text
+
+    stage_name = (body.get("stage_name") or "").strip()
+    legal_name = (body.get("legal_name") or stage_name).strip()
+    primary_genre = (body.get("primary_genre") or "").strip()
+    if not stage_name or not primary_genre:
+        raise HTTPException(400, detail="stage_name and primary_genre are required")
+
+    # Voice + visual DNA are NOT NULL on the model — default them if the
+    # CEO didn't fill them so the row creates cleanly. They can always
+    # edit afterward.
+    voice_dna = body.get("voice_dna") or {
+        "timbre_core": "clean tone",
+        "range_estimate": "C3-E5",
+        "delivery_style": ["melodic"],
+        "phrasing_density": "medium",
+        "accent_pronunciation": "neutral",
+        "autotune_profile": "light",
+        "adlib_profile": [],
+    }
+    visual_dna = body.get("visual_dna") or {
+        "face_description": "distinctive features",
+        "body_presentation": "athletic",
+        "hair_signature": "natural",
+        "color_palette": ["#000000", "#ffffff", "#888888"],
+        "art_direction": "editorial portrait",
+        "fashion_style_summary": "modern",
+    }
+
+    edge_profile = (body.get("edge_profile") or "flirty_edge").lower()
+    if edge_profile not in ("clean_edge", "flirty_edge", "savage_edge"):
+        edge_profile = "flirty_edge"
+
+    age = body.get("age")
+    try:
+        age = int(age) if age is not None else None
+    except (TypeError, ValueError):
+        age = None
+
+    row = AIArtist(
+        stage_name=stage_name,
+        legal_name=legal_name,
+        primary_genre=primary_genre,
+        adjacent_genres=body.get("adjacent_genres") or None,
+        influences=body.get("influences") or None,
+        anti_influences=body.get("anti_influences") or None,
+        age=age,
+        gender_presentation=body.get("gender_presentation") or None,
+        ethnicity_heritage=body.get("ethnicity_heritage") or None,
+        edge_profile=edge_profile,
+        voice_dna=voice_dna,
+        visual_dna=visual_dna,
+        fashion_dna=body.get("fashion_dna") or None,
+        lyrical_dna=body.get("lyrical_dna") or None,
+        persona_dna=body.get("persona_dna") or None,
+        social_dna=body.get("social_dna") or None,
+        audience_tags=body.get("audience_tags") or None,
+        content_rating=body.get("content_rating") or "mild",
+        ceo_approved=bool(body.get("ceo_approved", True)),
+    )
+    db.add(row)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        import random as _random, string as _string
+        suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=4))
+        row.stage_name = f"{stage_name} {suffix}"
+        row.legal_name = f"{legal_name} {suffix}"
+        db.add(row)
+        try:
+            await db.commit()
+        except Exception as e2:
+            await db.rollback()
+            raise HTTPException(409, detail=f"artist creation failed after retry: {e2}")
+    await db.refresh(row)
+
+    # Fire portrait if requested (default true)
+    portrait_info = None
+    portrait_error = None
+    if body.get("generate_portrait", True):
+        from api.services.image_generator import (
+            build_artist_portrait_prompt,
+            generate_and_store_image,
+        )
+        persona_for_portrait = {
+            "age": row.age,
+            "gender_presentation": row.gender_presentation,
+            "ethnicity_heritage": row.ethnicity_heritage,
+            "visual_dna": row.visual_dna or {},
+            "fashion_dna": row.fashion_dna or {},
+        }
+        portrait_prompt = build_artist_portrait_prompt(
+            persona_for_portrait, primary_genre=row.primary_genre,
+        )
+        try:
+            portrait = await generate_and_store_image(
+                db,
+                artist_id=row.artist_id,
+                asset_type="reference_sheet",
+                prompt=portrait_prompt,
+                quality="high",
+            )
+            if portrait is not None:
+                updated_visual = dict(row.visual_dna or {})
+                updated_visual["reference_sheet_asset_id"] = str(portrait.asset_id)
+                await db.execute(
+                    _text(
+                        "UPDATE ai_artists SET visual_dna = CAST(:vdna AS jsonb), updated_at = NOW() "
+                        "WHERE artist_id = :aid"
+                    ),
+                    {"vdna": json.dumps(updated_visual), "aid": row.artist_id},
+                )
+                await db.commit()
+                portrait_info = {
+                    "asset_id": str(portrait.asset_id),
+                    "storage_url": portrait.storage_url,
+                    "bytes": portrait.bytes_len,
+                }
+            else:
+                portrait_error = "portrait generation returned None"
+        except Exception as e:
+            portrait_error = f"{type(e).__name__}: {e}"
+            logger.exception("[create-manual] portrait failed for %s", row.stage_name)
+
+    return {
+        "artist_id": str(row.artist_id),
+        "stage_name": row.stage_name,
+        "legal_name": row.legal_name,
+        "primary_genre": row.primary_genre,
+        "edge_profile": row.edge_profile,
+        "portrait": portrait_info,
+        "portrait_error": portrait_error,
+        "created_at": row.created_at.isoformat(),
+    }
+
+
 @router.post("/api/v1/admin/artists/create-from-persona")
 async def create_artist_from_persona(
     body: ArtistCreateFromPersonaRequest,

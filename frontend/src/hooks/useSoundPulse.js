@@ -552,6 +552,13 @@ export function useCreateArtistFromPersona() {
   })
 }
 
+export function useCreateArtistManual() {
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/artists/create-manual', {}, body),
+  })
+}
+
 // -------- Submissions (task #86..#92) --------
 
 export function useSubmissionTargets() {

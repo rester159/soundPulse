@@ -1,14 +1,14 @@
 import { useState } from 'react'
 import {
   Users, Loader2, ChevronDown, ChevronUp, Music2, CheckCircle2,
-  Mic, Palette, BookOpen, Hash, Plus, X, RefreshCw, Camera,
+  Mic, Palette, BookOpen, Hash, Plus, X, RefreshCw, Camera, Edit3, AlertCircle,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useAIArtists, useSongs, useCreateArtistFromDescription,
   useRegenerateArtistPortrait, useArtistReferenceSheet,
   useGenerateReferenceSheet, usePreviewPersona,
-  useCreateArtistFromPersona, getBaseUrl,
+  useCreateArtistFromPersona, useCreateArtistManual, getBaseUrl,
 } from '../hooks/useSoundPulse'
 
 const VIEW_LABELS = {
@@ -514,9 +514,330 @@ function CreateFromDescriptionForm({ onCreated, onCancel }) {
   )
 }
 
+// Split a comma-separated string into an array of trimmed non-empty strings.
+// Used by the manual-create form to turn "pop, k-pop, r&b" into
+// ["pop", "k-pop", "r&b"].
+function csvSplit(s) {
+  if (!s) return []
+  return String(s).split(',').map(x => x.trim()).filter(Boolean)
+}
+
+function AddArtistModal({ onClose, onCreated }) {
+  const create = useCreateArtistManual()
+  const qc = useQueryClient()
+  const [error, setError] = useState(null)
+  const [result, setResult] = useState(null)
+
+  // Basics
+  const [stageName, setStageName] = useState('')
+  const [legalName, setLegalName] = useState('')
+  const [primaryGenre, setPrimaryGenre] = useState('')
+  const [adjacentGenres, setAdjacentGenres] = useState('')
+  const [age, setAge] = useState('')
+  const [gender, setGender] = useState('')
+  const [ethnicity, setEthnicity] = useState('')
+  const [edgeProfile, setEdgeProfile] = useState('flirty_edge')
+  const [contentRating, setContentRating] = useState('mild')
+
+  // Influences / audience
+  const [influences, setInfluences] = useState('')
+  const [antiInfluences, setAntiInfluences] = useState('')
+  const [audienceTags, setAudienceTags] = useState('')
+
+  // Voice DNA
+  const [voiceTimbre, setVoiceTimbre] = useState('')
+  const [voiceRange, setVoiceRange] = useState('')
+  const [voiceDelivery, setVoiceDelivery] = useState('')
+  const [voiceAccent, setVoiceAccent] = useState('')
+  const [voiceAutotune, setVoiceAutotune] = useState('light')
+
+  // Visual DNA
+  const [faceDescription, setFaceDescription] = useState('')
+  const [bodyPresentation, setBodyPresentation] = useState('')
+  const [hairSignature, setHairSignature] = useState('')
+  const [colorPalette, setColorPalette] = useState('')
+  const [artDirection, setArtDirection] = useState('')
+  const [fashionStyleSummary, setFashionStyleSummary] = useState('')
+
+  // Fashion DNA
+  const [coreGarments, setCoreGarments] = useState('')
+  const [fabricInspirations, setFabricInspirations] = useState('')
+  const [silhouette, setSilhouette] = useState('')
+  const [accessories, setAccessories] = useState('')
+  const [footwear, setFootwear] = useState('')
+  const [stylingMood, setStylingMood] = useState('')
+
+  // Lyrical / persona
+  const [recurringThemes, setRecurringThemes] = useState('')
+  const [vocabLevel, setVocabLevel] = useState('conversational')
+  const [language, setLanguage] = useState('en')
+  const [backstory, setBackstory] = useState('')
+  const [personalityTraits, setPersonalityTraits] = useState('')
+
+  const [generatePortrait, setGeneratePortrait] = useState(true)
+
+  const handleSubmit = async () => {
+    setError(null)
+    setResult(null)
+    if (!stageName.trim() || !primaryGenre.trim()) {
+      setError('Stage name and primary genre are required')
+      return
+    }
+    const body = {
+      stage_name: stageName.trim(),
+      legal_name: legalName.trim() || undefined,
+      primary_genre: primaryGenre.trim(),
+      adjacent_genres: csvSplit(adjacentGenres),
+      age: age ? parseInt(age, 10) : undefined,
+      gender_presentation: gender || undefined,
+      ethnicity_heritage: ethnicity.trim() || undefined,
+      edge_profile: edgeProfile,
+      content_rating: contentRating,
+      influences: csvSplit(influences),
+      anti_influences: csvSplit(antiInfluences),
+      audience_tags: csvSplit(audienceTags),
+      voice_dna: {
+        timbre_core: voiceTimbre || 'clean tone',
+        range_estimate: voiceRange || 'C3-E5',
+        delivery_style: csvSplit(voiceDelivery),
+        accent_pronunciation: voiceAccent || 'neutral',
+        autotune_profile: voiceAutotune,
+      },
+      visual_dna: {
+        face_description: faceDescription,
+        body_presentation: bodyPresentation,
+        hair_signature: hairSignature,
+        color_palette: csvSplit(colorPalette),
+        art_direction: artDirection,
+        fashion_style_summary: fashionStyleSummary,
+      },
+      fashion_dna: {
+        core_garments: csvSplit(coreGarments),
+        fabric_inspirations: csvSplit(fabricInspirations),
+        silhouette,
+        accessories: csvSplit(accessories),
+        footwear: csvSplit(footwear),
+        styling_mood: stylingMood,
+      },
+      lyrical_dna: {
+        recurring_themes: csvSplit(recurringThemes),
+        vocab_level: vocabLevel,
+        language,
+      },
+      persona_dna: {
+        backstory,
+        personality_traits: csvSplit(personalityTraits),
+      },
+      generate_portrait: generatePortrait,
+      ceo_approved: true,
+    }
+    try {
+      const res = await create.mutateAsync({ body })
+      setResult(res?.data)
+      qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
+      setTimeout(() => { onCreated?.(); onClose?.() }, 1200)
+    } catch (e) {
+      setError(e?.response?.data?.detail || e?.message || 'creation failed')
+    }
+  }
+
+  const field = (label, inputEl, hint) => (
+    <label className="block text-xs text-zinc-400">
+      {label}
+      {inputEl}
+      {hint && <div className="text-[10px] text-zinc-600 mt-0.5">{hint}</div>}
+    </label>
+  )
+  const input = (val, setter, placeholder) => (
+    <input
+      type="text"
+      value={val}
+      onChange={(e) => setter(e.target.value)}
+      placeholder={placeholder}
+      className="w-full mt-1 px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-500"
+    />
+  )
+  const textarea = (val, setter, placeholder, rows = 2) => (
+    <textarea
+      value={val}
+      onChange={(e) => setter(e.target.value)}
+      placeholder={placeholder}
+      rows={rows}
+      className="w-full mt-1 px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-500 resize-y"
+    />
+  )
+  const select = (val, setter, options) => (
+    <select
+      value={val}
+      onChange={(e) => setter(e.target.value)}
+      className="w-full mt-1 px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100"
+    >
+      {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  )
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
+      <div className="bg-zinc-950 border border-zinc-800 rounded-xl max-w-4xl w-full my-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-4 border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10">
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+            <Edit3 size={14} className="text-violet-400" />
+            Add artist manually
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-6">
+          {/* Basics */}
+          <section>
+            <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Basics</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {field('Stage name *', input(stageName, setStageName, 'e.g. Kira Lune'))}
+              {field('Legal name', input(legalName, setLegalName, 'defaults to stage name'))}
+              {field('Primary genre *', input(primaryGenre, setPrimaryGenre, 'e.g. pop.k-pop, caribbean.reggae'), 'Use a dotted genre id from the taxonomy')}
+              {field('Adjacent genres', input(adjacentGenres, setAdjacentGenres, 'comma-separated'))}
+              {field('Age', input(age, setAge, '22'))}
+              {field('Gender', select(gender, setGender, [
+                { value: '', label: '—' }, { value: 'female', label: 'female' },
+                { value: 'male', label: 'male' }, { value: 'non_binary', label: 'non_binary' },
+              ]))}
+              {field('Ethnicity / heritage', input(ethnicity, setEthnicity, 'Korean, Jamaican, Nigerian Yoruba…'))}
+              {field('Edge profile', select(edgeProfile, setEdgeProfile, [
+                { value: 'clean_edge', label: 'clean_edge (Taylor/Olivia)' },
+                { value: 'flirty_edge', label: 'flirty_edge (Sabrina/Doja)' },
+                { value: 'savage_edge', label: 'savage_edge (Doechii/Ice Spice)' },
+              ]))}
+              {field('Content rating', select(contentRating, setContentRating, [
+                { value: 'clean', label: 'clean' }, { value: 'mild', label: 'mild' }, { value: 'explicit', label: 'explicit' },
+              ]))}
+            </div>
+          </section>
+
+          {/* Influences + audience */}
+          <section>
+            <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Influences & audience</div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {field('Influences', textarea(influences, setInfluences, 'Sabrina Carpenter, NewJeans, IVE'), 'comma-separated real artists')}
+              {field('Anti-influences', textarea(antiInfluences, setAntiInfluences, 'artists to NOT sound like'))}
+              {field('Audience tags', textarea(audienceTags, setAudienceTags, 'gen_z, female_lean, urban'))}
+            </div>
+          </section>
+
+          {/* Voice DNA */}
+          <section>
+            <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Voice DNA</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {field('Timbre', input(voiceTimbre, setVoiceTimbre, 'soft yet powerful, warm resonance'))}
+              {field('Range estimate', input(voiceRange, setVoiceRange, 'A3-B5 chest, falsetto to C6'))}
+              {field('Delivery style', input(voiceDelivery, setVoiceDelivery, 'expressive, intimate (csv)'))}
+              {field('Accent', input(voiceAccent, setVoiceAccent, 'light Korean with American influence'))}
+              {field('Autotune profile', select(voiceAutotune, setVoiceAutotune, [
+                { value: 'none', label: 'none' }, { value: 'light', label: 'light' },
+                { value: 'medium', label: 'medium' }, { value: 'heavy', label: 'heavy' },
+              ]))}
+            </div>
+          </section>
+
+          {/* Visual DNA */}
+          <section>
+            <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Visual DNA</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {field('Face description', textarea(faceDescription, setFaceDescription, 'Korean features, almond eyes, softly-arched brows'))}
+              {field('Body presentation', input(bodyPresentation, setBodyPresentation, 'slim / athletic'))}
+              {field('Hair signature', input(hairSignature, setHairSignature, 'long flowing dark hair with soft waves'))}
+              {field('Color palette', input(colorPalette, setColorPalette, '#FF6F61, #6A5ACD, #FFD700'), 'hex or color names, comma-separated')}
+              {field('Art direction', textarea(artDirection, setArtDirection, 'neon Seoul rooftop, dreamy pastels'))}
+              {field('Fashion style summary', textarea(fashionStyleSummary, setFashionStyleSummary, 'Seoul 4th-gen K-pop pastel-noir editorial'))}
+            </div>
+          </section>
+
+          {/* Fashion DNA */}
+          <section>
+            <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Fashion DNA</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {field('Core garments', textarea(coreGarments, setCoreGarments, 'cropped knit cardigan, pleated micro-mini skirt, moto jacket (csv)'))}
+              {field('Fabric inspirations', textarea(fabricInspirations, setFabricInspirations, 'washed denim, hanbok silk, translucent mesh (csv)'))}
+              {field('Silhouette', input(silhouette, setSilhouette, 'Seoul 4th-gen layered, fitted top + volume bottom'))}
+              {field('Accessories', textarea(accessories, setAccessories, 'layered silver chains, statement earrings (csv)'))}
+              {field('Footwear', input(footwear, setFootwear, 'platform Mary Janes, chunky white sneakers (csv)'))}
+              {field('Styling mood', input(stylingMood, setStylingMood, 'Seoul 4th-gen K-pop pastel-noir'))}
+            </div>
+          </section>
+
+          {/* Lyrical + persona */}
+          <section>
+            <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Lyrical & persona</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {field('Recurring themes', textarea(recurringThemes, setRecurringThemes, 'delulu romance, manifestation, 3am confessions (csv)'))}
+              {field('Vocab level', select(vocabLevel, setVocabLevel, [
+                { value: 'simple', label: 'simple' }, { value: 'conversational', label: 'conversational' },
+                { value: 'poetic', label: 'poetic' }, { value: 'abstract', label: 'abstract' },
+              ]))}
+              {field('Language', input(language, setLanguage, 'en, ko, es, en/ko'))}
+              {field('Personality traits', textarea(personalityTraits, setPersonalityTraits, 'confident, flirty, internet-native (csv)'))}
+              <div className="md:col-span-2">
+                {field('Backstory', textarea(backstory, setBackstory, '2-3 sentence origin story', 3))}
+              </div>
+            </div>
+          </section>
+
+          {/* Portrait */}
+          <section>
+            <label className="flex items-center gap-2 text-xs text-zinc-400">
+              <input
+                type="checkbox"
+                checked={generatePortrait}
+                onChange={(e) => setGeneratePortrait(e.target.checked)}
+                className="accent-violet-500"
+              />
+              Generate portrait via gpt-image-1 after create (~$0.17, ~15s)
+            </label>
+          </section>
+
+          {error && (
+            <div className="bg-rose-500/10 border border-rose-500/30 rounded p-2 text-xs text-rose-300 flex items-center gap-2">
+              <AlertCircle size={14} /> {error}
+            </div>
+          )}
+
+          {result && (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded p-3 text-xs text-emerald-300 space-y-1">
+              <div className="flex items-center gap-2"><CheckCircle2 size={14} /> Created {result.stage_name}</div>
+              <div className="text-[10px] text-emerald-400/70 font-mono">artist_id: {result.artist_id}</div>
+              {result.portrait && <div className="text-[10px]">portrait: {result.portrait.asset_id?.slice(0, 8)} ({Math.round((result.portrait.bytes || 0) / 1024)} KB)</div>}
+              {result.portrait_error && <div className="text-[10px] text-amber-400">portrait failed: {result.portrait_error}</div>}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 p-4 border-t border-zinc-800 sticky bottom-0 bg-zinc-950">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-zinc-400 text-xs hover:text-zinc-200"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={create.isPending || !stageName.trim() || !primaryGenre.trim()}
+            className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium rounded flex items-center gap-2"
+          >
+            {create.isPending ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+            {create.isPending ? 'Creating…' : 'Create artist'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 export default function Artists() {
   const [expandedId, setExpandedId] = useState(null)
   const [showNew, setShowNew] = useState(false)
+  const [showManual, setShowManual] = useState(false)
   const { data, isLoading, isError, error } = useAIArtists('active')
 
   const artists = data?.data?.artists || []
@@ -533,20 +854,35 @@ export default function Artists() {
             The AI roster. Each row is one artist with full DNA (voice, visual, lyrical, persona, social) plus their catalog.
           </p>
         </div>
-        {!showNew && (
+        <div className="flex items-center gap-2">
+          {!showNew && (
+            <button
+              onClick={() => setShowNew(true)}
+              className="flex items-center gap-1.5 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium rounded-lg border border-zinc-700"
+            >
+              <Plus size={14} /> From description
+            </button>
+          )}
           <button
-            onClick={() => setShowNew(true)}
+            onClick={() => setShowManual(true)}
             className="flex items-center gap-1.5 px-3 py-2 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg"
           >
-            <Plus size={14} /> New artist
+            <Edit3 size={14} /> Add manually
           </button>
-        )}
+        </div>
       </div>
 
       {showNew && (
         <CreateFromDescriptionForm
           onCreated={() => setShowNew(false)}
           onCancel={() => setShowNew(false)}
+        />
+      )}
+
+      {showManual && (
+        <AddArtistModal
+          onClose={() => setShowManual(false)}
+          onCreated={() => setShowManual(false)}
         />
       )}
 
