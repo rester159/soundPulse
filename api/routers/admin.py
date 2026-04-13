@@ -6602,6 +6602,326 @@ async def list_external_submissions(
 
 
 # ---------------------------------------------------------------------
+# Portal-worker queue endpoints — T-190..T-229 BlackTip worker surface
+#
+# The portal-worker service (services/portal-worker/, Node.js + BlackTip)
+# polls claim-next, drives the real portal flow, then posts back via
+# ack or fail. All three endpoints are POSTs and use SELECT FOR UPDATE
+# SKIP LOCKED semantics so multiple workers can run in parallel without
+# claiming the same row twice.
+# ---------------------------------------------------------------------
+
+@router.post("/api/v1/admin/worker/claim-next")
+async def worker_claim_next(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Atomically claim the next pending submission for a portal-worker to
+    process. Body:
+      {
+        "target_service": "ascap" | "distrokid" | "bmi" | ...   (required)
+        "worker_id": "<uuid or hostname>"                       (required)
+      }
+
+    For 'ascap' the claim comes from ascap_submissions (separate table).
+    For every other target_service it comes from external_submissions.
+
+    Locks via SELECT ... FOR UPDATE SKIP LOCKED so parallel workers
+    never grab the same row. Flips status to 'in_progress' and records
+    the worker_id + claimed_at.
+
+    Returns the full row payload the worker needs to drive the portal
+    (song title, writers, publishers, audio URL, etc).
+    """
+    from sqlalchemy import text as _text
+    target_service = (body.get("target_service") or "").strip().lower()
+    worker_id = (body.get("worker_id") or "").strip()
+    if not target_service or not worker_id:
+        raise HTTPException(400, detail="target_service + worker_id required")
+
+    if target_service == "ascap":
+        # ASCAP-specific path — own table, own schema
+        row = (await db.execute(
+            _text("""
+                SELECT s.id, s.song_id, s.submission_title, s.submission_iswc,
+                       s.writers_json, s.publishers_json, s.attempt_number,
+                       sm.title AS song_title, sm.isrc, sm.primary_genre,
+                       sm.content_rating, sm.copyright_year,
+                       sm.actual_release_date, sm.language,
+                       sm.territory_rights, sm.master_owner,
+                       ai.stage_name, ai.legal_name
+                FROM ascap_submissions s
+                JOIN songs_master sm ON sm.song_id = s.song_id
+                LEFT JOIN ai_artists ai ON ai.artist_id = sm.primary_artist_id
+                WHERE s.status = 'pending'
+                ORDER BY s.created_at ASC
+                LIMIT 1
+                FOR UPDATE OF s SKIP LOCKED
+            """),
+        )).fetchone()
+        if row is None:
+            return {"claimed": None, "message": "no pending ASCAP submissions"}
+
+        await db.execute(
+            _text("""
+                UPDATE ascap_submissions
+                SET status = 'in_progress',
+                    last_error_message = NULL,
+                    updated_at = NOW()
+                WHERE id = :id
+            """),
+            {"id": row[0]},
+        )
+        await db.commit()
+        return {
+            "claimed": {
+                "submission_id": str(row[0]),
+                "target_service": "ascap",
+                "song_id": str(row[1]),
+                "submission_title": row[2],
+                "iswc": row[3],
+                "writers_json": row[4],
+                "publishers_json": row[5],
+                "attempt_number": row[6],
+                "song": {
+                    "title": row[7],
+                    "isrc": row[8],
+                    "primary_genre": row[9],
+                    "content_rating": row[10],
+                    "copyright_year": row[11],
+                    "actual_release_date": row[12].isoformat() if row[12] else None,
+                    "language": row[13],
+                    "territory_rights": row[14],
+                    "master_owner": row[15],
+                },
+                "artist": {
+                    "stage_name": row[16],
+                    "legal_name": row[17],
+                },
+                "worker_id": worker_id,
+            }
+        }
+
+    # All other targets use external_submissions
+    row = (await db.execute(
+        _text("""
+            SELECT es.id, es.subject_id, es.submission_subject_type,
+                   es.attempt_number,
+                   sm.title, sm.isrc, sm.primary_genre, sm.content_rating,
+                   sm.writers, sm.publishers, sm.marketing_hook,
+                   sm.target_audience_tags, sm.mood_tags, sm.language,
+                   sm.actual_release_date,
+                   ai.stage_name, ai.legal_name,
+                   mgc.provider AS audio_provider, mgc.task_id AS audio_task_id
+            FROM external_submissions es
+            LEFT JOIN songs_master sm ON sm.song_id = es.subject_id
+            LEFT JOIN ai_artists ai ON ai.artist_id = sm.primary_artist_id
+            LEFT JOIN LATERAL (
+                SELECT provider, task_id
+                FROM music_generation_calls
+                WHERE song_id = es.subject_id
+                ORDER BY completed_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+            ) mgc ON TRUE
+            WHERE es.target_service = :svc
+              AND es.status = 'pending'
+            ORDER BY es.created_at ASC
+            LIMIT 1
+            FOR UPDATE OF es SKIP LOCKED
+        """),
+        {"svc": target_service},
+    )).fetchone()
+    if row is None:
+        return {"claimed": None, "message": f"no pending {target_service} submissions"}
+
+    await db.execute(
+        _text("""
+            UPDATE external_submissions
+            SET status = 'in_progress',
+                last_error_message = NULL,
+                updated_at = NOW()
+            WHERE id = :id
+        """),
+        {"id": row[0]},
+    )
+    await db.commit()
+
+    import os as _os
+    public_base = _os.environ.get(
+        "PUBLIC_BASE_URL",
+        "https://soundpulse-production-5266.up.railway.app",
+    )
+    audio_url = None
+    if row[17] and row[18]:
+        audio_url = f"{public_base}/api/v1/admin/music/audio/{row[17]}/{row[18]}.mp3"
+
+    return {
+        "claimed": {
+            "submission_id": str(row[0]),
+            "target_service": target_service,
+            "subject_id": str(row[1]),
+            "subject_type": row[2],
+            "attempt_number": row[3],
+            "song": {
+                "title": row[4],
+                "isrc": row[5],
+                "primary_genre": row[6],
+                "content_rating": row[7],
+                "writers": row[8],
+                "publishers": row[9],
+                "marketing_hook": row[10],
+                "target_audience_tags": row[11],
+                "mood_tags": row[12],
+                "language": row[13],
+                "actual_release_date": row[14].isoformat() if row[14] else None,
+                "audio_url": audio_url,
+            },
+            "artist": {
+                "stage_name": row[15],
+                "legal_name": row[16],
+            },
+            "worker_id": worker_id,
+        }
+    }
+
+
+@router.post("/api/v1/admin/worker/ack/{submission_id}")
+async def worker_ack(
+    submission_id: str,
+    body: dict,
+    target_service: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Portal-worker posts back a successful submission.
+    Body:
+      {
+        "external_id": "<portal-returned id>",
+        "response": {<raw portal response>},
+        "screenshot_b64": "<optional audit screenshot>",
+        "status": "submitted" | "accepted" (optional, default 'submitted')
+      }
+    Query param target_service='ascap' routes to ascap_submissions;
+    anything else (or missing) routes to external_submissions.
+    """
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    try:
+        sid = _uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid submission_id")
+
+    status = (body.get("status") or "submitted").strip().lower()
+    if status not in ("submitted", "accepted"):
+        status = "submitted"
+    external_id = body.get("external_id")
+    response = body.get("response") or {}
+    screenshot_b64 = body.get("screenshot_b64")
+
+    if target_service == "ascap":
+        await db.execute(
+            _text("""
+                UPDATE ascap_submissions SET
+                    status = :status,
+                    ascap_work_id = :ext_id,
+                    raw_response = :response,
+                    portal_screenshot_b64 = :shot,
+                    submitted_at = COALESCE(submitted_at, NOW()),
+                    accepted_at = CASE WHEN :status = 'accepted' THEN NOW() ELSE accepted_at END,
+                    updated_at = NOW()
+                WHERE id = :id
+            """),
+            {
+                "id": sid,
+                "status": status,
+                "ext_id": external_id,
+                "response": response,
+                "shot": screenshot_b64,
+            },
+        )
+    else:
+        await db.execute(
+            _text("""
+                UPDATE external_submissions SET
+                    status = :status,
+                    external_id = :ext_id,
+                    response_json = :response,
+                    submitted_at = COALESCE(submitted_at, NOW()),
+                    accepted_at = CASE WHEN :status = 'accepted' THEN NOW() ELSE accepted_at END,
+                    updated_at = NOW()
+                WHERE id = :id
+            """),
+            {
+                "id": sid,
+                "status": status,
+                "ext_id": external_id,
+                "response": response,
+            },
+        )
+    await db.commit()
+    return {"ok": True, "submission_id": str(sid), "status": status}
+
+
+@router.post("/api/v1/admin/worker/fail/{submission_id}")
+async def worker_fail(
+    submission_id: str,
+    body: dict,
+    target_service: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Portal-worker posts back a failed submission.
+    Body:
+      {
+        "error": "<human-readable error message>",
+        "retry": true (optional, default true — flips back to pending
+                 so another worker pass can retry)
+      }
+    """
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    try:
+        sid = _uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid submission_id")
+
+    error = (body.get("error") or "unknown failure").strip()
+    retry = body.get("retry", True)
+    new_status = "pending" if retry else "failed"
+
+    if target_service == "ascap":
+        await db.execute(
+            _text("""
+                UPDATE ascap_submissions SET
+                    status = :status,
+                    retry_count = retry_count + 1,
+                    last_error_message = :err,
+                    updated_at = NOW()
+                WHERE id = :id
+            """),
+            {"id": sid, "status": new_status, "err": error[:1000]},
+        )
+    else:
+        await db.execute(
+            _text("""
+                UPDATE external_submissions SET
+                    status = :status,
+                    retry_count = retry_count + 1,
+                    last_error_message = :err,
+                    updated_at = NOW()
+                WHERE id = :id
+            """),
+            {"id": sid, "status": new_status, "err": error[:1000]},
+        )
+    await db.commit()
+    return {"ok": True, "submission_id": str(sid), "status": new_status}
+
+
+# ---------------------------------------------------------------------
 # ASCAP submissions — Fonzworth agent (T-190..T-194, PRD §31)
 # ---------------------------------------------------------------------
 

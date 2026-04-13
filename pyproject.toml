@@ -33,7 +33,6 @@ dependencies = [
     "python-multipart>=0.0.18",
     "librosa>=0.10.2",
     "soundfile>=0.12.1",
-    "playwright>=1.48.0",
 ]
 
 [project.optional-dependencies]
