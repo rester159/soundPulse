@@ -253,7 +253,8 @@ These are tables referenced by §24–47 logic that still need schema + models.
 - [ ] **T-228** [§43.I] UGC Trigger Agent — TikTok hashtag/sound monitoring
 - [ ] **T-229** [§43.K] Analytics Agent — metric aggregation + feedback loop into blueprint generation
 - [ ] **T-230** [§43.L] Editorial/PR Agent — press release generation + outreach
-- [ ] **T-231** [§43.N] Submissions Agent — distribution/rights orchestration (currently scaffolded in §43 catalog only)
+- [x] **T-231 / T-225** [§43.N] Submissions Agent — prereq check + CEO escalation + sweep. Static LANES config (9 lanes), idempotent escalation via ceo_decisions, scheduler job every 30 min. Real submission calls stubbed until lane implementations land (T-182, T-190, etc.).
+      ✓ shipped 2026-04-12 commit 5e4e37b
 
 ### P2.D — Social integrations (platform APIs)
 
@@ -347,3 +348,5 @@ These are tables referenced by §24–47 logic that still need schema + models.
 - 2026-04-12: Artists + Releases pages — full CRUD UI for the internal pipeline (commit 67bc766)
 - 2026-04-12: T-195 E2E pipeline test — 9 cases, 8/9 passing (caught JSONB bind bug in audio_qa_lite which is also now fixed) (commit 1ac4842)
 - 2026-04-12: T-127-lite LLM persona blender + create-from-description flow (commit 1a820f8)
+- 2026-04-12: E2E test isolation fix — 9/9 green in 36.76s (commit a8fe025)
+- 2026-04-12: T-225 Submissions Agent — 9-lane prereq checker + CEO setup_required escalation + scheduler sweep + UI SetupRequiredCard (commit 5e4e37b)
