@@ -4201,6 +4201,221 @@ async def reject_ceo_decision(
     }
 
 
+class SongMasterCreateRequest(BaseModel):
+    title: str
+    primary_artist_id: str
+    blueprint_id: str
+    primary_genre: str
+    content_rating: str = "mild"
+    language: str = "en"
+    alt_titles: list[str] | None = None
+    subtitle: str | None = None
+    version_type: str | None = None
+    tempo_bpm: float | None = None
+    key_camelot: str | None = None
+    duration_seconds: int | None = None
+    status: str = "draft"
+
+
+class SongMasterPatchRequest(BaseModel):
+    status: str | None = None
+    isrc: str | None = None
+    upc: str | None = None
+    distributor: str | None = None
+    distributor_work_id: str | None = None
+    iswc: str | None = None
+    actual_release_date: str | None = None  # ISO date
+    scheduled_release_date: str | None = None
+
+
+@router.post("/api/v1/admin/songs")
+async def create_song_master(
+    body: SongMasterCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Persist a new songs_master row (the canonical song record)."""
+    import uuid as _uuid
+    from api.models.songs_master import SongMaster
+
+    try:
+        artist_uuid = _uuid.UUID(body.primary_artist_id)
+        blueprint_uuid = _uuid.UUID(body.blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid artist or blueprint id")
+
+    row = SongMaster(
+        title=body.title,
+        primary_artist_id=artist_uuid,
+        blueprint_id=blueprint_uuid,
+        primary_genre=body.primary_genre,
+        content_rating=body.content_rating,
+        language=body.language,
+        alt_titles=body.alt_titles,
+        subtitle=body.subtitle,
+        version_type=body.version_type,
+        tempo_bpm=body.tempo_bpm,
+        key_camelot=body.key_camelot,
+        duration_seconds=body.duration_seconds,
+        status=body.status,
+    )
+    db.add(row)
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(409, detail=f"song creation failed: {e}")
+    await db.refresh(row)
+    return _song_to_dict(row)
+
+
+@router.get("/api/v1/admin/songs")
+async def list_songs_master(
+    status: str | None = None,
+    primary_artist_id: str | None = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    from api.models.songs_master import SongMaster
+    stmt = select(SongMaster).order_by(SongMaster.created_at.desc()).limit(min(limit, 200))
+    if status:
+        stmt = stmt.where(SongMaster.status == status)
+    if primary_artist_id:
+        import uuid as _uuid
+        try:
+            stmt = stmt.where(SongMaster.primary_artist_id == _uuid.UUID(primary_artist_id))
+        except ValueError:
+            raise HTTPException(400, detail="invalid primary_artist_id")
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return {
+        "songs": [_song_to_dict(r) for r in rows],
+        "count": len(rows),
+    }
+
+
+@router.get("/api/v1/admin/songs/{song_id}")
+async def get_song_master(
+    song_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    import uuid as _uuid
+    from api.models.songs_master import SongMaster
+    try:
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid song_id")
+    row = (await db.execute(
+        select(SongMaster).where(SongMaster.song_id == sid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail="song not found")
+    return _song_to_dict(row, full=True)
+
+
+@router.patch("/api/v1/admin/songs/{song_id}")
+async def patch_song_master(
+    song_id: str,
+    body: SongMasterPatchRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Patch lifecycle fields on a song. Partial updates only."""
+    import uuid as _uuid
+    from datetime import date as _date
+    from api.models.songs_master import SongMaster
+    try:
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid song_id")
+    row = (await db.execute(
+        select(SongMaster).where(SongMaster.song_id == sid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail="song not found")
+
+    updates = body.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        if value is None:
+            continue
+        if key in ("actual_release_date", "scheduled_release_date"):
+            value = _date.fromisoformat(value)
+        setattr(row, key, value)
+
+    await db.commit()
+    await db.refresh(row)
+    return _song_to_dict(row, full=True)
+
+
+def _song_to_dict(row, full: bool = False) -> dict:
+    base = {
+        "song_id": str(row.song_id),
+        "title": row.title,
+        "primary_artist_id": str(row.primary_artist_id),
+        "blueprint_id": str(row.blueprint_id),
+        "primary_genre": row.primary_genre,
+        "status": row.status,
+        "isrc": row.isrc,
+        "upc": row.upc,
+        "iswc": row.iswc,
+        "distributor": row.distributor,
+        "actual_release_date": row.actual_release_date.isoformat() if row.actual_release_date else None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+    if not full:
+        return base
+    base.update({
+        "internal_code": row.internal_code,
+        "alt_titles": row.alt_titles,
+        "subtitle": row.subtitle,
+        "version_type": row.version_type,
+        "content_rating": row.content_rating,
+        "language": row.language,
+        "subgenres": row.subgenres,
+        "mood_tags": row.mood_tags,
+        "tempo_bpm": row.tempo_bpm,
+        "key_camelot": row.key_camelot,
+        "duration_seconds": row.duration_seconds,
+        "loudness_lufs": row.loudness_lufs,
+        "energy": row.energy,
+        "danceability": row.danceability,
+        "valence": row.valence,
+        "lyric_text": row.lyric_text,
+        "lyric_themes": row.lyric_themes,
+        "writers": row.writers,
+        "publishers": row.publishers,
+        "master_owner": row.master_owner,
+        "copyright_year": row.copyright_year,
+        "distributor_work_id": row.distributor_work_id,
+        "territory_rights": row.territory_rights,
+        "release_id": str(row.release_id) if row.release_id else None,
+        "scheduled_release_date": row.scheduled_release_date.isoformat() if row.scheduled_release_date else None,
+        "pre_save_date": row.pre_save_date.isoformat() if row.pre_save_date else None,
+        "release_strategy": row.release_strategy,
+        "marketing_hook": row.marketing_hook,
+        "marketing_tags": row.marketing_tags,
+        "playlist_fit": row.playlist_fit,
+        "target_audience_tags": row.target_audience_tags,
+        "pr_angle": row.pr_angle,
+        "generation_provider": row.generation_provider,
+        "generation_provider_job_id": row.generation_provider_job_id,
+        "generation_cost_usd": row.generation_cost_usd,
+        "regeneration_count": row.regeneration_count,
+        "qa_pass": row.qa_pass,
+        "duplication_risk_score": row.duplication_risk_score,
+        "predicted_success_score": row.predicted_success_score,
+        "predicted_stream_range_median": row.predicted_stream_range_median,
+        "predicted_revenue_usd": row.predicted_revenue_usd,
+        "actual_streams_lifetime": row.actual_streams_lifetime,
+        "actual_revenue_usd": row.actual_revenue_usd,
+        "outcome_label": row.outcome_label,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    })
+    return base
+
+
 @router.get("/api/v1/admin/ceo-decisions")
 async def list_ceo_decisions(
     status: str | None = None,
