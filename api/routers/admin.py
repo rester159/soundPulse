@@ -6346,6 +6346,51 @@ async def project_song_metadata(
     return result
 
 
+@router.post("/api/v1/admin/songs/{song_id}/audio-qa-full")
+async def run_full_audio_qa(
+    song_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    T-162-full: run full DSP audio QA on one song via librosa.
+    Computes tempo, loudness, key, silence %, peak dBFS, spectral
+    centroid, MFCC embedding. Updates songs_master + song_qa_reports.
+    Degrades gracefully if librosa isn't installed.
+    """
+    import uuid as _uuid
+    from api.services.audio_qa_full import full_qa_for_song
+    try:
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid song_id")
+    return await full_qa_for_song(db, song_id=sid)
+
+
+@router.post("/api/v1/admin/sweeps/audio-qa-full")
+async def sweep_full_audio_qa(
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Bulk full-DSP QA — walks qa_passed songs missing tempo_bpm /
+    loudness_lufs and runs librosa analysis on each."""
+    import uuid as _uuid
+    from api.models.songs_master import SongMaster
+    from api.services.audio_qa_full import full_qa_for_song
+
+    stmt = select(SongMaster).where(
+        SongMaster.status == "qa_passed",
+        SongMaster.tempo_bpm.is_(None),
+    ).limit(max(1, min(limit, 100)))
+    songs = (await db.execute(stmt)).scalars().all()
+    results = []
+    for s in songs:
+        r = await full_qa_for_song(db, song_id=s.song_id)
+        results.append(r)
+    return {"scanned": len(songs), "results": results}
+
+
 @router.post("/api/v1/admin/sweeps/downstream-pipeline")
 async def sweep_downstream_pipeline_endpoint(
     limit: int = 20,

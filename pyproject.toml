@@ -31,6 +31,8 @@ dependencies = [
     "joblib>=1.4.0",
     "Pillow>=11.0.0",
     "python-multipart>=0.0.18",
+    "librosa>=0.10.2",
+    "soundfile>=0.12.1",
 ]
 
 [project.optional-dependencies]
