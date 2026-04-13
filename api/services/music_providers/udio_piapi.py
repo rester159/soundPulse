@@ -21,6 +21,7 @@ import httpx
 
 from .base import (
     GenerateParams,
+    GenerationClip,
     GenerationResult,
     GenerationStatus,
     GenerationTask,
@@ -159,26 +160,40 @@ class UdioPiAPIAdapter(ProviderAdapter):
 
         audio_url: str | None = None
         duration_seconds: float | None = None
+        clips: list[GenerationClip] = []
+
         if status == GenerationStatus.SUCCEEDED:
             output = data.get("output") or {}
             # Udio via PiAPI returns:
             #   output.songs = [ {song_path, image_path, duration, title, lyrics, tags, ...}, ... ]
-            # Two clips per call. We take the first one as the master
-            # candidate. song_path is the audio URL, image_path is cover art.
+            # Two clips per call. We surface ALL of them in the clips list
+            # so the orchestrator can persist both as audio_assets rows.
+            # The first one is still the master candidate via audio_url.
             songs = []
             if isinstance(output, dict):
                 songs = output.get("songs") or []
             elif isinstance(output, list):
                 songs = output
 
-            if songs:
-                first = songs[0] if isinstance(songs[0], dict) else {}
-                audio_url = (
-                    first.get("song_path")      # Udio specific
-                    or first.get("audio_url")   # Suno compatibility
-                    or first.get("url")
-                )
-                duration_seconds = first.get("duration") or first.get("duration_seconds")
+            for s in songs:
+                if not isinstance(s, dict):
+                    continue
+                clip_url = s.get("song_path") or s.get("audio_url") or s.get("url")
+                if not clip_url:
+                    continue
+                clips.append(GenerationClip(
+                    audio_url=clip_url,
+                    duration_seconds=s.get("duration") or s.get("duration_seconds"),
+                    title=s.get("title"),
+                    lyrics=s.get("lyrics"),
+                    image_url=s.get("image_path") or s.get("image_url"),
+                    tags=s.get("tags") or [],
+                    provider_clip_id=s.get("id"),
+                ))
+
+            if clips:
+                audio_url = clips[0].audio_url
+                duration_seconds = clips[0].duration_seconds
 
         error = None
         if status == GenerationStatus.FAILED:
@@ -193,6 +208,7 @@ class UdioPiAPIAdapter(ProviderAdapter):
             error=str(error) if error else None,
             actual_cost_usd=COST_PER_SONG_USD if status == GenerationStatus.SUCCEEDED else None,
             raw_payload=body,
+            clips=clips,
         )
 
     def cost_estimate(self, params: GenerateParams) -> float:

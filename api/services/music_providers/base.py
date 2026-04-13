@@ -47,6 +47,18 @@ class GenerationTask:
 
 
 @dataclass
+class GenerationClip:
+    """One generated clip. Providers may return multiple per call (Udio = 2)."""
+    audio_url: str
+    duration_seconds: float | None = None
+    title: str | None = None
+    lyrics: str | None = None
+    image_url: str | None = None   # cover art provided by the provider
+    tags: list[str] = field(default_factory=list)
+    provider_clip_id: str | None = None
+
+
+@dataclass
 class GenerationResult:
     """Result of polling a task."""
     provider: str
@@ -57,6 +69,8 @@ class GenerationResult:
     error: str | None = None
     actual_cost_usd: float | None = None
     raw_payload: dict[str, Any] = field(default_factory=dict)
+    # New fields for providers that return richer metadata
+    clips: list[GenerationClip] = field(default_factory=list)
 
 
 class ProviderError(Exception):

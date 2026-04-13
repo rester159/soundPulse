@@ -3836,8 +3836,10 @@ async def music_poll(
             # If this call is linked to a song (T-160 orchestrator), flip
             # songs_master.status draft → qa_pending and create the
             # audio_assets row pointing at the self-hosted stream URL.
+            # Pass the full result so we can harvest lyrics/title/cover
+            # from rich-metadata providers (Udio).
             if persisted_locally and row.song_id is not None:
-                await _materialize_song_audio(db, row, provider, task_id)
+                await _materialize_song_audio(db, row, provider, task_id, result=result)
 
     # Prefer the self-hosted URL when bytes are available.
     response_audio_url = result.audio_url
@@ -3856,13 +3858,20 @@ async def music_poll(
 
 
 async def _materialize_song_audio(
-    db: AsyncSession, call_row, provider: str, task_id: str
+    db: AsyncSession, call_row, provider: str, task_id: str,
+    result=None,  # optional GenerationResult with clips list + metadata
 ) -> None:
     """
-    Post-success bookkeeping for a T-160 generation: create an
-    audio_assets row for the self-hosted stream and flip the linked
-    songs_master.status from 'draft' to 'qa_pending'. Idempotent —
-    no-op if an audio_assets row already exists for this call.
+    Post-success bookkeeping for a T-160 generation.
+
+    If `result.clips` is populated (Udio returns 2, Suno may return 2):
+      - Creates ONE audio_assets row for the master candidate (clip 0)
+      - Extracts lyrics + title from clip 0 into songs_master
+      - Uses clip 0's image_url as the cover if present
+
+    Otherwise falls back to the single-clip path (MusicGen).
+
+    Flips songs_master.status from 'draft' to 'qa_pending'. Idempotent.
     """
     from sqlalchemy import text as _text
     exists = await db.execute(
@@ -3893,16 +3902,125 @@ async def _materialize_song_audio(
             "url": stream_url,
         },
     )
-    await db.execute(
-        _text("UPDATE songs_master SET status = 'qa_pending', updated_at = NOW() "
-              "WHERE song_id = :sid AND status = 'draft'"),
-        {"sid": call_row.song_id},
+
+    # Rich-metadata providers (Udio): harvest clip 0's title/lyrics/cover
+    # into the linked songs_master row.
+    rich_updates: dict[str, object] = {}
+    if result is not None and result.clips:
+        master_clip = result.clips[0]
+        if master_clip.lyrics:
+            rich_updates["lyric_text"] = master_clip.lyrics
+        if master_clip.title:
+            rich_updates["title"] = master_clip.title
+        if master_clip.tags:
+            rich_updates["mood_tags"] = master_clip.tags[:10]
+
+        # If the provider gave us a cover image, download + persist it
+        # as an artist_visual_asset linked to songs_master.primary_artwork_asset_id.
+        if master_clip.image_url:
+            provider_cover = await _download_and_persist_provider_cover(
+                db,
+                song_id=call_row.song_id,
+                provider=provider,
+                image_url=master_clip.image_url,
+            )
+            if provider_cover:
+                rich_updates["primary_artwork_asset_id"] = provider_cover
+
+    # Build UPDATE clause
+    set_parts = ["status = 'qa_pending'", "updated_at = NOW()"]
+    params: dict[str, object] = {"sid": call_row.song_id}
+    for k, v in rich_updates.items():
+        set_parts.append(f"{k} = :{k}")
+        params[k] = v
+    update_sql = (
+        f"UPDATE songs_master SET {', '.join(set_parts)} "
+        f"WHERE song_id = :sid AND status IN ('draft', 'qa_pending')"
     )
+    await db.execute(_text(update_sql), params)
+
     try:
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("[orchestrator] materialize failed for call %s", call_row.id)
+
+
+async def _download_and_persist_provider_cover(
+    db: AsyncSession,
+    *,
+    song_id,
+    provider: str,
+    image_url: str,
+):
+    """
+    Download a provider-furnished cover image (Udio gives us one per clip)
+    and store it in the same visual_asset_blobs sidecar that DALL-E covers
+    use. Returns the new asset_id, or None on failure.
+    """
+    import uuid as _uuid
+    import httpx
+    from sqlalchemy import text as _text
+
+    # Song needs an artist_id for artist_visual_assets.artist_id FK
+    art_row = (await db.execute(
+        _text("SELECT primary_artist_id FROM songs_master WHERE song_id = :sid"),
+        {"sid": song_id},
+    )).fetchone()
+    if not art_row:
+        return None
+    artist_id = art_row[0]
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(image_url)
+            if r.status_code != 200:
+                logger.warning("[cover-download] %s returned %s", image_url[:80], r.status_code)
+                return None
+            image_bytes = r.content
+            content_type = r.headers.get("content-type", "image/jpeg")
+    except Exception:
+        logger.exception("[cover-download] fetch failed for %s", image_url[:80])
+        return None
+
+    asset_id = _uuid.uuid4()
+    await db.execute(
+        _text("""
+            INSERT INTO artist_visual_assets (
+                asset_id, artist_id, asset_type, storage_url,
+                generation_provider, source_prompt, is_canonical_sheet
+            ) VALUES (
+                :asset_id, :artist_id, 'song_artwork', :storage_url,
+                :provider, :prompt, FALSE
+            )
+        """),
+        {
+            "asset_id": asset_id,
+            "artist_id": artist_id,
+            "storage_url": f"/api/v1/admin/visual/{asset_id}.png",
+            "provider": f"{provider}_provider",
+            "prompt": f"Provider-supplied cover from {provider}",
+        },
+    )
+    await db.execute(
+        _text("""
+            INSERT INTO visual_asset_blobs
+              (asset_id, content_type, size_bytes, image_bytes, source_url)
+            VALUES (:asset_id, :ct, :sz, :bytes, :url)
+        """),
+        {
+            "asset_id": asset_id,
+            "ct": content_type,
+            "sz": len(image_bytes),
+            "bytes": image_bytes,
+            "url": image_url,
+        },
+    )
+    logger.info(
+        "[cover-download] persisted %d bytes for song %s (provider %s)",
+        len(image_bytes), str(song_id)[:8], provider,
+    )
+    return asset_id
 
 
 async def _has_stored_audio(db: AsyncSession, call_id) -> bool:

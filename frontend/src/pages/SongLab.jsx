@@ -23,12 +23,11 @@ function resolveAudioUrl(url) {
 }
 
 // Display mapping from generation provider id → prompt-style id used by
-// /blueprint/top-opportunities. Suno and EvoLink-wrapped Suno share the
-// same prompt format; MusicGen takes the STYLE block stripped of LYRICS.
+// /blueprint/top-opportunities.
 const PROVIDER_TO_PROMPT_STYLE = {
   musicgen: 'musicgen',
   suno_evolink: 'suno',
-  udio: 'suno',  // fall back to Suno-format until Udio re-launches
+  udio: 'suno',  // Udio speaks the Suno-style prompt format
 }
 
 const PROVIDER_DISPLAY = {
@@ -36,6 +35,33 @@ const PROVIDER_DISPLAY = {
   suno_evolink: 'Suno',
   udio: 'Udio',
   soundraw: 'SOUNDRAW',
+}
+
+// Genres that are best served instrumentally (MusicGen) vs with lyrics (Udio).
+// Lyrical genres auto-default to Udio when it's live; instrumental ones
+// auto-default to MusicGen.
+const INSTRUMENTAL_GENRE_TOKENS = [
+  'classical', 'ambient', 'orchestral', 'soundtrack', 'score', 'new-age',
+  'experimental', 'jazz', 'lo-fi', 'electronic', 'downtempo',
+]
+
+function isInstrumentalGenre(genre) {
+  if (!genre) return false
+  const g = genre.toLowerCase()
+  return INSTRUMENTAL_GENRE_TOKENS.some(tok => g.includes(tok))
+}
+
+function pickDefaultProvider(providers, genre) {
+  const live = providers.filter(p => p.live)
+  if (live.length === 0) return providers[0]?.id || 'musicgen'
+  const liveIds = new Set(live.map(p => p.id))
+  const instrumental = isInstrumentalGenre(genre)
+  // Preference order
+  if (instrumental && liveIds.has('musicgen')) return 'musicgen'
+  if (!instrumental && liveIds.has('udio')) return 'udio'
+  if (!instrumental && liveIds.has('suno_evolink')) return 'suno_evolink'
+  // Fall back to the first live provider
+  return live[0].id
 }
 
 // MusicGen is text-to-instrumental — strip the LYRICS section so the
@@ -410,27 +436,25 @@ export default function SongLab() {
   const { data: providersData } = useMusicProviders()
   const providers = providersData?.data?.providers || []
 
-  // Prefer the first live provider. If none are live, still show the
-  // picker (disabled) so the user can see what's configured.
-  const defaultProviderId = useMemo(() => {
-    const live = providers.find(p => p.live)
-    return live?.id || providers[0]?.id || 'musicgen'
-  }, [providers])
-
-  const [providerId, setProviderId] = useState(null)
-  const activeProviderId = providerId || defaultProviderId
-  const activeProvider = providers.find(p => p.id === activeProviderId)
-  const providerLive = !!activeProvider?.live
-
-  // Map provider id → the "model" param the /top-opportunities endpoint
-  // expects when building prompts.
-  const promptStyle = PROVIDER_TO_PROMPT_STYLE[activeProviderId] || 'suno'
-
+  // Opportunities are fetched once with a neutral prompt style
+  // (Suno-format, which Udio also understands and MusicGen can safely
+  // receive after stripping the LYRICS block).
   const { data, isLoading, isError, error, refetch, isFetching } =
-    useTopOpportunities(5, promptStyle)
+    useTopOpportunities(5, 'suno')
 
   const blueprints = data?.data?.data?.blueprints || []
   const generatedAt = data?.data?.data?.generated_at
+
+  // User can override via the picker; otherwise the provider is auto-
+  // picked from the live providers based on the top blueprint's genre.
+  const [providerId, setProviderId] = useState(null)
+  const autoPickedId = useMemo(() => {
+    const topGenre = blueprints[0]?.genre
+    return pickDefaultProvider(providers, topGenre)
+  }, [providers, blueprints])
+  const activeProviderId = providerId || autoPickedId
+  const activeProvider = providers.find(p => p.id === activeProviderId)
+  const providerLive = !!activeProvider?.live
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
