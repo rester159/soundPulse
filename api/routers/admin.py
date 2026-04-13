@@ -4334,6 +4334,79 @@ async def create_artist_from_description(
     }
 
 
+@router.post("/api/v1/admin/artists/{artist_id}/regenerate-portrait")
+async def regenerate_artist_portrait(
+    artist_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Re-run portrait generation for an existing artist using the current
+    image_generator prompt logic. Used after photorealism improvements
+    to refresh existing artists without re-doing the persona blend.
+    """
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    from api.models.ai_artist import AIArtist
+    from api.services.image_generator import (
+        build_artist_portrait_prompt,
+        generate_and_store_image,
+    )
+
+    try:
+        aid = _uuid.UUID(artist_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid artist_id")
+
+    artist = (await db.execute(
+        select(AIArtist).where(AIArtist.artist_id == aid)
+    )).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(404, detail="artist not found")
+
+    # Rebuild persona dict from the artist's columns
+    persona = {
+        "age": artist.age,
+        "gender_presentation": artist.gender_presentation,
+        "ethnicity_heritage": artist.ethnicity_heritage,
+        "visual_dna": artist.visual_dna or {},
+        "fashion_dna": artist.fashion_dna or {},
+    }
+    prompt = build_artist_portrait_prompt(persona)
+    portrait = await generate_and_store_image(
+        db,
+        artist_id=aid,
+        asset_type="reference_sheet",
+        prompt=prompt,
+    )
+    if portrait is None:
+        raise HTTPException(
+            502,
+            detail="portrait generation returned None — check OPENAI_API_KEY env and logs",
+        )
+
+    # Update visual_dna.reference_sheet_asset_id on the artist
+    updated_visual = dict(artist.visual_dna or {})
+    updated_visual["reference_sheet_asset_id"] = str(portrait.asset_id)
+    await db.execute(
+        _text("UPDATE ai_artists SET visual_dna = CAST(:vdna AS jsonb), updated_at = NOW() WHERE artist_id = :aid"),
+        {"vdna": json.dumps(updated_visual), "aid": aid},
+    )
+    await db.commit()
+
+    return {
+        "artist_id": str(aid),
+        "stage_name": artist.stage_name,
+        "portrait": {
+            "asset_id": str(portrait.asset_id),
+            "storage_url": portrait.storage_url,
+            "provider": portrait.provider,
+            "bytes": portrait.bytes_len,
+        },
+        "prompt": prompt[:500],
+    }
+
+
 @router.get("/api/v1/admin/artists")
 async def list_ai_artists(
     roster_status: str = "active",

@@ -28,10 +28,13 @@ PROXY_URL_ENV = "OPENAI_CLI_PROXY_URL"
 PROXY_KEY_ENV = "OPENAI_CLI_PROXY_KEY"
 DIRECT_KEY_ENV = "OPENAI_API_KEY"
 
-# DALL-E 3 defaults — standard quality is $0.040/image at 1024x1024.
+# DALL-E 3 defaults — HD quality ($0.080/image at 1024x1024, 2x standard)
+# is required for photorealistic portraits. Standard quality smooths
+# skin too much and drifts toward illustration even with aggressive
+# anti-illustration prompts.
 DEFAULT_MODEL = "dall-e-3"
 DEFAULT_SIZE = "1024x1024"
-DEFAULT_QUALITY = "standard"
+DEFAULT_QUALITY = "hd"
 
 
 @dataclass
@@ -192,35 +195,69 @@ async def generate_and_store_image(
 
 
 def build_artist_portrait_prompt(persona: dict) -> str:
-    """Turn a persona dict into a DALL-E 3 portrait prompt."""
+    """
+    Turn a persona dict into a DALL-E 3 portrait prompt that produces
+    a PHOTOREALISTIC result — a candid editorial photograph of an actual
+    person, not illustration or AI art.
+
+    DALL-E 3 has a strong default tendency toward illustrative output.
+    Countering that requires: explicit "photograph" language, camera
+    specifics (body + lens), lighting specifics, skin-texture cues,
+    AND explicit anti-illustration directives. Without ALL of these
+    the model drifts back to stylized output.
+    """
     visual = persona.get("visual_dna") or {}
     fashion = persona.get("fashion_dna") or {}
-    parts: list[str] = []
+    subject_parts: list[str] = []
+
+    # Age + gender + ethnicity go first so DALL-E locks the person type
+    if (gender := persona.get("gender_presentation")):
+        subject_parts.append(gender)
+    if (age := persona.get("age")):
+        subject_parts.append(f"{age} years old")
+    if (ethnicity := persona.get("ethnicity_heritage")):
+        subject_parts.append(ethnicity)
+
     if (face := visual.get("face_description")):
-        parts.append(face)
+        subject_parts.append(face)
     if (body := visual.get("body_presentation")):
-        parts.append(body)
+        subject_parts.append(body)
     if (hair := visual.get("hair_signature")):
-        parts.append(hair)
-    if fashion.get("style_summary") or fashion.get("core_garments"):
-        style = fashion.get("style_summary") or ", ".join(fashion.get("core_garments") or [])
-        if style:
-            parts.append(f"wearing {style}")
-    if (palette := visual.get("color_palette")):
-        if isinstance(palette, list):
-            parts.append(f"color palette {', '.join(palette)}")
-    if (art_dir := visual.get("art_direction")):
-        parts.append(art_dir)
+        subject_parts.append(hair)
 
-    if not parts:
-        parts.append("portrait of a music artist")
+    outfit_parts: list[str] = []
+    if fashion.get("style_summary"):
+        outfit_parts.append(fashion["style_summary"])
+    elif fashion.get("core_garments"):
+        outfit_parts.append(", ".join(fashion["core_garments"]))
 
-    descriptor = ", ".join(parts)
+    subject = ", ".join(subject_parts) if subject_parts else "musician"
+    outfit = f" wearing {', '.join(outfit_parts)}" if outfit_parts else ""
+
+    # The art_direction field often says things like "moody urban night
+    # photography" which IS photographic — fold it in as scene context.
+    scene = visual.get("art_direction") or "natural daylight studio setting"
+
     return (
-        f"Professional editorial portrait of {descriptor}. "
-        f"Single subject, head and shoulders framing, direct gaze, "
-        f"high-end magazine lighting, sharp focus, photorealistic, "
-        f"neutral studio background. No text, no watermarks."
+        f"I NEED a real, unedited candid photograph. "
+        f"Subject: a real human being, {subject}{outfit}. "
+        f"Scene: {scene}. "
+        f"This is a professional editorial portrait photograph, "
+        f"shot on a Canon EOS R5 with an 85mm f/1.4 prime lens, "
+        f"full frame, shallow depth of field, natural soft lighting, "
+        f"golden hour or softbox key light, "
+        f"head and shoulders framing, direct eye contact with the lens. "
+        f"Skin shows natural texture, pores, subtle imperfections, "
+        f"authentic human details. Sharp focus on the eyes. "
+        f"Documentary realism, unretouched, film grain acceptable, "
+        f"in the style of a Vogue or Rolling Stone cover shoot. "
+        f"DO NOT generate illustration. "
+        f"DO NOT generate cartoon, anime, or stylized art. "
+        f"DO NOT generate 3D render, CGI, or digital painting. "
+        f"DO NOT generate AI-art-looking smooth plastic skin. "
+        f"This MUST look like an actual photograph of a real person "
+        f"that could appear in a physical magazine. "
+        f"No text, no watermarks, no logos, no graphic overlays."
     )
 
 
@@ -231,22 +268,51 @@ def build_song_cover_prompt(
     artist_visual: dict | None,
     themes: list[str] | None,
 ) -> str:
-    """Turn a song into a cover-art prompt."""
+    """
+    Turn a song into a cover-art prompt. Covers lean photographic for
+    most contemporary genres (pop/hip-hop/country/rock/reggae/R&B)
+    since that's what works on Spotify thumbnails. Instrumental/
+    orchestral genres get stylized treatment.
+    """
     mood_parts: list[str] = []
     if themes:
         mood_parts.extend(themes[:3])
-    if artist_visual:
-        if (pal := artist_visual.get("color_palette")):
-            if isinstance(pal, list):
-                mood_parts.append(f"palette {', '.join(pal)}")
-        if (art_dir := artist_visual.get("art_direction")):
-            mood_parts.append(art_dir)
+    mood = ", ".join(mood_parts) if mood_parts else f"{genre} mood"
 
-    mood = " | ".join(mood_parts) if mood_parts else f"{genre} mood"
+    # Decide photographic vs stylized based on genre
+    genre_lower = (genre or "").lower()
+    stylized_genres = ("classical", "ambient", "orchestral", "new-age",
+                       "experimental", "soundtrack", "score")
+    is_stylized = any(tok in genre_lower for tok in stylized_genres)
+
+    scene_hint = ""
+    if artist_visual:
+        if (art_dir := artist_visual.get("art_direction")):
+            scene_hint = f" Scene reference: {art_dir}."
+        pal = artist_visual.get("color_palette")
+        if isinstance(pal, list) and pal:
+            scene_hint += f" Palette: {', '.join(pal)}."
+
+    if is_stylized:
+        return (
+            f"Album cover artwork for an instrumental {genre} piece titled '{title}'. "
+            f"Mood: {mood}.{scene_hint} "
+            f"Square composition, atmospheric, evocative, editorial album art "
+            f"quality. High detail, bold visual hook. "
+            f"No text overlay, no watermarks, no logos."
+        )
+
+    # Photographic path for vocal/mainstream genres
     return (
-        f"Album cover art for a {genre} song titled '{title}'. "
-        f"Mood: {mood}. "
-        f"Square composition, bold visual hook, suitable for thumbnail "
-        f"at 300px. No text overlay, no watermarks, editorial album art "
-        f"quality. Instagram-ready."
+        f"Photographic album cover for a {genre} song titled '{title}'. "
+        f"Mood: {mood}.{scene_hint} "
+        f"This is a real photograph in the style of a Spotify editorial "
+        f"playlist cover — shot on 35mm film or a full-frame digital "
+        f"camera, natural lighting, candid human or environmental scene, "
+        f"sharp focus, documentary realism. Square 1:1 composition, "
+        f"strong focal point that reads at 300px thumbnail size. "
+        f"DO NOT include illustration, cartoon, 3D render, AI-art looking "
+        f"plastic surfaces, or text overlays. "
+        f"Real photograph aesthetic, magazine-grade quality, "
+        f"no watermarks, no logos."
     )
