@@ -552,6 +552,60 @@ export function useCreateArtistFromPersona() {
   })
 }
 
+// -------- Submissions (task #86..#92) --------
+
+export function useSubmissionTargets() {
+  return useQuery({
+    queryKey: ['admin', 'submission-targets'],
+    queryFn: () => makeRequest('GET', '/admin/submission-targets'),
+    staleTime: 30_000,
+  })
+}
+
+export function useExternalSubmissions({ target_service = null, status = null, limit = 100 } = {}) {
+  return useQuery({
+    queryKey: ['admin', 'external-submissions', target_service, status, limit],
+    queryFn: () => {
+      const params = { limit }
+      if (target_service) params.target_service = target_service
+      if (status) params.status = status
+      return makeRequest('GET', '/admin/external-submissions', params)
+    },
+    staleTime: 15_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+export function useAscapSubmissions(status = null) {
+  return useQuery({
+    queryKey: ['admin', 'ascap-submissions', status],
+    queryFn: () => makeRequest('GET', '/admin/ascap-submissions', status ? { status } : {}),
+    staleTime: 15_000,
+  })
+}
+
+export function useGenreTraits() {
+  return useQuery({
+    queryKey: ['admin', 'genre-traits'],
+    queryFn: () => makeRequest('GET', '/admin/genre-traits'),
+    staleTime: 60_000,
+  })
+}
+
+export function useTriggerSubmission() {
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/external-submissions/submit', {}, body),
+  })
+}
+
+export function useDownstreamSweep() {
+  return useMutation({
+    mutationFn: ({ limit = 20 } = {}) =>
+      makeRequest('POST', '/admin/sweeps/downstream-pipeline', { limit }, {}),
+  })
+}
+
 // -------- Instrumentals (task #86) --------
 
 export function useInstrumentals(activeOnly = true) {

@@ -12,6 +12,7 @@ import Songs from './pages/Songs'
 import Artists from './pages/Artists'
 import Releases from './pages/Releases'
 import Instrumentals from './pages/Instrumentals'
+import Submissions from './pages/Submissions'
 import Assistant from './pages/Assistant'
 import DataFlow from './pages/DataFlow'
 import DbStats from './pages/DbStats'
@@ -64,6 +65,7 @@ function App() {
             <Route path="/artists" element={<ErrorBoundary><Artists /></ErrorBoundary>} />
             <Route path="/releases" element={<ErrorBoundary><Releases /></ErrorBoundary>} />
             <Route path="/instrumentals" element={<ErrorBoundary><Instrumentals /></ErrorBoundary>} />
+            <Route path="/submissions" element={<ErrorBoundary><Submissions /></ErrorBoundary>} />
             <Route path="/assistant" element={<ErrorBoundary><Assistant /></ErrorBoundary>} />
             <Route path="/data-flow" element={<ErrorBoundary><DataFlow /></ErrorBoundary>} />
             <Route path="/db-stats" element={<ErrorBoundary><DbStats /></ErrorBoundary>} />
