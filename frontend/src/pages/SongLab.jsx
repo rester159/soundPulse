@@ -6,8 +6,21 @@ import {
 } from 'lucide-react'
 import {
   useTopOpportunities, useMusicProviders, useMusicGenerate, useMusicPoll,
-  useMusicGenerations,
+  useMusicGenerations, getBaseUrl,
 } from '../hooks/useSoundPulse'
+
+// Backend-served audio URLs come back as /api/v1/... paths. Resolve
+// them against the backend base so the frontend can play them from a
+// different origin in production.
+function resolveAudioUrl(url) {
+  if (!url) return url
+  if (/^https?:\/\//i.test(url)) return url
+  if (url.startsWith('/api/v1/')) {
+    const base = getBaseUrl().replace(/\/api\/v1\/?$/, '')
+    return base + url
+  }
+  return url
+}
 
 // Display mapping from generation provider id → prompt-style id used by
 // /blueprint/top-opportunities. Suno and EvoLink-wrapped Suno share the
@@ -90,7 +103,17 @@ function RecentGenerationCard({ gen }) {
         {gen.prompt}
       </div>
       {gen.status === 'succeeded' && gen.audio_url && (
-        <audio controls src={gen.audio_url} className="w-full h-8" style={{ filter: 'invert(0.9) hue-rotate(180deg)' }} />
+        <audio
+          controls
+          src={resolveAudioUrl(gen.audio_url)}
+          className="w-full"
+          style={{ filter: 'invert(0.9) hue-rotate(180deg)' }}
+        />
+      )}
+      {gen.status === 'succeeded' && !gen.audio_url && (
+        <div className="text-[10px] text-amber-300 italic">
+          audio expired — provider purged the file before we could self-host it
+        </div>
       )}
       {gen.status === 'failed' && gen.error_message && (
         <div className="text-[10px] text-rose-300 line-clamp-1">{gen.error_message}</div>
@@ -225,12 +248,12 @@ function GenerationPanel({ blueprint, providerId, providerLive }) {
           </div>
           <audio
             controls
-            src={audioUrl}
+            src={resolveAudioUrl(audioUrl)}
             className="w-full"
             style={{ filter: 'invert(0.9) hue-rotate(180deg)' }}
           />
           <div className="flex items-center gap-3 text-[10px] text-zinc-500">
-            <a href={audioUrl} target="_blank" rel="noreferrer" className="underline hover:text-zinc-300">
+            <a href={resolveAudioUrl(audioUrl)} target="_blank" rel="noreferrer" className="underline hover:text-zinc-300">
               open in new tab
             </a>
             <button onClick={handleReset} className="underline hover:text-zinc-300">

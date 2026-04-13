@@ -3712,6 +3712,70 @@ async def music_generate(
     }
 
 
+async def _download_and_persist_audio(
+    db: AsyncSession, call_id, audio_url: str
+) -> bool:
+    """
+    Download an audio file from a provider delivery URL and stash it in
+    music_generation_audio. Idempotent — no-op if the row already exists.
+
+    Returns True if bytes are now available (either freshly downloaded or
+    already stored), False on failure.
+    """
+    from sqlalchemy import text as _text
+    import httpx
+
+    exists = await db.execute(
+        _text("SELECT 1 FROM music_generation_audio WHERE music_generation_call_id = :cid"),
+        {"cid": call_id},
+    )
+    if exists.scalar() is not None:
+        return True
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(audio_url)
+            if r.status_code != 200:
+                logger.warning(
+                    "[music] download failed %s: %s", r.status_code, audio_url[:120]
+                )
+                return False
+            data = r.content
+            content_type = r.headers.get("content-type", "audio/mpeg")
+    except Exception:
+        logger.exception("[music] download threw for %s", audio_url[:120])
+        return False
+
+    try:
+        await db.execute(
+            _text("""
+                INSERT INTO music_generation_audio
+                  (music_generation_call_id, content_type, size_bytes, mp3_bytes, source_url)
+                VALUES (:cid, :ct, :sz, :bytes, :url)
+                ON CONFLICT (music_generation_call_id) DO NOTHING
+            """),
+            {
+                "cid": call_id,
+                "ct": content_type,
+                "sz": len(data),
+                "bytes": data,
+                "url": audio_url,
+            },
+        )
+        await db.commit()
+        logger.info("[music] persisted %d bytes for call %s", len(data), call_id)
+        return True
+    except Exception:
+        await db.rollback()
+        logger.exception("[music] insert failed for call %s", call_id)
+        return False
+
+
+def _audio_stream_url(request_base: str, provider: str, task_id: str) -> str:
+    """URL the frontend should use to play a self-hosted generation."""
+    return f"{request_base}/admin/music/audio/{provider}/{task_id}.mp3"
+
+
 @router.get("/api/v1/admin/music/generate/{provider}/{task_id}")
 async def music_poll(
     provider: str,
@@ -3743,6 +3807,7 @@ async def music_poll(
         )
     )
     row = row_result.scalar_one_or_none()
+    persisted_locally = False
     if row is not None:
         row.status = result.status.value
         if result.audio_url is not None:
@@ -3762,15 +3827,75 @@ async def music_poll(
             await db.rollback()
             logger.exception("[music] failed to update persisted call %s", task_id)
 
+        # Self-host the audio on first terminal success so we survive
+        # the provider's data_removed window.
+        if result.status.value == "succeeded" and result.audio_url:
+            persisted_locally = await _download_and_persist_audio(
+                db, row.id, result.audio_url
+            )
+
+    # Prefer the self-hosted URL when bytes are available.
+    response_audio_url = result.audio_url
+    if persisted_locally or (row is not None and await _has_stored_audio(db, row.id)):
+        response_audio_url = f"/api/v1/admin/music/audio/{provider}/{task_id}.mp3"
+
     return {
         "provider": result.provider,
         "task_id": result.task_id,
         "status": result.status.value,
-        "audio_url": result.audio_url,
+        "audio_url": response_audio_url,
         "duration_seconds": result.duration_seconds,
         "error": result.error,
         "actual_cost_usd": result.actual_cost_usd,
     }
+
+
+async def _has_stored_audio(db: AsyncSession, call_id) -> bool:
+    from sqlalchemy import text as _text
+    r = await db.execute(
+        _text("SELECT 1 FROM music_generation_audio WHERE music_generation_call_id = :cid"),
+        {"cid": call_id},
+    )
+    return r.scalar() is not None
+
+
+@router.get("/api/v1/admin/music/audio/{provider}/{task_id}.mp3")
+async def music_audio_stream(
+    provider: str,
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Stream a self-hosted generation by provider + task_id. Open endpoint
+    (no X-API-Key) so HTML5 <audio> can load it without custom headers.
+    Cache aggressively — the bytes never change.
+    """
+    from fastapi.responses import Response
+    from sqlalchemy import text as _text
+
+    r = await db.execute(
+        _text("""
+            SELECT a.mp3_bytes, a.content_type, a.size_bytes
+            FROM music_generation_audio a
+            JOIN music_generation_calls c ON c.id = a.music_generation_call_id
+            WHERE c.provider = :provider AND c.task_id = :task_id
+            LIMIT 1
+        """),
+        {"provider": provider, "task_id": task_id},
+    )
+    row = r.fetchone()
+    if row is None:
+        raise HTTPException(404, detail="audio not found")
+
+    return Response(
+        content=bytes(row[0]),
+        media_type=row[1] or "audio/mpeg",
+        headers={
+            "Content-Length": str(row[2]),
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
 @router.get("/api/v1/admin/music/generations")
@@ -3781,6 +3906,7 @@ async def list_music_generations(
     _admin: ApiKey = Depends(require_admin),
 ):
     """List recent music generation calls, newest first."""
+    from sqlalchemy import text as _text
     from api.models.music_generation_call import MusicGenerationCall
     stmt = select(MusicGenerationCall).order_by(
         MusicGenerationCall.submitted_at.desc()
@@ -3789,6 +3915,23 @@ async def list_music_generations(
         stmt = stmt.where(MusicGenerationCall.status == status)
     result = await db.execute(stmt)
     rows = result.scalars().all()
+
+    # One round trip to find which rows have self-hosted bytes, so each
+    # card can render the durable URL instead of a maybe-expired provider URL.
+    row_ids = [row.id for row in rows]
+    stored_set: set = set()
+    if row_ids:
+        r = await db.execute(
+            _text("SELECT music_generation_call_id FROM music_generation_audio WHERE music_generation_call_id = ANY(:ids)"),
+            {"ids": row_ids},
+        )
+        stored_set = {x[0] for x in r.fetchall()}
+
+    def _resolve_url(row):
+        if row.id in stored_set:
+            return f"/api/v1/admin/music/audio/{row.provider}/{row.task_id}.mp3"
+        return row.audio_url  # may be expired, frontend shows an "expired" badge
+
     return {
         "generations": [
             {
@@ -3799,7 +3942,8 @@ async def list_music_generations(
                 "prompt": row.prompt,
                 "genre_hint": row.genre_hint,
                 "duration_seconds_requested": row.duration_seconds_requested,
-                "audio_url": row.audio_url,
+                "audio_url": _resolve_url(row),
+                "audio_self_hosted": row.id in stored_set,
                 "audio_duration_seconds": row.audio_duration_seconds,
                 "estimated_cost_usd": row.estimated_cost_usd,
                 "actual_cost_usd": row.actual_cost_usd,
