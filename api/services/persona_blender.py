@@ -108,15 +108,30 @@ async def blend_persona(
     description: str,
     target_genre: str,
     caller: str = "persona_blender",
+    avoid_stage_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Produce a complete ai_artists-shaped dict from a short description.
 
     Raises ValueError if the LLM returns unparseable JSON.
+
+    `avoid_stage_names` is a list of existing roster names that the LLM
+    must NOT reuse. Prevents the common failure where the LLM re-picks
+    a name it generated for a previous similar description.
     """
+    avoid_block = ""
+    if avoid_stage_names:
+        sample = avoid_stage_names[:30]  # prompt budget
+        avoid_block = (
+            f"\n\nDO NOT use any of these stage names (they're already in our roster): "
+            f"{', '.join(sample)}.\n"
+            f"Pick something distinctive that has never been used before."
+        )
+
     user_prompt = (
         f"Target genre: {target_genre}\n\n"
-        f"Description: {description}\n\n"
+        f"Description: {description}"
+        f"{avoid_block}\n\n"
         f"Return the JSON persona now."
     )
     messages = [

@@ -4225,12 +4225,20 @@ async def create_artist_from_description(
     from api.models.ai_artist import AIArtist
     from api.services.persona_blender import blend_persona
 
+    # Pull existing stage names so the LLM doesn't re-pick one
+    from sqlalchemy import text as _text
+    existing_names_result = await db.execute(
+        _text("SELECT stage_name FROM ai_artists WHERE roster_status = 'active'")
+    )
+    existing_names = [r[0] for r in existing_names_result.fetchall() if r[0]]
+
     try:
         persona = await blend_persona(
             db=db,
             description=body.description,
             target_genre=body.target_genre,
             caller="admin.from_description",
+            avoid_stage_names=existing_names,
         )
     except ValueError as e:
         raise HTTPException(502, detail=f"persona generation failed: {e}")
@@ -4261,9 +4269,21 @@ async def create_artist_from_description(
     db.add(row)
     try:
         await db.commit()
-    except Exception as e:
+    except Exception:
+        # Stage name collision — last-ditch retry with a short random
+        # suffix. The LLM saw the avoid list but occasionally still picks
+        # a collision because its output is non-deterministic.
         await db.rollback()
-        raise HTTPException(409, detail=f"artist creation failed (duplicate stage_name?): {e}")
+        import random as _random, string as _string
+        suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=4))
+        row.stage_name = f"{row.stage_name} {suffix}"
+        row.legal_name = f"{row.legal_name} {suffix}"
+        db.add(row)
+        try:
+            await db.commit()
+        except Exception as e2:
+            await db.rollback()
+            raise HTTPException(409, detail=f"artist creation failed after retry: {e2}")
     await db.refresh(row)
 
     # Generate + store a portrait via openai_cli_proxy (or OpenAI direct fallback)
