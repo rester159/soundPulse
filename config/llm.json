@@ -77,8 +77,8 @@
   "actions": {
     "assistant_chat": "assistant_default",
     "lyrical_analysis": "analysis_default",
-    "smart_prompt_generation": "smart_prompt_openai",
+    "smart_prompt_generation": "smart_prompt_default",
     "persona_blender": "persona_openai",
-    "pop_culture_scraper": "pop_culture_scraper_openai"
+    "pop_culture_scraper": "smart_prompt_default"
   }
 }
