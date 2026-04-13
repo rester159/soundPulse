@@ -15,3 +15,5 @@ from __future__ import annotations
 # Order doesn't matter — all decorators are additive.
 from . import distrokid  # noqa: F401
 from . import mlc  # noqa: F401
+from . import submithub  # noqa: F401
+from . import youtube_content_id  # noqa: F401
