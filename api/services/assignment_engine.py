@@ -163,36 +163,196 @@ def score_audience_fit(blueprint: dict, artist: dict) -> float:
     return _jaccard(bp_aud, ar_aud)
 
 
-# Stubs for the remaining 6 dimensions. Explicitly labeled — they return
-# 0.5 (neutral) and a comment so the reader knows they aren't implemented.
+# ---------------------------------------------------------------------------
+# Dimensions 5-10 — shipped as live scorers (previously stubs).
+# Each returns [0, 1]. The heuristics are deliberately simple; the
+# model will learn better weights when the ML hit predictor trains on
+# resolved outcomes (§10 Layer 6).
+# ---------------------------------------------------------------------------
+
+# Minimum days between releases per PRD §22 cooldown rule. An artist
+# who just dropped should not take a second blueprint back-to-back.
+RELEASE_COOLDOWN_DAYS = 21
+
+
 def score_release_cadence_fit(blueprint: dict, artist: dict) -> float:
-    """STUB: needs song_count + last_released_at with a cooldown check."""
-    return 0.5
+    """
+    Cooldown check: penalize reuse if the artist just released.
+    1.0 if never released or > 60 days since last.
+    0.9 between 30-60 days.
+    0.6 between 21-30 days.
+    0.2 within 21-day cooldown.
+    """
+    import datetime as _dt
+    last = artist.get("last_released_at")
+    if last is None:
+        return 1.0
+    try:
+        if isinstance(last, str):
+            last_dt = _dt.datetime.fromisoformat(last.replace("Z", "+00:00"))
+        else:
+            last_dt = last
+        now = _dt.datetime.now(last_dt.tzinfo or _dt.timezone.utc)
+        days = (now - last_dt).days
+    except Exception:
+        return 0.5
+
+    if days >= 60:
+        return 1.0
+    if days >= 30:
+        return 0.9
+    if days >= RELEASE_COOLDOWN_DAYS:
+        return 0.6
+    return 0.2
 
 
 def score_momentum_fit(blueprint: dict, artist: dict) -> float:
-    """STUB: needs artist_performance_state aggregated from revenue_events."""
-    return 0.5
+    """
+    Momentum fit: reward high-momentum artists for high-opportunity
+    blueprints (you want your rising star to catch waves), penalize
+    pairing a cold artist with a hot opportunity you should give to
+    someone who can actually ride it.
+
+    Uses artist['momentum_score'] if the orchestrator projected one
+    (from artist_performance_state), otherwise falls back to song_count
+    as a rough recency proxy. Blueprint['opportunity_score'] is passed
+    from §11 quantification.
+    """
+    artist_momentum = float(artist.get("momentum_score") or 0)
+    if artist_momentum <= 0:
+        # Fallback: song_count-as-proxy. New artist (0 songs) is assumed
+        # to need a boost; artist with 5+ songs gets momentum credit.
+        sc = int(artist.get("song_count") or 0)
+        if sc == 0:
+            artist_momentum = 0.5
+        elif sc <= 2:
+            artist_momentum = 0.55
+        elif sc <= 5:
+            artist_momentum = 0.7
+        else:
+            artist_momentum = 0.85
+
+    bp_opp = float(blueprint.get("opportunity_score") or 0.5)
+    # Close-matching momentum to opportunity rewards pairing; mismatch
+    # penalizes. Abs difference in [0,1] → 1 - diff = score.
+    diff = abs(artist_momentum - bp_opp)
+    return max(0.0, min(1.0, 1.0 - diff))
+
+
+def _visual_tokens(visual: dict | None) -> set[str]:
+    """Flatten a visual_dna dict into a searchable token bag."""
+    if not visual:
+        return set()
+    parts: list[str] = []
+    for key in (
+        "face_description", "body_presentation", "hair_signature",
+        "fashion_style_summary", "art_direction",
+    ):
+        val = visual.get(key)
+        if isinstance(val, str):
+            parts.extend(val.lower().split())
+    return {p.strip(",.") for p in parts if len(p) > 3}
 
 
 def score_visual_brand_fit(blueprint: dict, artist: dict) -> float:
-    """STUB: needs visual_dna + blueprint visual descriptors."""
-    return 0.5
+    """
+    Compare blueprint's visual descriptors against artist visual_dna.
+    Blueprints that don't specify visuals get a neutral 0.6 (slight
+    reuse preference so we're not blocked on visual data).
+    """
+    bp_visual = blueprint.get("visual_requirements")
+    ar_visual = artist.get("visual_dna")
+    if not bp_visual:
+        return 0.6  # slight reuse preference — no blueprint visual spec
+    if not ar_visual:
+        return 0.4
+    bp_tokens = _visual_tokens(bp_visual)
+    ar_tokens = _visual_tokens(ar_visual)
+    if not bp_tokens or not ar_tokens:
+        return 0.5
+    overlap = _jaccard(bp_tokens, ar_tokens)
+    # Stretched Jaccard, same logic as voice_fit — small token bags are
+    # pessimistic under raw Jaccard.
+    return min(1.0, overlap * 2.5)
 
 
 def score_cannibalization_risk(blueprint: dict, artist: dict) -> float:
-    """STUB: needs DSP algorithmic-placement model."""
-    return 0.5
+    """
+    Risk of the new song cannibalizing the artist's recent releases.
+    Returns HIGH value (less risk) for artists who haven't released
+    recently OR whose recent songs cover different sonic zones.
+
+    Heuristic: if song_count == 0, no risk (1.0). Otherwise penalty
+    scales with how many songs exist (~5+ songs = saturated catalog =
+    moderate risk). ML layer 6 will learn this properly from
+    resolved stream outcomes.
+    """
+    sc = int(artist.get("song_count") or 0)
+    if sc == 0:
+        return 1.0
+    if sc <= 2:
+        return 0.9
+    if sc <= 5:
+        return 0.75
+    if sc <= 10:
+        return 0.55
+    return 0.4  # heavy catalog, real cannibalization risk
 
 
 def score_brand_stretch_risk(blueprint: dict, artist: dict) -> float:
-    """STUB: needs brand-drift distance metric."""
-    return 0.5
+    """
+    How far does this blueprint stretch the artist's brand?
+    1.0 = exact genre match (no stretch)
+    0.7 = adjacent genre within the artist's known palette
+    0.3 = totally different primary genre (brand drift)
+
+    Reuses _genre_tokens + adjacent_genres lookups.
+    """
+    bp_primary = str(blueprint.get("primary_genre", "")).strip().lower()
+    ar_primary = str(artist.get("primary_genre", "")).strip().lower()
+    if not bp_primary or not ar_primary:
+        return 0.5
+
+    if bp_primary == ar_primary:
+        return 1.0
+
+    bp_tokens = _genre_tokens(bp_primary)
+    ar_tokens = _genre_tokens(ar_primary)
+    shared = bp_tokens & ar_tokens
+    if shared:
+        # Top-level token match (e.g. pop.k-pop vs pop.chill-pop)
+        return 0.7
+
+    ar_adj = _as_set(artist.get("adjacent_genres"))
+    if bp_primary in ar_adj:
+        return 0.6
+
+    return 0.3  # real brand drift
 
 
 def score_strategic_diversification(blueprint: dict, artist: dict) -> float:
-    """STUB: needs portfolio-level roster analysis."""
-    return 0.5
+    """
+    Reward giving songs to UNDERUSED artists in the roster so we don't
+    pile every release on the top 2-3 performers and starve the rest.
+
+    Heuristic: an artist with song_count < roster_median_song_count gets
+    a diversification boost; above-median artists get a penalty. If the
+    blueprint supplies roster_median_song_count, we use it; otherwise
+    neutral 0.5.
+    """
+    median = blueprint.get("roster_median_song_count")
+    if median is None:
+        return 0.5
+    sc = int(artist.get("song_count") or 0)
+    try:
+        median_f = float(median)
+    except Exception:
+        return 0.5
+    if sc < median_f:
+        return 0.85  # underused → boost
+    if sc == median_f:
+        return 0.65
+    return 0.4  # already over-represented in the roster
 
 
 # ---------------------------------------------------------------------------
