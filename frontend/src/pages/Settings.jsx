@@ -1,18 +1,20 @@
 import { useState, useEffect } from 'react'
 import {
   Settings as SettingsIcon, User, Wrench, Loader2, Save, Check,
-  AlertCircle, CheckCircle2, Plus, X, Bot,
+  AlertCircle, CheckCircle2, Plus, X, Bot, Inbox, ThumbsUp, ThumbsDown,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useCeoProfile, useUpdateCeoProfile,
   useAgents, useTools, useAgentToolGrants,
   useCreateGrant, useDeleteGrant,
+  useCeoDecisions, useApproveCeoDecision, useRejectCeoDecision,
 } from '../hooks/useSoundPulse'
 
 const SECTIONS = [
-  { id: 'ceo',   label: 'CEO Profile', icon: User },
-  { id: 'tools', label: 'Tools & Agents', icon: Wrench },
+  { id: 'decisions', label: 'Pending Decisions', icon: Inbox },
+  { id: 'ceo',       label: 'CEO Profile',      icon: User },
+  { id: 'tools',     label: 'Tools & Agents',   icon: Wrench },
 ]
 
 // ─── CEO Profile section ─────────────────────────────────────────────────
@@ -399,10 +401,219 @@ function GrantDropdown({ tool_id, agent_id, agents, tools, grantedAgentIds, gran
   )
 }
 
+// ─── Pending Decisions section ───────────────────────────────────────────
+
+function DecisionCard({ decision, onApprove, onReject, busy }) {
+  const [expanded, setExpanded] = useState(false)
+  const data = decision.data || {}
+  const breakdown = data.breakdown || {}
+  const scores = data.scores || {}
+  const proposedId = data.proposed_artist_id
+  const proposedName = data.proposed_artist_name
+
+  const summary =
+    decision.proposal === 'reuse'
+      ? `Reuse existing artist ${proposedName || proposedId?.slice(0, 8) || '(unknown)'}`
+      : decision.proposal === 'create_new'
+        ? `Create new artist for this blueprint`
+        : decision.proposal
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-zinc-500">
+            <span className="px-1.5 py-0.5 rounded border border-violet-500/40 text-violet-300 bg-violet-500/10">
+              {decision.decision_type}
+            </span>
+            <span>{new Date(decision.created_at).toLocaleString()}</span>
+          </div>
+          <div className="text-zinc-100 font-semibold mt-1">{summary}</div>
+          {data.blueprint_genre && (
+            <div className="text-xs text-zinc-500 mt-0.5">
+              Blueprint genre: {data.blueprint_genre}
+              {typeof data.roster_size === 'number' && ` · roster size ${data.roster_size}`}
+            </div>
+          )}
+          {data.reason && (
+            <div className="text-[11px] text-zinc-600 italic mt-1">{data.reason}</div>
+          )}
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => onApprove(decision)}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-medium rounded-lg transition-colors"
+          >
+            <ThumbsUp size={12} /> Approve
+          </button>
+          <button
+            onClick={() => onReject(decision)}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-3 py-2 bg-zinc-800 hover:bg-rose-600/80 disabled:opacity-40 text-zinc-300 hover:text-white text-xs font-medium rounded-lg border border-zinc-700 transition-colors"
+          >
+            <ThumbsDown size={12} /> Reject
+          </button>
+        </div>
+      </div>
+
+      {Object.keys(scores).length > 0 && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-[11px] text-violet-300 hover:text-violet-200"
+        >
+          {expanded ? 'Hide' : 'Show'} scoring ({Object.keys(scores).length} artist{Object.keys(scores).length === 1 ? '' : 's'})
+        </button>
+      )}
+
+      {expanded && (
+        <div className="border-t border-zinc-800 pt-3 space-y-3">
+          {Object.entries(scores)
+            .sort((a, b) => b[1] - a[1])
+            .map(([artistId, composite]) => {
+              const dims = breakdown[artistId] || {}
+              const isProposed = artistId === proposedId
+              return (
+                <div
+                  key={artistId}
+                  className={`rounded border p-2.5 ${
+                    isProposed
+                      ? 'border-emerald-500/40 bg-emerald-500/5'
+                      : 'border-zinc-800 bg-zinc-950/50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="text-xs font-mono text-zinc-400">
+                      {artistId.slice(0, 8)}
+                      {isProposed && (
+                        <span className="ml-2 text-[9px] uppercase tracking-wider text-emerald-300">
+                          proposed
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-sm font-bold text-zinc-100 tabular-nums">
+                      {composite.toFixed(3)}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1 text-[9px] text-zinc-500">
+                    {Object.entries(dims).map(([name, value]) => (
+                      <div key={name} className="bg-zinc-900 rounded px-1.5 py-1">
+                        <div
+                          className={`font-bold tabular-nums ${
+                            value >= 0.7 ? 'text-emerald-300' :
+                            value >= 0.4 ? 'text-amber-300' :
+                            'text-rose-300'
+                          }`}
+                        >
+                          {value.toFixed(2)}
+                        </div>
+                        <div className="truncate" title={name}>{name.replace(/_/g, ' ')}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+          {data.threshold && (
+            <div className="text-[10px] text-zinc-600">
+              Reuse threshold: {data.threshold.toFixed(2)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PendingDecisionsSection() {
+  const [filter, setFilter] = useState('pending')
+  const { data, isLoading } = useCeoDecisions({ status: filter })
+  const approve = useApproveCeoDecision()
+  const reject = useRejectCeoDecision()
+  const qc = useQueryClient()
+  const [busyId, setBusyId] = useState(null)
+
+  const decisions = data?.data?.decisions || []
+
+  const handleApprove = async (d) => {
+    setBusyId(d.decision_id)
+    try {
+      await approve.mutateAsync({ decisionId: d.decision_id })
+      qc.invalidateQueries({ queryKey: ['admin', 'ceo-decisions'] })
+      qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] })
+    } finally {
+      setBusyId(null)
+    }
+  }
+  const handleReject = async (d) => {
+    setBusyId(d.decision_id)
+    try {
+      await reject.mutateAsync({ decisionId: d.decision_id })
+      qc.invalidateQueries({ queryKey: ['admin', 'ceo-decisions'] })
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-zinc-100">Pending Decisions</h2>
+          <p className="text-xs text-zinc-500">CEO gate queue — approvals unblock the autonomous pipeline.</p>
+        </div>
+        <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
+          {['pending', 'approved', 'rejected'].map(s => (
+            <button
+              key={s}
+              onClick={() => setFilter(s)}
+              className={`px-3 py-1 text-xs rounded font-medium capitalize transition-colors ${
+                filter === s
+                  ? 'bg-violet-600/30 text-violet-200 border border-violet-500/50'
+                  : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {isLoading && (
+        <div className="flex items-center justify-center py-12 text-zinc-500">
+          <Loader2 size={18} className="animate-spin mr-2" /> Loading decisions...
+        </div>
+      )}
+
+      {!isLoading && decisions.length === 0 && (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <Inbox size={40} className="text-zinc-700 mb-3" />
+          <div className="text-sm text-zinc-400">No {filter} decisions</div>
+          <div className="text-xs text-zinc-600 mt-1 max-w-sm">
+            When a blueprint runs through the assignment engine, the recommendation lands here for your approval.
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {decisions.map(d => (
+          <DecisionCard
+            key={d.decision_id}
+            decision={d}
+            onApprove={handleApprove}
+            onReject={handleReject}
+            busy={busyId === d.decision_id}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ─── Page shell ──────────────────────────────────────────────────────────
 
 export default function Settings() {
-  const [section, setSection] = useState('ceo')
+  const [section, setSection] = useState('decisions')
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -437,6 +648,7 @@ export default function Settings() {
 
         {/* Content */}
         <div className="flex-1 min-w-0">
+          {section === 'decisions' && <PendingDecisionsSection />}
           {section === 'ceo' && <CeoProfileSection />}
           {section === 'tools' && <ToolsAndAgentsSection />}
         </div>

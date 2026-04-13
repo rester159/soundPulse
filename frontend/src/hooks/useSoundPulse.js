@@ -384,6 +384,60 @@ export function useMusicPoll(provider, taskId, { enabled = true } = {}) {
   })
 }
 
+// CEO decisions (§23) + artist spine hooks
+export function useCeoDecisions({ status = 'pending', decisionType = null } = {}) {
+  return useQuery({
+    queryKey: ['admin', 'ceo-decisions', status, decisionType],
+    queryFn: () => {
+      const params = {}
+      if (status) params.status = status
+      if (decisionType) params.decision_type = decisionType
+      return makeRequest('GET', '/admin/ceo-decisions', params)
+    },
+    refetchInterval: 15_000,
+    staleTime: 5_000,
+  })
+}
+
+export function useApproveCeoDecision() {
+  return useMutation({
+    mutationFn: ({ decisionId, notes, modifications }) =>
+      makeRequest('POST', `/admin/ceo-decisions/${decisionId}/approve`, {}, {
+        response_notes: notes,
+        modifications,
+      }),
+  })
+}
+
+export function useRejectCeoDecision() {
+  return useMutation({
+    mutationFn: ({ decisionId, notes }) =>
+      makeRequest('POST', `/admin/ceo-decisions/${decisionId}/reject`, {}, {
+        response_notes: notes,
+      }),
+  })
+}
+
+export function useAIArtists(rosterStatus = 'active') {
+  return useQuery({
+    queryKey: ['admin', 'ai-artists', rosterStatus],
+    queryFn: () => makeRequest('GET', '/admin/artists', { roster_status: rosterStatus }),
+    staleTime: 30_000,
+  })
+}
+
+export function useBlueprints({ status = null, limit = 50 } = {}) {
+  return useQuery({
+    queryKey: ['admin', 'blueprints', status, limit],
+    queryFn: () => {
+      const params = { limit }
+      if (status) params.status = status
+      return makeRequest('GET', '/admin/blueprints', params)
+    },
+    staleTime: 30_000,
+  })
+}
+
 export function useMusicGenerations(limit = 20) {
   return useQuery({
     queryKey: ['admin', 'music', 'generations', limit],

@@ -4092,6 +4092,115 @@ async def assign_blueprint(
     }
 
 
+class CEODecisionRespondRequest(BaseModel):
+    response_notes: str | None = None
+    modifications: dict | None = None
+
+
+@router.post("/api/v1/admin/ceo-decisions/{decision_id}/approve")
+async def approve_ceo_decision(
+    decision_id: str,
+    body: CEODecisionRespondRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Approve a pending CEO decision. Side effects depend on decision_type:
+
+    artist_assignment + proposal=reuse:
+      - set blueprint.assigned_artist_id = proposed_artist_id
+      - blueprint.status = 'assigned'
+    artist_assignment + proposal=create_new:
+      - blueprint.status = 'assigned_pending_creation'
+        (the new-artist creation pipeline reads this status in a later session)
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from api.models.ceo_decision import CEODecision
+    from api.models.song_blueprint import SongBlueprint
+
+    try:
+        d_uuid = _uuid.UUID(decision_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid decision_id")
+
+    decision = (await db.execute(
+        select(CEODecision).where(CEODecision.decision_id == d_uuid)
+    )).scalar_one_or_none()
+    if decision is None:
+        raise HTTPException(404, detail="decision not found")
+    if decision.status not in ("pending", "sent"):
+        raise HTTPException(409, detail=f"decision already in status {decision.status}")
+
+    now = datetime.now(timezone.utc)
+    decision.status = (
+        "approved_with_modifications"
+        if (body and body.modifications) else "approved"
+    )
+    decision.response_at = now
+    decision.response_payload = {
+        "notes": body.response_notes if body else None,
+        "modifications": body.modifications if body else None,
+    }
+
+    # Apply side effects
+    if decision.decision_type == "artist_assignment" and decision.entity_id:
+        blueprint = (await db.execute(
+            select(SongBlueprint).where(SongBlueprint.id == decision.entity_id)
+        )).scalar_one_or_none()
+        if blueprint is not None:
+            if decision.proposal == "reuse":
+                artist_id_str = (decision.data or {}).get("proposed_artist_id")
+                if artist_id_str:
+                    blueprint.assigned_artist_id = _uuid.UUID(artist_id_str)
+                blueprint.status = "assigned"
+            elif decision.proposal == "create_new":
+                blueprint.status = "assigned_pending_creation"
+
+    await db.commit()
+    await db.refresh(decision)
+    return {
+        "decision_id": str(decision.decision_id),
+        "status": decision.status,
+        "response_at": decision.response_at.isoformat() if decision.response_at else None,
+    }
+
+
+@router.post("/api/v1/admin/ceo-decisions/{decision_id}/reject")
+async def reject_ceo_decision(
+    decision_id: str,
+    body: CEODecisionRespondRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Reject a pending decision. Blueprint stays pending_assignment."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from api.models.ceo_decision import CEODecision
+
+    try:
+        d_uuid = _uuid.UUID(decision_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid decision_id")
+
+    decision = (await db.execute(
+        select(CEODecision).where(CEODecision.decision_id == d_uuid)
+    )).scalar_one_or_none()
+    if decision is None:
+        raise HTTPException(404, detail="decision not found")
+    if decision.status not in ("pending", "sent"):
+        raise HTTPException(409, detail=f"decision already in status {decision.status}")
+
+    decision.status = "rejected"
+    decision.response_at = datetime.now(timezone.utc)
+    decision.response_payload = {"notes": body.response_notes if body else None}
+    await db.commit()
+    return {
+        "decision_id": str(decision.decision_id),
+        "status": decision.status,
+    }
+
+
 @router.get("/api/v1/admin/ceo-decisions")
 async def list_ceo_decisions(
     status: str | None = None,
