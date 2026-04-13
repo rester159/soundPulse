@@ -44,6 +44,7 @@ class AIArtist(Base):
     audience_tags: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
 
     content_rating: Mapped[str] = mapped_column(Text, default="mild")
+    edge_profile: Mapped[str | None] = mapped_column(Text, nullable=True)
     roster_status: Mapped[str] = mapped_column(Text, default="active")
     song_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

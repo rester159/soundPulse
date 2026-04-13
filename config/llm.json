@@ -64,12 +64,21 @@
       "max_tokens": 2500,
       "price_per_million_input_usd": 0.15,
       "price_per_million_output_usd": 0.60
+    },
+    "pop_culture_scraper_openai": {
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "temperature": 0.9,
+      "max_tokens": 4000,
+      "price_per_million_input_usd": 0.15,
+      "price_per_million_output_usd": 0.60
     }
   },
   "actions": {
     "assistant_chat": "assistant_default",
     "lyrical_analysis": "analysis_default",
     "smart_prompt_generation": "smart_prompt_openai",
-    "persona_blender": "persona_openai"
+    "persona_blender": "persona_openai",
+    "pop_culture_scraper": "pop_culture_scraper_openai"
   }
 }

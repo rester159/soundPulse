@@ -127,6 +127,7 @@ Schema (return EXACTLY this shape, valid JSON, no markdown fences, no prose):
   "age": 24,
   "gender_presentation": "female | male | non_binary",
   "ethnicity_heritage": "string — SPECIFIC heritage that matches the genre and reference artists (e.g. 'Korean', 'Jamaican', 'Nigerian Yoruba', 'Mexican-American', 'Punjabi', 'Black American / Southern US'). Do NOT write vague answers like 'mixed' or 'international'.",
+  "edge_profile": "clean_edge | flirty_edge | savage_edge — lyrical tone dial. clean_edge = Taylor/Olivia Rodrigo safe; flirty_edge = Sabrina Carpenter / Doja Cat / Charli XCX double-entendres; savage_edge = Doechii / Ice Spice / Central Cee explicit-allowed. Match the artist's vibe and genre. Reggae/dancehall and hip-hop default to savage_edge unless the persona is explicitly softer. K-pop defaults to flirty_edge. Country and folk default to clean_edge unless outlaw-leaning.",
   "voice_dna": {
     "timbre_core": "one-line description of vocal timbre",
     "range_estimate": "e.g. A2-E4 chest, falsetto to A4",
@@ -275,6 +276,15 @@ async def blend_persona(
             persona["age"] = int(persona.get("age") or 25)
         except (TypeError, ValueError):
             persona["age"] = 25
+
+    # Edge profile — soft default to flirty_edge so new personas still
+    # get the Sabrina Carpenter treatment even if the LLM forgets. Clamp
+    # to the three allowed values so the DB CHECK constraint never trips.
+    edge = (persona.get("edge_profile") or "").strip().lower()
+    if edge not in {"clean_edge", "flirty_edge", "savage_edge"}:
+        persona["edge_profile"] = "flirty_edge"
+    else:
+        persona["edge_profile"] = edge
 
     # Ensure stage_name_alternatives is present + non-empty; if the LLM
     # skipped it, synthesize from the top stage_name so downstream code

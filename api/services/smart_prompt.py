@@ -34,6 +34,11 @@ from api.models.genre_feature_delta import GenreFeatureDelta
 from api.models.genre_lyrical_analysis import GenreLyricalAnalysis
 from api.services.gap_finder import find_gaps
 from api.services.llm_client import llm_chat
+from api.services.pop_culture_scraper import (
+    fetch_references_for_prompt,
+    format_references_block,
+    mark_references_used,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +111,7 @@ Return ONLY valid JSON, no markdown fences."""
 
 SMART_PROMPT_TEMPLATE = """GENRE: {genre}
 TARGET MODEL: {model}
+ARTIST EDGE PROFILE: {edge_profile}
 
 OPPORTUNITY: This genre has {breakout_count} breakouts in the last 30 days from {track_count} tracks. Average breakout achieved {composite_ratio:.1f}x normal composite score and {velocity_ratio:.1f}x normal velocity. The opportunity score ranks this genre #{opportunity_rank} of all genres.
 
@@ -117,12 +123,17 @@ TOP GAP — TARGET THIS SONIC ZONE (high breakout rate, low supply):
 
 {lyrical_section}
 
+{pop_culture_block}
+
 Write a {model}-formatted song creation prompt that:
 1. Targets the gap zone sonically (use the tempo/key/energy from the gap center)
 2. Reflects the winning differentiators (e.g. if "energy 12% higher" is a winning trait, write a high-energy prompt)
 3. {lyrical_directive}
-4. Is specific enough that {model} will produce something distinctive (not generic)
-5. Includes both STYLE and LYRICS sections in the format {model} expects
+4. Satisfies the EDGE RULES in the system prompt — at least TWO of {{double entendre, named pop-culture reference, opinionated take, concrete sensory hook, structural surprise}} are mandatory. Zero banned tropes.
+5. Match the edge profile '{edge_profile}' exactly — do NOT go savage on a clean_edge artist.
+6. If POP_CULTURE_HOOKS are provided above, fold 1-2 of them in naturally (don't force-fit, don't explain them).
+7. Is specific enough that {model} will produce something distinctive (not generic)
+8. Includes both STYLE and LYRICS sections in the format {model} expects
 
 Return ONLY this JSON:
 {{
@@ -130,6 +141,8 @@ Return ONLY this JSON:
   "rationale": {{
     "sonic_targeting": "one sentence on why these sonic choices",
     "lyrical_targeting": "one sentence on why these lyrical choices",
+    "edge_devices_used": ["list the 2+ edge devices you actually put in the lyric"],
+    "pop_culture_hooks_used": ["list the ref texts you injected, or [] if none fit"],
     "differentiation": "one sentence on what makes this distinctive vs typical {genre}"
   }}
 }}"""
@@ -139,11 +152,18 @@ async def generate_smart_prompt(
     db: AsyncSession,
     genre: str,
     model: str = "suno",
+    edge_profile: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate a data-driven song prompt for the given genre + model.
     Returns a dict with prompt, rationale, confidence, and source counts.
+
+    `edge_profile` — per-artist tone dial ('clean_edge' | 'flirty_edge' |
+    'savage_edge'). When None, defaults to 'flirty_edge' which is the
+    safe-but-still-interesting middle. Drives pop-culture reference
+    filtering so a clean_edge persona never sees savage references.
     """
+    effective_edge = edge_profile or "flirty_edge"
     today = date.today()
     window_start = today - timedelta(days=30)
 
@@ -203,10 +223,24 @@ async def generate_smart_prompt(
         lyrical_section = "LYRICAL INTELLIGENCE: not available yet (waiting for genius_lyrics + lyrical_analysis to run)"
         lyrical_directive = "Pick a distinctive theme that fits the sonic profile (avoid generic love/heartbreak unless that's the genre's core)"
 
+    # ---- Pop-culture references (Part 3 of edgy-themes pipeline) ----
+    # Fetch 8 live references matching the genre's top-level token +
+    # artist edge profile. Genre is typically dotted (pop.k-pop); we pass
+    # the top-level token so 'pop' references surface for k-pop too.
+    top_genre = genre.split(".", 1)[0] if "." in genre else genre
+    pop_refs = await fetch_references_for_prompt(
+        db,
+        genre=top_genre,
+        edge_profile=effective_edge,
+        limit=8,
+    )
+    pop_culture_block = format_references_block(pop_refs, effective_edge)
+
     # ---- Build the LLM prompt ----
     prompt_text = SMART_PROMPT_TEMPLATE.format(
         genre=genre,
         model=model,
+        edge_profile=effective_edge,
         breakout_count=breakout_stats["breakout_count"],
         track_count=breakout_stats["track_count"],
         composite_ratio=breakout_stats["avg_composite_ratio"],
@@ -216,6 +250,7 @@ async def generate_smart_prompt(
         gap=gap_text,
         lyrical_section=lyrical_section,
         lyrical_directive=lyrical_directive,
+        pop_culture_block=pop_culture_block,
     )
 
     result = await llm_chat(
@@ -247,17 +282,27 @@ async def generate_smart_prompt(
             "error": f"LLM returned malformed JSON: {exc}",
         }
 
+    # Bump usage counters on references that were actually surfaced to
+    # the LLM (not just the ones it chose to use — we can't reliably
+    # cross-reference without a post-hoc match). This is a coarse signal
+    # for retiring stale references.
+    if pop_refs:
+        await mark_references_used(db, [r["id"] for r in pop_refs])
+
     return {
         "prompt": parsed.get("prompt"),
         "rationale": parsed.get("rationale"),
         "model": model,
         "genre": genre,
+        "edge_profile": effective_edge,
+        "pop_culture_refs_offered": len(pop_refs),
         "based_on": {
             "breakout_count": breakout_stats["breakout_count"],
             "feature_deltas_count": (deltas or {}).get("breakout_count", 0),
             "feature_baseline_count": (deltas or {}).get("baseline_count", 0),
             "gap_clusters": len(gap_result.get("clusters") or []),
             "lyrical_analysis_present": lyrical is not None,
+            "pop_culture_refs": len(pop_refs),
             "audio_features_coverage_pct": _audio_coverage_pct(gap_result),
         },
         "confidence": _confidence_label(breakout_stats, deltas, top_gap, lyrical),

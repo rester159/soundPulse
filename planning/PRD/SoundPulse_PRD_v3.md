@@ -571,6 +571,90 @@ XGBoost gradient-boosted trees. Training data = resolved breakout_events. Inputs
 
 Training sweep: weekly. Model storage: `model_runs` table + `models/hit_predictor_v{N}.json` on disk. Serving: loaded by smart_prompt service to score gap zones before LLM call.
 
+### Layer 7 — Edgy Themes Pipeline (BUILT, evergreen)
+
+The problem Layer 7 solves: without it, the LLM defaults to the most averaged-out "universal" themes ("finally finding myself", "dancing through the pain") that sound like 1,000 other songs in the same genre. SoundPulse's brand voice requires **Sabrina-Carpenter-level edge** — double entendres, named pop-culture references, opinionated takes, concrete sensory hooks — across every genre we ship in.
+
+Three-part architecture, all three in production:
+
+**Part 1 — Edge rules in the system prompt** (`api/services/smart_prompt.py::SMART_PROMPT_SYSTEM`)
+
+A hard block tells the LLM that every song MUST contain at least TWO of:
+  (a) chorus-level double entendre
+  (b) named pop-culture reference younger than 18 months
+  (c) opinionated, named-target take (would offend 15-25% of listeners)
+  (d) concrete visual/sensory hook (brand, object, specific place)
+  (e) structural surprise
+
+Plus a BANNED TROPES list (generic self-empowerment slop) and six reference artists — Sabrina Carpenter, Chappell Roan, Doechii, Charli XCX, Olivia Rodrigo, Tyla — as tone exemplars. Explicit rule: "genre does not excuse blandness". Reggae, K-pop, and country can all be edgy with the right specificity.
+
+**Part 2 — Per-artist `edge_profile`** (`ai_artists.edge_profile`)
+
+Three tiers, stored as a column with a CHECK constraint:
+- `clean_edge` — Taylor/Olivia Rodrigo safe — sharp takes, no sex/drugs/profanity
+- `flirty_edge` — Sabrina/Doja/Charli XCX — double entendres, innuendo, bratty confidence
+- `savage_edge` — Doechii/Ice Spice/Central Cee — explicit-allowed, named targets allowed
+
+Defaults (persona blender sets these based on genre):
+- Reggae/dancehall, hip-hop, trap → `savage_edge`
+- K-pop, pop, R&B, latin → `flirty_edge`
+- Country, folk, acoustic → `clean_edge` (unless outlaw-leaning)
+
+The persona blender emits `edge_profile` in its required output schema; the create-from-persona endpoint writes it to the column; smart_prompt reads it on every generation and matches tone accordingly. A clean_edge artist can never be paired with savage references.
+
+**Part 3 — Pop-culture references** (`pop_culture_references` table + `api/services/pop_culture_scraper.py`)
+
+A rolling table of viral references the lyric writer can name-drop:
+
+```
+pop_culture_references
+  id              UUID
+  reference_type  ENUM(tiktok_sound, tiktok_dance, tiktok_phrase,
+                       viral_meme, show_reference, brand, app,
+                       gaming, celeb_moment, news_event, lyric_phrase, slang)
+  text            TEXT   -- "in my villain era", "corn kid autotune edit"
+  context         TEXT   -- "Used to mean 'doing what's best for me'..."
+  genres          TEXT[] -- empty = universal, or ["pop","hip-hop","r&b"]
+  edge_tiers      TEXT[] -- ["flirty_edge","savage_edge"]
+  first_seen_at   TIMESTAMPTZ
+  expires_at      TIMESTAMPTZ  -- default NOW + 90d, scraper can override
+  usage_count     INT
+  last_used_at    TIMESTAMPTZ
+```
+
+**Scraper (MVP):** a single gpt-4o-mini call acts as a "weekly cultural analyst" and harvests ~20 references per run. Prompt instructs it to return named, specific, currently-viral moments tagged with type + genres + edge tiers + decay weeks. Endpoint: `POST /admin/pop-culture/refresh`. Future: dedicated scrapers for TikTok Creative Center, X trending, Know Your Meme, Billboard Hot 100 feed the same table.
+
+**Injection:** `smart_prompt.fetch_references_for_prompt(genre, edge_profile)` returns a random sample of ≤8 live references filtered by genre + edge tier. They're formatted as `POP_CULTURE_HOOKS` block and prepended to the template with the directive "use 1-2 where they fit naturally — do NOT force-fit, do NOT explain them." The LLM's output rationale returns `pop_culture_hooks_used` so we can audit injection rate.
+
+**Decay:** `expires_at > NOW()` filter on every query. Stale references are invisible to the lyric writer automatically. No scheduled prune job needed.
+
+### End-to-end pipeline (how these layers flow into a song)
+
+```
+  persona_blender
+    → sets artist.edge_profile (clean/flirty/savage) based on genre + vibe
+    ↓
+  POP CULTURE SCRAPER  (weekly cron or manual /admin/pop-culture/refresh)
+    → gpt-4o-mini harvest → pop_culture_references (decay-tagged)
+    ↓
+  song blueprint created (genre-level, no artist yet)
+    ↓
+  assignment engine → CEO gate → artist assigned
+    ↓
+  POST /admin/blueprints/{id}/generate-song
+    ├─ orchestrator loads artist + blueprint
+    ├─ calls generate_smart_prompt(genre, edge_profile=artist.edge_profile)
+    │    ├─ breakout + delta + gap + lyrical intelligence (Layers 1-6)
+    │    ├─ fetch_references_for_prompt(genre, edge_profile) → 8 refs
+    │    ├─ LLM call with SMART_PROMPT_SYSTEM (edge rules) + template
+    │    └─ returns prompt with double-entendres + pop-culture hooks
+    ├─ assembles [VOICE DNA] + [VOICE REF] + FRESH smart_prompt + [PRODUCTION] + [POLICY]
+    ├─ calls suno_kie.generate(final_prompt)
+    └─ persists songs_master (draft) + music_generation_calls
+```
+
+Key design decision: **smart_prompt is regenerated fresh per generation**, not cached on the blueprint. This adds one LLM call per generation (~$0.01 at gpt-4o-mini rates) but guarantees every song gets this-week's culture + the correct artist-edge match. The cached blueprint `smart_prompt_text` serves as a fallback if the fresh call fails.
+
 ---
 
 ## §11. Opportunity Quantification

@@ -4442,6 +4442,7 @@ async def create_artist_from_persona(
         age=persona.get("age"),
         gender_presentation=persona.get("gender_presentation"),
         ethnicity_heritage=persona.get("ethnicity_heritage"),
+        edge_profile=persona.get("edge_profile"),
         voice_dna=persona["voice_dna"],
         visual_dna=persona["visual_dna"],
         fashion_dna=persona.get("fashion_dna"),
@@ -4588,6 +4589,7 @@ async def create_artist_from_description(
         age=persona.get("age"),
         gender_presentation=persona.get("gender_presentation"),
         ethnicity_heritage=persona.get("ethnicity_heritage"),
+        edge_profile=persona.get("edge_profile"),
         voice_dna=persona["voice_dna"],
         visual_dna=persona["visual_dna"],
         fashion_dna=persona.get("fashion_dna"),
@@ -5549,8 +5551,40 @@ async def generate_song_for_blueprint(
         "song_count": artist.song_count or 0,
         "content_rating": artist.content_rating or "mild",
     }
+
+    # Regenerate the smart_prompt FRESH for this generation, passing the
+    # artist's edge_profile so the edge rules + pop-culture references
+    # match the persona. Part 1+2+3 of the edgy-themes pipeline: the
+    # blueprint's stored smart_prompt_text was built genre-only at
+    # blueprint-creation time and knows nothing about the artist or this
+    # week's culture. We override it per-generation so every song gets
+    # fresh references and voice-matched edge.
+    #
+    # If the fresh call fails (LLM outage, etc), fall back to the stored
+    # blueprint text so a generation never blocks on the edge layer.
+    from api.services.smart_prompt import generate_smart_prompt
+    genre_for_prompt = blueprint.primary_genre or blueprint.genre_id
+    fresh_smart_prompt_text: str | None = None
+    try:
+        fresh = await generate_smart_prompt(
+            db,
+            genre=genre_for_prompt,
+            model="suno",
+            edge_profile=getattr(artist, "edge_profile", None),
+        )
+        if fresh and fresh.get("prompt"):
+            fresh_smart_prompt_text = fresh["prompt"]
+            logger.info(
+                "[orchestrator] fresh smart_prompt for %s — edge=%s refs_offered=%d",
+                genre_for_prompt,
+                fresh.get("edge_profile"),
+                fresh.get("pop_culture_refs_offered", 0),
+            )
+    except Exception:
+        logger.exception("[orchestrator] fresh smart_prompt failed, falling back")
+
     blueprint_dict = {
-        "smart_prompt_text": blueprint.smart_prompt_text,
+        "smart_prompt_text": fresh_smart_prompt_text or blueprint.smart_prompt_text,
         "primary_genre": blueprint.primary_genre or blueprint.genre_id,
         "genre_id": blueprint.genre_id,
         "target_themes": blueprint.target_themes or [],
@@ -5858,6 +5892,83 @@ async def telegram_test(
         raise HTTPException(502, detail=f"telegram send failed: {e}")
 
     return {"sent": True, "chat_id": chat_id}
+
+
+@router.post("/api/v1/admin/pop-culture/refresh")
+async def pop_culture_refresh(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Part 3 of the edgy-themes pipeline — run the pop-culture reference
+    scraper/harvester and persist fresh references.
+
+    MVP: single LLM call to gpt-4o-mini asks for ~20 specific, currently-
+    viral reference moments with type/text/context/genres/edge_tiers/decay.
+    Each reference gets an expires_at based on its decay_weeks, then
+    smart_prompt.py picks them up via fetch_references_for_prompt.
+
+    Later: dedicated scrapers for TikTok Creative Center + X trending +
+    Know Your Meme feed the same table — this function becomes one of
+    several sources.
+    """
+    from api.services.pop_culture_scraper import refresh_pop_culture_references
+    result = await refresh_pop_culture_references(db, caller="admin.pop_culture_refresh")
+    if result.get("error"):
+        raise HTTPException(502, detail=result["error"])
+    return result
+
+
+@router.get("/api/v1/admin/pop-culture/list")
+async def pop_culture_list(
+    live_only: bool = True,
+    limit: int = 100,
+    genre: str | None = None,
+    edge: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Read pop_culture_references. Used to debug the scraper output
+    and to surface 'what's in rotation' on the SongLab UI."""
+    from sqlalchemy import text as _text
+    params: dict[str, Any] = {"limit": max(1, min(limit, 500))}
+    where: list[str] = []
+    if live_only:
+        where.append("expires_at > NOW()")
+    if genre:
+        where.append("(:genre = ANY(genres) OR genres = '{}' OR array_length(genres, 1) IS NULL)")
+        params["genre"] = genre
+    if edge:
+        where.append(":edge = ANY(edge_tiers)")
+        params["edge"] = edge
+    sql = f"""
+        SELECT id, reference_type, text, context, source, genres, edge_tiers,
+               first_seen_at, expires_at, usage_count, last_used_at
+        FROM pop_culture_references
+        {"WHERE " + " AND ".join(where) if where else ""}
+        ORDER BY first_seen_at DESC
+        LIMIT :limit
+    """
+    rows = (await db.execute(_text(sql), params)).fetchall()
+    return {
+        "count": len(rows),
+        "references": [
+            {
+                "id": str(r[0]),
+                "type": r[1],
+                "text": r[2],
+                "context": r[3],
+                "source": r[4],
+                "genres": r[5] or [],
+                "edge_tiers": r[6] or [],
+                "first_seen_at": r[7].isoformat() if r[7] else None,
+                "expires_at": r[8].isoformat() if r[8] else None,
+                "usage_count": r[9] or 0,
+                "last_used_at": r[10].isoformat() if r[10] else None,
+            }
+            for r in rows
+        ],
+    }
 
 
 @router.get("/api/v1/admin/telegram/bot-info")
