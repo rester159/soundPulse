@@ -145,8 +145,8 @@ These are tables referenced by §24–47 logic that still need schema + models.
 
 ### P1.D — CEO gate delivery (PRD §23, §49)
 
-- [ ] **T-150** [§23] Telegram bot delivery — send formatted message with inline approve/reject buttons
-      **Depends:** T-032
+- [x] **T-150** [§23] Telegram bot delivery — send formatted messages via httpx to api.telegram.org. Auto-dispatches on assign + submissions-agent escalation. Admin helpers: /admin/telegram/test + /admin/telegram/get-chat-id. Inline keyboard with "View in SoundPulse" button.
+      ✓ shipped 2026-04-13 commit c31376e
 - [ ] **T-151** [§23] Email delivery via SMTP (SendGrid) with signed action links
       **Depends:** T-032
 - [ ] **T-152** [§23] Decision timeout worker (default 24h → `timed_out` status, escalate)
