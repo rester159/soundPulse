@@ -11,7 +11,7 @@ from functools import lru_cache
 from .base import ProviderAdapter
 from .replicate_musicgen import ReplicateMusicgenAdapter
 from .suno_evolink import SunoEvolinkAdapter
-from .udio_stub import UdioStubAdapter
+from .udio_piapi import UdioPiAPIAdapter
 
 
 @lru_cache(maxsize=1)
@@ -19,7 +19,7 @@ def _instances() -> dict[str, ProviderAdapter]:
     return {
         "musicgen": ReplicateMusicgenAdapter(),
         "suno_evolink": SunoEvolinkAdapter(),
-        "udio": UdioStubAdapter(),
+        "udio": UdioPiAPIAdapter(),
     }
 
 
