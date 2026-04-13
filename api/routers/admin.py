@@ -6303,6 +6303,137 @@ async def generate_song_with_instrumental(
 
 
 # ---------------------------------------------------------------------
+# External submissions — distributor/PRO/sync/playlist/marketing agents
+# PRD §28..§37, T-200..T-229
+# ---------------------------------------------------------------------
+
+@router.get("/api/v1/admin/submission-targets")
+async def list_submission_targets(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """List every registered downstream integration target + whether
+    its env credentials are present. Used by the Submissions page to
+    show 'ready to go' vs 'needs config'."""
+    from api.models.external_submission import SubmissionTarget
+    import os as _os
+    rows = (
+        await db.execute(
+            select(SubmissionTarget).order_by(SubmissionTarget.target_type, SubmissionTarget.display_name)
+        )
+    ).scalars().all()
+    out = []
+    for r in rows:
+        missing = [k for k in (r.credential_env_keys or []) if not _os.environ.get(k, "").strip()]
+        out.append({
+            "target_service": r.target_service,
+            "target_type": r.target_type,
+            "display_name": r.display_name,
+            "integration_status": r.integration_status,
+            "is_enabled": r.is_enabled,
+            "credential_env_keys": r.credential_env_keys,
+            "missing_credentials": missing,
+            "credential_ready": len(missing) == 0,
+            "notes": r.notes,
+        })
+    return {"count": len(out), "targets": out}
+
+
+@router.post("/api/v1/admin/external-submissions/submit")
+async def trigger_external_submission(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Trigger a submission to any registered target. Body:
+      {
+        "target_service": "distrokid" | "bmi" | ...,
+        "submission_subject_type": "song" | "release" | ...,
+        "subject_id": "<uuid>",
+        "force_retry": false (optional)
+      }
+    """
+    import uuid as _uuid
+    from api.services.external_submission_agent import submit_subject
+    target_service = (body.get("target_service") or "").strip()
+    subject_type = (body.get("submission_subject_type") or "").strip()
+    subject_id_raw = body.get("subject_id")
+    if not (target_service and subject_type and subject_id_raw):
+        raise HTTPException(400, detail="target_service, submission_subject_type, subject_id required")
+    try:
+        sid = _uuid.UUID(subject_id_raw)
+    except ValueError:
+        raise HTTPException(400, detail="invalid subject_id")
+
+    sub = await submit_subject(
+        db,
+        target_service=target_service,
+        submission_subject_type=subject_type,
+        subject_id=sid,
+        force_retry=bool(body.get("force_retry")),
+    )
+    return {
+        "submission_id": str(sub.id),
+        "target_service": sub.target_service,
+        "subject_id": str(sub.subject_id),
+        "status": sub.status,
+        "external_id": sub.external_id,
+        "last_error_message": sub.last_error_message,
+        "retry_count": sub.retry_count,
+    }
+
+
+@router.get("/api/v1/admin/external-submissions")
+async def list_external_submissions(
+    target_service: str | None = None,
+    status: str | None = None,
+    subject_id: str | None = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Browse external_submissions — filter by target_service, status,
+    or subject_id. Used by the Submissions page."""
+    import uuid as _uuid
+    from api.models.external_submission import ExternalSubmission
+    stmt = select(ExternalSubmission).order_by(
+        ExternalSubmission.created_at.desc()
+    ).limit(max(1, min(limit, 500)))
+    if target_service:
+        stmt = stmt.where(ExternalSubmission.target_service == target_service)
+    if status:
+        stmt = stmt.where(ExternalSubmission.status == status)
+    if subject_id:
+        try:
+            stmt = stmt.where(ExternalSubmission.subject_id == _uuid.UUID(subject_id))
+        except ValueError:
+            raise HTTPException(400, detail="invalid subject_id")
+    rows = (await db.execute(stmt)).scalars().all()
+    return {
+        "count": len(rows),
+        "submissions": [
+            {
+                "id": str(r.id),
+                "target_service": r.target_service,
+                "target_type": r.target_type,
+                "submission_subject_type": r.submission_subject_type,
+                "subject_id": str(r.subject_id),
+                "status": r.status,
+                "external_id": r.external_id,
+                "attempt_number": r.attempt_number,
+                "retry_count": r.retry_count,
+                "last_error_message": r.last_error_message,
+                "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
+                "accepted_at": r.accepted_at.isoformat() if r.accepted_at else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ---------------------------------------------------------------------
 # ASCAP submissions — Fonzworth agent (T-190..T-194, PRD §31)
 # ---------------------------------------------------------------------
 
