@@ -153,10 +153,61 @@ EXCEPTION — if the artist is deliberately experimental (lyrical_dna
 .vocab_level = "abstract" or "poetic"), apply only 3 of the 7 properties.
 Everyone else gets the full 5 of 7.
 
+HOOK ISOLATION RULE — THIS IS THE STRUCTURAL GATE. Read carefully:
+
+The 7 earworm properties above describe what a hook SHOULD FEEL LIKE.
+This rule describes what a hook MUST LOOK LIKE on the page. An earworm
+is not a theme — it is a specific short phrase that repeats verbatim.
+
+Every chorus MUST contain a HOOK PHRASE (2-5 words, 4-7 syllables) that
+appears as its OWN STANDALONE LINE, VERBATIM, at least 4 TIMES per
+chorus. No other content between repetitions except optional ad-libs
+in parentheses. The other chorus lines exist only to SET UP or SUPPORT
+the hook line.
+
+PASS examples (study these):
+
+  [Chorus]                         [Chorus]
+  That's that me espresso          Watermelon sugar high
+  That's that me espresso          Watermelon sugar high
+  That's that me espresso          Watermelon sugar high
+  That's that me (espresso)        Watermelon sugar high
+  Say it all again, espresso       Watermelon sugar high
+
+  [Chorus]                         [Chorus]
+  Stanley cup (on the sink)        Delulu is the solulu
+  Stanley cup (by your lips)       Delulu is the solulu
+  Stanley cup (in my head)         Rewrite every rule and school you
+  Stanley cup (yeah)               Delulu is the solulu
+
+FAIL examples (do NOT ship these as a chorus — they are verses):
+
+  [Chorus]                         [Chorus]
+  You say him done, you still      I'm finally seeing the light
+  deh deh                          Breaking free from the night
+  Tell me why him clothes          Learning who I am inside
+  still inna your chair            Ready to run and fly
+  You say you free, you still      (← all 4 lines different, no
+  halfway                          isolated repeating hook, abstract
+  Girl, you cyaan have him and     emotions, zero concrete nouns —
+  me same way                      this is a VERSE pretending to be a
+  (← 4 different sentences, no     chorus, REWRITE)
+  isolated hook, REWRITE)
+
+The 4+ repetitions of the standalone hook phrase are MANDATORY. If your
+chorus has 4 different lyric sentences, it is not a chorus — it is a
+verse. Rewrite until the hook appears on its own line, verbatim, 4+
+times.
+
+The hook phrase itself must also satisfy the 7 earworm properties above:
+short, open-vowel-stressed, concrete noun, singable a cappella, V-shape,
+unexpected interval, ONE moment of variation on the final rep.
+
 In your rationale JSON, return an `earworm_devices_used` array listing
-which of the 7 the chorus actually satisfies, with the specific
-syllables/words referenced. This is the auditable gate — if you don't
-list 5, you failed and must rewrite before returning.
+which of the 7 properties the chorus satisfies, PLUS a
+`hook_isolation_proof` field containing the exact hook phrase and a
+count of how many times it repeats verbatim. If the count is less than
+4, you failed the gate and must rewrite before returning.
 
 Return ONLY valid JSON, no markdown fences."""
 
@@ -195,6 +246,7 @@ Return ONLY this JSON:
     "lyrical_targeting": "one sentence on why these lyrical choices",
     "edge_devices_used": ["list the 2+ edge devices you actually put in the lyric"],
     "earworm_devices_used": ["list 5+ of the 7 earworm properties the chorus satisfies — name the specific syllables/words for each"],
+    "hook_isolation_proof": {{"hook_phrase": "the exact 2-5 word hook you made repeat", "repetitions_in_chorus": 4}},
     "pop_culture_hooks_used": ["list the ref texts you injected, or [] if none fit"],
     "differentiation": "one sentence on what makes this distinctive vs typical {genre}"
   }}

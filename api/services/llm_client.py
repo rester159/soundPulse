@@ -202,20 +202,30 @@ async def llm_chat(
 
     try:
         if fmt == "openai_compat":
-            # Groq, OpenAI, anything OpenAI-compatible
-            async with httpx.AsyncClient(timeout=30) as client:
+            # Groq, OpenAI, Gemini (via OpenAI-compat shim), anything OpenAI-compatible
+            body: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            # Gemini 2.5 models spend a "thinking" budget before producing
+            # content — without capping it, max_tokens gets burned on
+            # reasoning and the response comes back with empty content.
+            # The OpenAI-compat shim accepts reasoning_effort; "low" is
+            # the sweet spot for structured creative tasks (keeps enough
+            # reasoning for instruction-following but doesn't eat the
+            # token budget).
+            if provider == "gemini":
+                body["reasoning_effort"] = "low"
+            async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(
                     api_url,
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": model,
-                        "messages": messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                    },
+                    json=body,
                 )
             if resp.status_code != 200:
                 error = f"{provider} HTTP {resp.status_code}: {resp.text[:200]}"
