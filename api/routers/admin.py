@@ -5020,15 +5020,20 @@ async def list_ai_artists(
     # counter state. One aggregate query covers the whole roster.
     live_counts: dict[str, int] = {}
     if rows:
+        # Pass actual uuid.UUID objects — asyncpg handles UUID[] arrays
+        # natively without needing an explicit Postgres ::uuid[] cast
+        # on the bound param (which asyncpg's parameterized query
+        # parser rejects as a syntax error).
+        import uuid as _uuid_mod
         count_rows = (await db.execute(
             _text("""
                 SELECT primary_artist_id::text, COUNT(*)
                 FROM songs_master
                 WHERE status NOT IN ('draft','abandoned')
-                  AND primary_artist_id = ANY(:ids::uuid[])
+                  AND primary_artist_id = ANY(:ids)
                 GROUP BY primary_artist_id
             """),
-            {"ids": [str(r.artist_id) for r in rows]},
+            {"ids": [r.artist_id if isinstance(r.artist_id, _uuid_mod.UUID) else _uuid_mod.UUID(str(r.artist_id)) for r in rows]},
         )).fetchall()
         live_counts = {cr[0]: int(cr[1]) for cr in count_rows}
 
