@@ -484,8 +484,8 @@ function BlueprintPickerModal({ instrumental, onClose }) {
                 <div className="flex items-center gap-2 text-sm font-medium">
                   {pollStatus === 'succeeded' && <><CheckCircle2 size={14} /> Ready to play</>}
                   {pollStatus === 'failed' && <><AlertCircle size={14} /> Generation failed</>}
-                  {(pollStatus === 'pending' || !pollStatus) && <><Loader2 size={14} className="animate-spin" /> Queued at Suno — waiting to start…</>}
-                  {pollStatus === 'processing' && <><Loader2 size={14} className="animate-spin" /> Suno generating…</>}
+                  {(pollStatus === 'pending' || !pollStatus) && <><Loader2 size={14} className="animate-spin" /> Submitted — Kie.ai is picking up the job…</>}
+                  {pollStatus === 'processing' && <><Loader2 size={14} className="animate-spin" /> Suno is generating — lyrics + vocal synthesis in progress…</>}
                 </div>
                 <div className="tabular-nums font-mono">
                   {fmtElapsed(elapsedSec)}

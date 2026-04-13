@@ -314,8 +314,17 @@ class SunoKieAdapter(ProviderAdapter):
             data = body if isinstance(body, dict) else {}
 
         raw_status = (data.get("status") or "").upper()
-        pending_states = {"PENDING", "TEXT_SUCCESS"}
-        processing_states = {"FIRST_SUCCESS"}
+        # Kie.ai Suno has four visible states between submit and done:
+        #   PENDING       → queued at Kie, not yet picked up by Suno
+        #   TEXT_SUCCESS  → lyrics generated, audio synthesis starting
+        #   FIRST_SUCCESS → first clip ready, second clip still rendering
+        #   SUCCESS       → all clips delivered
+        # We collapse to three states for the UI:
+        #   pending       → only raw PENDING (genuinely not started)
+        #   processing    → TEXT_SUCCESS + FIRST_SUCCESS (actively running)
+        #   succeeded     → SUCCESS / COMPLETED
+        pending_states = {"PENDING"}
+        processing_states = {"TEXT_SUCCESS", "FIRST_SUCCESS"}
         success_states = {"SUCCESS", "COMPLETED"}
         failed_states = {
             "CREATE_TASK_FAILED", "GENERATE_AUDIO_FAILED",
