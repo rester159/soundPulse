@@ -61,36 +61,69 @@ class SunoKieAdapter(ProviderAdapter):
         )
 
     def _build_payload(self, params: GenerateParams) -> dict[str, Any]:
-        """Map GenerateParams → Kie.ai /api/v1/generate body."""
-        # Kie.ai schema:
-        #   prompt         (required)
-        #   customMode     (required bool) — we use non-custom so Suno picks
-        #                  structure/title/etc; set true for full control
-        #   instrumental   (required bool)
-        #   model          (optional string; default V5_5)
-        #   style          (optional, only when customMode=true)
-        #   title          (optional, max 80 chars)
-        #   negativeTags   (optional)
-        #   callBackUrl    (optional)
-        prompt_parts = [params.prompt]
+        """
+        Map GenerateParams → Kie.ai /api/v1/generate body.
+
+        Kie.ai quirks discovered via 422 errors:
+          - `callBackUrl` is actually required (docs say optional)
+          - non-custom-mode prompt is capped at 500 characters
+          - the prompt should be a concise description of the song,
+            not the full voice_dna + production constraints dump
+
+        Strategy: extract only the GENRE + MOOD + one-line description
+        from the incoming prompt, truncate at a word boundary. Tempo
+        and key are appended if they fit. Full voice_dna stays in the
+        orchestrator's prompt but we only forward the essence here.
+        """
+        MAX_PROMPT_CHARS = 480  # leaving headroom under the 500 hard cap
+
+        # The incoming params.prompt is the fully-assembled orchestrator
+        # output. For Kie.ai we want the SMART_PROMPT_TEXT essence, not
+        # the [VOICE DNA] / [PRODUCTION] / [POLICY] blocks. Extract by
+        # looking for the post-voice-block content.
+        raw = params.prompt
+        # Strip the [VOICE DNA] and [VOICE REFERENCE] blocks if present
+        for marker in ("[PRODUCTION]", "[POLICY]"):
+            idx = raw.find(marker)
+            if idx > 0:
+                raw = raw[:idx]
+        # Remove common prefix blocks
+        for prefix_marker in ("[VOICE DNA]", "[VOICE REFERENCE]"):
+            idx = raw.find(prefix_marker)
+            if idx >= 0:
+                # Skip past the block (roughly — find next blank line)
+                end = raw.find("\n\n", idx)
+                if end > 0:
+                    raw = raw[:idx] + raw[end + 2:]
+
+        raw = raw.strip()
+
+        # Now build a concise description with the meta hints
+        parts = [raw]
         if params.genre_hint:
-            prompt_parts.append(f"Genre: {params.genre_hint}")
+            parts.append(f"Genre: {params.genre_hint}")
         if params.tempo_bpm:
-            prompt_parts.append(f"Tempo: {int(params.tempo_bpm)} BPM")
+            parts.append(f"Tempo: {int(params.tempo_bpm)} BPM")
         if params.key_hint:
-            prompt_parts.append(f"Key: {params.key_hint}")
+            parts.append(f"Key: {params.key_hint}")
         if params.mood_tags:
-            prompt_parts.append(f"Mood: {', '.join(params.mood_tags)}")
+            parts.append(f"Mood: {', '.join(params.mood_tags)}")
+
+        combined = ". ".join(p.strip() for p in parts if p and p.strip())
+
+        # Hard-truncate at word boundary under the 500 cap
+        if len(combined) > MAX_PROMPT_CHARS:
+            truncated = combined[:MAX_PROMPT_CHARS]
+            last_space = truncated.rfind(" ")
+            if last_space > MAX_PROMPT_CHARS - 50:
+                truncated = truncated[:last_space]
+            combined = truncated
 
         payload: dict[str, Any] = {
-            "prompt": ". ".join(prompt_parts)[:2000],
+            "prompt": combined,
             "customMode": False,       # let Suno handle structure
             "instrumental": False,     # we want vocals
             "model": params.model_variant or DEFAULT_MODEL,
-            # Kie.ai requires callBackUrl even though docs list it as
-            # optional. We're poll-based so any URL that returns 200 on
-            # POST works. httpbin.org/post is the standard "bucket"
-            # endpoint for this kind of thing.
             "callBackUrl": os.environ.get(
                 "KIE_CALLBACK_URL",
                 "https://httpbin.org/post",
