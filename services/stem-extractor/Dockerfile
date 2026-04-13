@@ -9,14 +9,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install demucs + CPU-only torch (much smaller than CUDA build, ~400MB)
-# We use torch 2.1 CPU wheel explicitly so pip doesn't grab the 1GB+
-# CUDA default. demucs itself pulls numpy + julius + dora-search.
+# Install numpy FIRST from pypi so torch's from_numpy() has a working
+# numpy C-API target. Installing numpy after torch (or letting demucs
+# pull it transitively) leaves torch 2.2's numpy binding in a broken
+# state and every call to torch.from_numpy() raises
+# 'RuntimeError: Numpy is not available'. This bit the first build.
+RUN pip install --no-cache-dir "numpy>=1.26,<2.0"
+
+# Install CPU-only torch + torchaudio (~400MB vs 1GB+ CUDA default).
+# The cpu index only has torch — numpy is already installed above
+# from pypi.
 RUN pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu \
-    --extra-index-url https://pypi.org/simple \
     torch==2.2.0 torchaudio==2.2.0
 
+# Demucs + the worker's HTTP + env loader deps
 RUN pip install --no-cache-dir \
     demucs==4.0.1 \
     httpx==0.28.1 \

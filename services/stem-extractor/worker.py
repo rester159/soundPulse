@@ -310,6 +310,9 @@ def process_job(job: dict) -> None:
         ack(job_id, stems_payload)
 
 
+MAX_RETRIES_BEFORE_PERMANENT_FAIL = 3
+
+
 def main() -> None:
     log.info("starting stem-extractor worker id=%s api=%s model=%s",
              WORKER_ID, API_BASE, DEMUCS_MODEL)
@@ -318,12 +321,25 @@ def main() -> None:
         if not job:
             time.sleep(POLL_INTERVAL_SEC)
             continue
+        prior_retries = int(job.get("retry_count") or 0)
         try:
             process_job(job)
         except Exception as e:
-            log.exception("job %s failed", job.get("job_id"))
+            log.exception("job %s failed (prior retries=%d)", job.get("job_id"), prior_retries)
+            # Permanent fail after 3 total retries so we never tight-
+            # loop on a systemic bug (bad model, missing numpy, etc).
+            should_retry = prior_retries < MAX_RETRIES_BEFORE_PERMANENT_FAIL
             try:
-                fail(job["job_id"], f"{type(e).__name__}: {e}", retry=True)
+                fail(
+                    job["job_id"],
+                    f"{type(e).__name__}: {e}",
+                    retry=should_retry,
+                )
+                if not should_retry:
+                    log.error(
+                        "job %s permanently failed after %d retries",
+                        job["job_id"], prior_retries,
+                    )
             except Exception:
                 pass
         # Small gap between jobs so we don't starve the scheduler
