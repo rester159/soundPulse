@@ -81,16 +81,23 @@ def _poll_until(client: httpx.Client, provider: str, task_id: str,
 
 # --- Fixtures: scratch artists + blueprint for an isolated test run --------
 
+# Unique genre per-run so the scratch artist is guaranteed to be the top
+# assignment pick (otherwise pre-existing roster pollution from earlier
+# runs wins on the real "ambient" genre).
+RUN_SUFFIX = uuid.uuid4().hex[:8]
+TEST_GENRE = f"ambient_e2e_{RUN_SUFFIX}"
+
+
 @pytest.fixture(scope="module")
 def test_artist(client: httpx.Client):
     """Create a scratch artist just for this test run."""
-    stage_name = f"E2E Test Artist {uuid.uuid4().hex[:8]}"
+    stage_name = f"E2E Test Artist {RUN_SUFFIX}"
     r = client.post(
         "/api/v1/admin/artists",
         json={
             "stage_name": stage_name,
             "legal_name": stage_name,
-            "primary_genre": "ambient",
+            "primary_genre": TEST_GENRE,
             "adjacent_genres": ["electronic", "chillout"],
             "voice_dna": {
                 "timbre_core": "soft airy synthetic pads",
@@ -117,8 +124,8 @@ def test_blueprint(client: httpx.Client):
     r = client.post(
         "/api/v1/admin/blueprints",
         json={
-            "genre_id": "ambient",
-            "primary_genre": "ambient",
+            "genre_id": TEST_GENRE,
+            "primary_genre": TEST_GENRE,
             "adjacent_genres": ["electronic", "chillout"],
             "target_themes": ["space", "quiet", "distance"],
             "vocabulary_tone": "poetic",
