@@ -6118,31 +6118,26 @@ async def delete_instrumental(
     return {"instrumental_id": str(iid), "is_active": False}
 
 
-@router.post("/api/v1/admin/blueprints/{blueprint_id}/generate-song-with-instrumental")
-async def generate_song_with_instrumental(
-    blueprint_id: str,
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    _admin: ApiKey = Depends(require_admin),
-):
+async def _generate_song_with_instrumental_core(
+    db: AsyncSession,
+    *,
+    instrumental,
+    artist,
+    blueprint=None,
+    title_override: str | None = None,
+    duration_seconds: int = 60,
+    model_variant: str | None = None,
+) -> dict:
     """
-    Variant of generate-song that uploads an uploaded instrumental and
-    has Suno write vocals over it via Kie.ai's /api/v1/generate/add-vocals
-    endpoint.
-
-    Body:
-      instrumental_id    (required, str) — uuid of a row in instrumentals
-      duration_seconds   (optional int, default 60)
-      title              (optional str — overrides derived title)
-      vocal_gender       (optional 'm' | 'f')
-
-    Preconditions: blueprint has assigned_artist_id (same as generate-song).
+    Shared core for the two instrumental-generation endpoints (artist-first
+    and blueprint-first). Takes already-resolved model objects, builds the
+    final prompt using the artist's voice_dna + edge_profile + (optional)
+    blueprint theme, calls Suno add-vocals, persists songs_master +
+    music_generation_call rows, returns the response dict.
     """
     import uuid as _uuid
-    from api.models.ai_artist import AIArtist
-    from api.models.instrumental import Instrumental
+    import os as _os
     from api.models.music_generation_call import MusicGenerationCall
-    from api.models.song_blueprint import SongBlueprint
     from api.models.songs_master import SongMaster
     from api.services.generation_orchestrator import (
         assemble_generation_prompt,
@@ -6154,50 +6149,21 @@ async def generate_song_with_instrumental(
         get_provider,
     )
 
-    instrumental_id_raw = body.get("instrumental_id")
-    if not instrumental_id_raw:
-        raise HTTPException(400, detail="instrumental_id is required")
-    try:
-        iid = _uuid.UUID(instrumental_id_raw)
-    except ValueError:
-        raise HTTPException(400, detail="invalid instrumental_id")
-    try:
-        bp_uuid = _uuid.UUID(blueprint_id)
-    except ValueError:
-        raise HTTPException(400, detail="invalid blueprint_id")
-
-    instrumental = (await db.execute(
-        select(Instrumental).where(Instrumental.id == iid)
-    )).scalar_one_or_none()
-    if instrumental is None or not instrumental.is_active:
-        raise HTTPException(404, detail="instrumental not found or inactive")
-
-    blueprint = (await db.execute(
-        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
-    )).scalar_one_or_none()
-    if blueprint is None:
-        raise HTTPException(404, detail="blueprint not found")
-    if blueprint.assigned_artist_id is None:
-        raise HTTPException(
-            409,
-            detail="blueprint has no assigned_artist_id — run assignment engine first",
-        )
-
-    artist = (await db.execute(
-        select(AIArtist).where(AIArtist.artist_id == blueprint.assigned_artist_id)
-    )).scalar_one_or_none()
-    if artist is None:
-        raise HTTPException(500, detail="assigned artist missing")
-
     artist_dict = {
         "voice_dna": artist.voice_dna,
         "song_count": artist.song_count or 0,
         "content_rating": artist.content_rating or "mild",
     }
 
-    # Fresh smart_prompt with edge_profile, same as the text-only path
+    # Resolve genre: prefer blueprint.primary_genre, fall back to artist.primary_genre
+    genre_for_prompt = None
+    if blueprint is not None:
+        genre_for_prompt = blueprint.primary_genre or blueprint.genre_id
+    if not genre_for_prompt:
+        genre_for_prompt = artist.primary_genre
+
+    # Fresh smart_prompt with artist.edge_profile
     from api.services.smart_prompt import generate_smart_prompt
-    genre_for_prompt = blueprint.primary_genre or blueprint.genre_id
     fresh_text: str | None = None
     try:
         fresh = await generate_smart_prompt(
@@ -6211,12 +6177,29 @@ async def generate_song_with_instrumental(
     except Exception:
         logger.exception("[instrumental-gen] fresh smart_prompt failed")
 
-    blueprint_dict = {
-        "smart_prompt_text": fresh_text or blueprint.smart_prompt_text,
-        "primary_genre": genre_for_prompt,
-        "genre_id": blueprint.genre_id,
-        "target_themes": blueprint.target_themes or [],
-    }
+    # Assemble the blueprint-shaped dict the orchestrator expects.
+    # If the caller didn't pass a blueprint, synthesize one from the
+    # artist + instrumental so the orchestrator still works.
+    if blueprint is not None:
+        blueprint_dict = {
+            "smart_prompt_text": fresh_text or blueprint.smart_prompt_text,
+            "primary_genre": genre_for_prompt,
+            "genre_id": blueprint.genre_id,
+            "target_themes": blueprint.target_themes or [],
+        }
+    else:
+        blueprint_dict = {
+            "smart_prompt_text": fresh_text or (
+                f"modern {genre_for_prompt} song for {artist.stage_name} — "
+                f"leverage {artist.voice_dna.get('timbre_core', 'distinctive vocal') if artist.voice_dna else 'distinctive vocal'} "
+                f"on a {instrumental.tempo_bpm or '?'} BPM "
+                f"{instrumental.key_hint or ''} backing track"
+            ),
+            "primary_genre": genre_for_prompt,
+            "genre_id": genre_for_prompt,
+            "target_themes": [],
+        }
+
     final_prompt = assemble_generation_prompt(
         artist=artist_dict,
         blueprint=blueprint_dict,
@@ -6224,7 +6207,6 @@ async def generate_song_with_instrumental(
     )
 
     # Build the public URL for Kie.ai to fetch
-    import os as _os
     public_base = _os.environ.get(
         "PUBLIC_BASE_URL",
         "https://soundpulse-production-5266.up.railway.app",
@@ -6232,16 +6214,22 @@ async def generate_song_with_instrumental(
     ext = INSTRUMENTAL_EXT_FOR_CTYPE.get(instrumental.content_type, "mp3")
     upload_url = f"{public_base}/api/v1/instrumentals/public/{instrumental.id}.{ext}"
 
-    title = body.get("title") or derive_song_title(blueprint_dict, artist_dict)
-    vocal_gender = body.get("vocal_gender")
+    title = title_override or derive_song_title(blueprint_dict, artist_dict)
+
+    # Vocal gender is derived directly from the artist's
+    # gender_presentation — no manual override needed. Kie.ai accepts
+    # 'm' | 'f' only, so map non_binary to None (let Suno decide).
+    gp = (artist.gender_presentation or "").lower()
+    vocal_gender = "f" if gp == "female" else "m" if gp == "male" else None
 
     adapter = get_provider("suno_kie")
     gen_params = GenerateParams(
         prompt=final_prompt,
-        duration_seconds=int(body.get("duration_seconds") or 60),
+        duration_seconds=duration_seconds,
         genre_hint=genre_for_prompt,
         tempo_bpm=instrumental.tempo_bpm,
         key_hint=instrumental.key_hint,
+        model_variant=model_variant,
     )
     try:
         task = await adapter.generate_with_instrumental(
@@ -6260,12 +6248,11 @@ async def generate_song_with_instrumental(
     instrumental.usage_count = (instrumental.usage_count or 0) + 1
     instrumental.last_used_at = datetime.now(timezone.utc)
 
-    # Persist songs_master draft + music_generation_call (same pattern
-    # as the text-only generate-song endpoint)
+    # Persist songs_master draft + music_generation_call
     song = SongMaster(
         title=title,
         primary_artist_id=artist.artist_id,
-        blueprint_id=blueprint.id,
+        blueprint_id=blueprint.id if blueprint is not None else None,
         primary_genre=genre_for_prompt,
         content_rating=artist.content_rating or "mild",
         status="draft",
@@ -6283,10 +6270,10 @@ async def generate_song_with_instrumental(
         status="pending",
         prompt=final_prompt,
         params_json=task.params_echo,
-        model_variant=body.get("model_variant"),
-        duration_seconds_requested=int(body.get("duration_seconds") or 60),
+        model_variant=model_variant,
+        duration_seconds_requested=duration_seconds,
         genre_hint=genre_for_prompt,
-        blueprint_id=blueprint.id,
+        blueprint_id=blueprint.id if blueprint is not None else None,
         estimated_cost_usd=task.estimated_cost_usd,
         submitted_at=task.submitted_at,
     )
@@ -6300,11 +6287,165 @@ async def generate_song_with_instrumental(
         "provider": "suno_kie",
         "endpoint": "add-vocals",
         "title": title,
+        "artist_id": str(artist.artist_id),
+        "artist_stage_name": artist.stage_name,
         "instrumental_id": str(instrumental.id),
         "instrumental_url": upload_url,
+        "blueprint_id": str(blueprint.id) if blueprint is not None else None,
         "estimated_cost_usd": task.estimated_cost_usd,
         "status": "draft",
     }
+
+
+@router.post("/api/v1/admin/instrumentals/{instrumental_id}/generate-song")
+async def generate_song_for_instrumental_by_artist(
+    instrumental_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Artist-first instrumental generation — the CEO picks an artist from
+    the roster and (optionally) a blueprint for theme/style. The artist's
+    voice_dna + edge_profile + gender_presentation drive everything.
+
+    Body:
+      artist_id          (required, str) — uuid of a row in ai_artists
+      blueprint_id       (optional, str) — uuid for theme/style. When
+                          absent, smart_prompt falls back to the artist's
+                          primary_genre and a synthesized brief.
+      duration_seconds   (optional int, default 60)
+      title              (optional str — overrides derived title)
+      model_variant      (optional str — Suno model tag)
+    """
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+    from api.models.instrumental import Instrumental
+    from api.models.song_blueprint import SongBlueprint
+
+    try:
+        iid = _uuid.UUID(instrumental_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid instrumental_id")
+
+    artist_id_raw = body.get("artist_id")
+    if not artist_id_raw:
+        raise HTTPException(400, detail="artist_id is required")
+    try:
+        aid = _uuid.UUID(artist_id_raw)
+    except ValueError:
+        raise HTTPException(400, detail="invalid artist_id")
+
+    instrumental = (await db.execute(
+        select(Instrumental).where(Instrumental.id == iid)
+    )).scalar_one_or_none()
+    if instrumental is None or not instrumental.is_active:
+        raise HTTPException(404, detail="instrumental not found or inactive")
+
+    artist = (await db.execute(
+        select(AIArtist).where(AIArtist.artist_id == aid)
+    )).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(404, detail="artist not found")
+
+    blueprint = None
+    blueprint_id_raw = body.get("blueprint_id")
+    if blueprint_id_raw:
+        try:
+            bp_uuid = _uuid.UUID(blueprint_id_raw)
+        except ValueError:
+            raise HTTPException(400, detail="invalid blueprint_id")
+        blueprint = (await db.execute(
+            select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+        )).scalar_one_or_none()
+        if blueprint is None:
+            raise HTTPException(404, detail="blueprint not found")
+
+    return await _generate_song_with_instrumental_core(
+        db,
+        instrumental=instrumental,
+        artist=artist,
+        blueprint=blueprint,
+        title_override=body.get("title"),
+        duration_seconds=int(body.get("duration_seconds") or 60),
+        model_variant=body.get("model_variant"),
+    )
+
+
+@router.post("/api/v1/admin/blueprints/{blueprint_id}/generate-song-with-instrumental")
+async def generate_song_with_instrumental_legacy_blueprint_first(
+    blueprint_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Legacy blueprint-first variant. Kept for backward compat with the
+    original Instrumentals UI flow. New callers should prefer
+    POST /admin/instrumentals/{id}/generate-song with artist_id.
+
+    Body:
+      instrumental_id    (required, str)
+      duration_seconds   (optional int, default 60)
+      title              (optional str)
+      artist_id          (optional str — override blueprint.assigned_artist_id)
+    """
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+    from api.models.instrumental import Instrumental
+    from api.models.song_blueprint import SongBlueprint
+
+    instrumental_id_raw = body.get("instrumental_id")
+    if not instrumental_id_raw:
+        raise HTTPException(400, detail="instrumental_id is required")
+    try:
+        iid = _uuid.UUID(instrumental_id_raw)
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid instrumental_id or blueprint_id")
+
+    instrumental = (await db.execute(
+        select(Instrumental).where(Instrumental.id == iid)
+    )).scalar_one_or_none()
+    if instrumental is None or not instrumental.is_active:
+        raise HTTPException(404, detail="instrumental not found or inactive")
+
+    blueprint = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if blueprint is None:
+        raise HTTPException(404, detail="blueprint not found")
+
+    # Artist can be explicitly overridden OR come from blueprint.assigned_artist_id
+    artist_id_raw = body.get("artist_id")
+    if artist_id_raw:
+        try:
+            aid = _uuid.UUID(artist_id_raw)
+        except ValueError:
+            raise HTTPException(400, detail="invalid artist_id")
+    else:
+        if blueprint.assigned_artist_id is None:
+            raise HTTPException(
+                409,
+                detail="blueprint has no assigned_artist_id — pass artist_id in body or run assignment engine first",
+            )
+        aid = blueprint.assigned_artist_id
+
+    artist = (await db.execute(
+        select(AIArtist).where(AIArtist.artist_id == aid)
+    )).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(404, detail="artist not found")
+
+    return await _generate_song_with_instrumental_core(
+        db,
+        instrumental=instrumental,
+        artist=artist,
+        blueprint=blueprint,
+        title_override=body.get("title"),
+        duration_seconds=int(body.get("duration_seconds") or 60),
+        model_variant=body.get("model_variant"),
+    )
 
 
 # ---------------------------------------------------------------------

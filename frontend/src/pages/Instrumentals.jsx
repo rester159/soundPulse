@@ -6,7 +6,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useInstrumentals, useUploadInstrumental, useDeleteInstrumental,
-  useBlueprints, useGenerateSongWithInstrumental,
+  useBlueprints, useAIArtists, useGenerateInstrumentalSongForArtist,
   getBaseUrl,
 } from '../hooks/useSoundPulse'
 
@@ -238,30 +238,37 @@ function compatibilityLevel(blueprint, inst) {
 }
 
 function BlueprintPickerModal({ instrumental, onClose }) {
-  const { data: bpData, isLoading } = useBlueprints({ limit: 100 })
-  const generate = useGenerateSongWithInstrumental()
+  const { data: artistsData, isLoading: artistsLoading } = useAIArtists('active')
+  const { data: bpData } = useBlueprints({ limit: 100 })
+  const generate = useGenerateInstrumentalSongForArtist()
   const qc = useQueryClient()
-  const [selected, setSelected] = useState(null)
+  const [selectedArtist, setSelectedArtist] = useState(null)
+  const [selectedBlueprint, setSelectedBlueprint] = useState(null)
   const [title, setTitle] = useState('')
-  const [vocalGender, setVocalGender] = useState('')
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
 
-  const blueprints = (bpData?.data?.blueprints || bpData?.data || [])
-    .filter(b => b.id && b.assigned_artist_id)
+  const artists = artistsData?.data?.artists || []
+  const allBlueprints = (bpData?.data?.blueprints || bpData?.data || []).filter(b => b.id)
+  // Only show blueprints that match the selected artist OR are unassigned
+  const blueprintsForArtist = selectedArtist
+    ? allBlueprints.filter(
+        b => !b.assigned_artist_id || b.assigned_artist_id === selectedArtist.artist_id,
+      )
+    : []
 
   const handleGenerate = async () => {
     setError(null)
     setResult(null)
-    if (!selected) { setError('pick a blueprint'); return }
+    if (!selectedArtist) { setError('Pick an artist'); return }
     try {
       const res = await generate.mutateAsync({
-        blueprintId: selected.id,
+        instrumentalId: instrumental.instrumental_id,
         body: {
-          instrumental_id: instrumental.instrumental_id,
+          artist_id: selectedArtist.artist_id,
+          blueprint_id: selectedBlueprint?.id || undefined,
           duration_seconds: 90,
           title: title.trim() || undefined,
-          vocal_gender: vocalGender || undefined,
         },
       })
       setResult(res?.data)
@@ -291,22 +298,99 @@ function BlueprintPickerModal({ instrumental, onClose }) {
             {instrumental.genre_hint}
           </div>
 
+          {/* ARTIST selector (primary) */}
           <div>
-            <div className="text-xs text-zinc-400 mb-2">Pick a blueprint (assigned artists only)</div>
-            {isLoading ? (
-              <div className="text-xs text-zinc-500 flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> Loading…</div>
-            ) : blueprints.length === 0 ? (
-              <div className="text-xs text-zinc-500">No blueprints with an assigned artist. Assign one via the CEO gate first.</div>
+            <div className="text-xs text-zinc-400 mb-2">
+              Pick the artist <span className="text-rose-400">*</span>
+            </div>
+            {artistsLoading ? (
+              <div className="text-xs text-zinc-500 flex items-center gap-1">
+                <Loader2 size={12} className="animate-spin" /> Loading roster…
+              </div>
+            ) : artists.length === 0 ? (
+              <div className="text-xs text-zinc-500">
+                No active AI artists in the roster. Create one via /artists first.
+              </div>
             ) : (
-              <div className="space-y-1 max-h-64 overflow-y-auto">
-                {blueprints.map(b => {
+              <div className="space-y-1 max-h-56 overflow-y-auto">
+                {artists.map(a => {
+                  const selected = selectedArtist?.artist_id === a.artist_id
+                  const genreBadge = a.primary_genre || '—'
+                  const edge = a.edge_profile || 'flirty_edge'
+                  const gender = a.gender_presentation || 'unspecified'
+                  return (
+                    <button
+                      key={a.artist_id}
+                      onClick={() => { setSelectedArtist(a); setSelectedBlueprint(null) }}
+                      className={`w-full text-left px-3 py-2 rounded border flex items-center gap-3 transition-colors ${
+                        selected
+                          ? 'border-violet-500 bg-violet-500/10'
+                          : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+                      }`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-zinc-100 truncate flex items-center gap-2">
+                          {a.stage_name}
+                          {a.ceo_approved && (
+                            <span className="text-[9px] px-1 py-0.5 bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 rounded">
+                              approved
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-zinc-500 flex items-center gap-2 mt-0.5">
+                          <span className="text-violet-300">{genreBadge}</span>
+                          <span>·</span>
+                          <span>{gender}</span>
+                          <span>·</span>
+                          <span className="uppercase tracking-wider">{edge}</span>
+                          {a.song_count !== undefined && (
+                            <>
+                              <span>·</span>
+                              <span>{a.song_count} songs</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* BLUEPRINT selector (secondary, optional) */}
+          {selectedArtist && (
+            <div>
+              <div className="text-xs text-zinc-400 mb-2">
+                Pick a blueprint for theme/style <span className="text-zinc-600">(optional)</span>
+              </div>
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                <button
+                  onClick={() => setSelectedBlueprint(null)}
+                  className={`w-full text-left px-3 py-2 rounded border flex items-center gap-2 ${
+                    !selectedBlueprint
+                      ? 'border-violet-500 bg-violet-500/10'
+                      : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+                  }`}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-zinc-200">Freeform — no blueprint</div>
+                    <div className="text-[10px] text-zinc-500">
+                      Generate with just the artist's voice + edge profile, no specific theme
+                    </div>
+                  </div>
+                </button>
+                {blueprintsForArtist.map(b => {
                   const level = compatibilityLevel(b, instrumental)
                   const dot = { green: 'bg-emerald-400', yellow: 'bg-amber-400', red: 'bg-rose-400' }[level]
+                  const isSel = selectedBlueprint?.id === b.id
                   return (
                     <button
                       key={b.id}
-                      onClick={() => setSelected(b)}
-                      className={`w-full text-left px-3 py-2 rounded border ${selected?.id === b.id ? 'border-violet-500 bg-violet-500/10' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'} flex items-center gap-2`}
+                      onClick={() => setSelectedBlueprint(b)}
+                      className={`w-full text-left px-3 py-2 rounded border flex items-center gap-2 ${
+                        isSel ? 'border-violet-500 bg-violet-500/10' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+                      }`}
                     >
                       <span className={`w-2 h-2 rounded-full ${dot}`} title={`compatibility: ${level}`} />
                       <div className="flex-1 min-w-0">
@@ -319,34 +403,26 @@ function BlueprintPickerModal({ instrumental, onClose }) {
                     </button>
                   )
                 })}
+                {blueprintsForArtist.length === 0 && (
+                  <div className="text-[11px] text-zinc-600 py-2 px-1">
+                    No blueprints assigned to this artist. Generation will proceed in freeform mode.
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
-          <div className="grid grid-cols-2 gap-3">
-            <label className="text-xs text-zinc-400">
-              Override title (optional)
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="auto from blueprint"
-                className="w-full mt-1 px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-500"
-              />
-            </label>
-            <label className="text-xs text-zinc-400">
-              Vocal gender (optional)
-              <select
-                value={vocalGender}
-                onChange={(e) => setVocalGender(e.target.value)}
-                className="w-full mt-1 px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100"
-              >
-                <option value="">auto</option>
-                <option value="m">male</option>
-                <option value="f">female</option>
-              </select>
-            </label>
-          </div>
+          {/* Title override */}
+          <label className="block text-xs text-zinc-400">
+            Override title <span className="text-zinc-600">(optional)</span>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="auto from blueprint or artist"
+              className="w-full mt-1 px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-500"
+            />
+          </label>
 
           {error && (
             <div className="text-xs text-rose-400 flex items-center gap-1">
@@ -357,27 +433,35 @@ function BlueprintPickerModal({ instrumental, onClose }) {
           {result && (
             <div className="bg-emerald-500/10 border border-emerald-500/30 rounded p-3 text-[11px] text-emerald-300 space-y-1">
               <div className="flex items-center gap-1"><CheckCircle2 size={12} /> Submitted to Kie.ai add-vocals</div>
+              <div>artist: {result.artist_stage_name}</div>
               <div>song_id: {result.song_id}</div>
               <div>task_id: {result.task_id}</div>
               <div className="text-emerald-400/60">poll via /admin/music/generate/suno_kie/{result.task_id}</div>
             </div>
           )}
 
-          <div className="flex items-center justify-end gap-2">
-            <button
-              onClick={onClose}
-              className="px-3 py-2 text-zinc-400 text-xs hover:text-zinc-200"
-            >
-              Close
-            </button>
-            <button
-              onClick={handleGenerate}
-              disabled={!selected || generate.isPending}
-              className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm rounded flex items-center gap-2 transition-colors"
-            >
-              {generate.isPending ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-              {generate.isPending ? 'Submitting…' : 'Generate song ($0.06)'}
-            </button>
+          <div className="flex items-center justify-between gap-2 pt-2 border-t border-zinc-800">
+            <div className="text-[11px] text-zinc-500">
+              {!selectedArtist && 'Pick an artist to enable submission'}
+              {selectedArtist && !selectedBlueprint && `Generating for ${selectedArtist.stage_name} in freeform mode`}
+              {selectedArtist && selectedBlueprint && `${selectedArtist.stage_name} · ${selectedBlueprint.primary_genre || 'blueprint'}`}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onClose}
+                className="px-3 py-2 text-zinc-400 text-xs hover:text-zinc-200"
+              >
+                Close
+              </button>
+              <button
+                onClick={handleGenerate}
+                disabled={!selectedArtist || generate.isPending}
+                className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm rounded flex items-center gap-2 transition-colors"
+              >
+                {generate.isPending ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                {generate.isPending ? 'Submitting…' : 'Generate song ($0.06)'}
+              </button>
+            </div>
           </div>
         </div>
       </div>

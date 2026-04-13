@@ -653,6 +653,13 @@ export function useGenerateSongWithInstrumental() {
   })
 }
 
+export function useGenerateInstrumentalSongForArtist() {
+  return useMutation({
+    mutationFn: ({ instrumentalId, body }) =>
+      makeRequest('POST', `/admin/instrumentals/${instrumentalId}/generate-song`, {}, body),
+  })
+}
+
 export function useBlueprints({ status = null, limit = 50 } = {}) {
   return useQuery({
     queryKey: ['admin', 'blueprints', status, limit],
