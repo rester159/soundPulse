@@ -128,6 +128,18 @@ SCRAPER_REGISTRY: dict[str, dict] = {
             "api_key": "CHARTMETRIC_API_KEY",
         },
     },
+    # Chartmetric velocity pulse — Tier 3 hourly sanity check on the
+    # hottest chart surfaces (Spotify viral/regional, TikTok, Shazam).
+    # ~40 calls/run × 24/day = ~960/day = 0.6% of the 172,800 daily
+    # quota. Catches fast-moving tracks between chartmetric_deep_us
+    # cadences (1.5h).
+    "chartmetric_velocity_pulse": {
+        "module": "scrapers.chartmetric_velocity_pulse",
+        "class": "ChartmetricVelocityPulse",
+        "credentials": {
+            "api_key": "CHARTMETRIC_API_KEY",
+        },
+    },
     "genius_lyrics": {
         "module": "scrapers.genius_lyrics",
         "class": "GeniusLyricsScraper",
