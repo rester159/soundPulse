@@ -509,3 +509,177 @@ async def sweep_submissions(db: AsyncSession, *, include_optional: bool = False)
     stats["elapsed_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
     logger.info("[submissions-agent] sweep %s", stats)
     return stats
+
+
+# ---------------------------------------------------------------------
+# DOWNSTREAM PIPELINE SWEEP (PRD §28-29) — added after T-190..T-229 ship
+#
+# sweep_all_ready_songs() walks qa_passed songs that have metadata
+# projected and dispatches them through the downstream pipeline via the
+# generic external_submission_agent + the ASCAP Fonzworth agent. Uses
+# the SUBMISSION_DEPS graph so playlist pitches wait for distributors,
+# SoundExchange waits for distribution, etc.
+# ---------------------------------------------------------------------
+
+SUBMISSION_DEPS: dict[str, list[str]] = {
+    # Distributors: no deps — audio goes live first
+    "distrokid": [], "tunecore": [], "cd-baby": [],
+    "amuse": [], "unitedmasters": [],
+    # PRO writer side + MLC publisher side: parallel to distributors
+    "bmi": [], "mlc": [],
+    # SoundExchange + Content ID need distributor live
+    "soundexchange": ["distrokid"],
+    "youtube_content_id": ["distrokid"],
+    # Playlist pitches need distributor live
+    "spotify_editorial": ["distrokid"],
+    "apple_music_for_artists": ["distrokid"],
+    "groover": ["distrokid"],
+    "playlistpush": ["distrokid"],
+    # Sync marketplaces: independent
+    "musicbed": [], "marmoset": [], "artlist": [], "submithub": [],
+    # Marketing: runs after distribution
+    "press_release_agent": ["distrokid"],
+    "social_media_agent": ["distrokid"],
+    "tiktok_upload": ["distrokid"],
+}
+
+_PIPELINE_TARGET_ORDER = [
+    "distrokid", "tunecore", "cd-baby", "amuse", "unitedmasters",
+    "bmi", "mlc",
+    "soundexchange", "youtube_content_id",
+    "musicbed", "marmoset", "artlist", "submithub",
+    "spotify_editorial", "apple_music_for_artists",
+    "groover", "playlistpush",
+    "press_release_agent", "social_media_agent", "tiktok_upload",
+]
+
+
+async def _downstream_deps_satisfied(
+    db: AsyncSession, target_service: str, subject_id
+) -> tuple[bool, str]:
+    """Check prereq external_submissions rows."""
+    from sqlalchemy import select as _select
+    from api.models.external_submission import ExternalSubmission
+    deps = SUBMISSION_DEPS.get(target_service, [])
+    if not deps:
+        return True, ""
+    for dep in deps:
+        row = (
+            await db.execute(
+                _select(ExternalSubmission)
+                .where(
+                    ExternalSubmission.target_service == dep,
+                    ExternalSubmission.subject_id == subject_id,
+                )
+                .order_by(ExternalSubmission.created_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if row is None or row.status not in ("submitted", "accepted"):
+            return False, f"waiting on {dep}"
+    return True, ""
+
+
+async def _target_is_enabled(db: AsyncSession, target_service: str) -> bool:
+    from sqlalchemy import select as _select
+    from api.models.external_submission import SubmissionTarget
+    t = (
+        await db.execute(
+            _select(SubmissionTarget).where(SubmissionTarget.target_service == target_service)
+        )
+    ).scalar_one_or_none()
+    return bool(t and t.is_enabled)
+
+
+async def sweep_downstream_pipeline(
+    db: AsyncSession,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """
+    Walk every qa_passed song that has metadata projected (ISRC set)
+    and dispatch it through the downstream pipeline. Respects
+    dependency graph + enabled/disabled flags on submission_targets.
+
+    Returns a per-song report of what was attempted and what was
+    deferred. Non-destructive — idempotent submit_subject calls reuse
+    existing rows for already-submitted targets.
+    """
+    from sqlalchemy import select as _select
+    from api.models.ai_artist import AIArtist
+    from api.models.ascap_submission import AscapSubmission
+    from api.models.songs_master import SongMaster
+    from api.services.ascap_fonzworth import submit_song_to_ascap
+    from api.services.external_submission_agent import submit_subject
+
+    stmt = (
+        _select(SongMaster)
+        .where(
+            SongMaster.status == "qa_passed",
+            SongMaster.isrc.isnot(None),
+        )
+        .limit(limit)
+    )
+    songs = (await db.execute(stmt)).scalars().all()
+
+    results: list[dict[str, Any]] = []
+    for song in songs:
+        steps: dict[str, str] = {}
+        errors: list[str] = []
+
+        # ASCAP first (own agent, own table)
+        existing_ascap = (
+            await db.execute(
+                _select(AscapSubmission)
+                .where(AscapSubmission.song_id == song.song_id)
+                .order_by(AscapSubmission.created_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if existing_ascap and existing_ascap.status in ("submitted", "accepted"):
+            steps["ascap"] = "already_done"
+        else:
+            artist = (
+                await db.execute(
+                    _select(AIArtist).where(AIArtist.artist_id == song.primary_artist_id)
+                )
+            ).scalar_one_or_none()
+            if artist:
+                try:
+                    asub = await submit_song_to_ascap(db, song=song, artist=artist)
+                    steps["ascap"] = asub.status
+                except Exception as e:
+                    steps["ascap"] = "failed"
+                    errors.append(f"ascap: {type(e).__name__}: {e}")
+
+        # External targets in pipeline order
+        for svc in _PIPELINE_TARGET_ORDER:
+            try:
+                if not await _target_is_enabled(db, svc):
+                    steps[svc] = "disabled"
+                    continue
+                ok, reason = await _downstream_deps_satisfied(db, svc, song.song_id)
+                if not ok:
+                    steps[svc] = f"deferred: {reason}"
+                    continue
+                sub = await submit_subject(
+                    db,
+                    target_service=svc,
+                    submission_subject_type="song",
+                    subject_id=song.song_id,
+                )
+                steps[svc] = sub.status
+            except Exception as e:
+                steps[svc] = "failed"
+                errors.append(f"{svc}: {type(e).__name__}: {e}")
+
+        results.append({
+            "song_id": str(song.song_id),
+            "title": song.title,
+            "steps": steps,
+            "errors": errors,
+        })
+
+    return {
+        "scanned": len(songs),
+        "results": results,
+    }

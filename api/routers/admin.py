@@ -6346,6 +6346,27 @@ async def project_song_metadata(
     return result
 
 
+@router.post("/api/v1/admin/sweeps/downstream-pipeline")
+async def sweep_downstream_pipeline_endpoint(
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Walk every qa_passed song that has metadata projected and dispatch
+    it through the downstream pipeline (ASCAP, distributors, PROs,
+    sync, playlists, marketing). Respects dependency graph — playlist
+    pitches wait for distributor, SoundExchange waits for distribution.
+    Idempotent — reuses existing submitted rows.
+
+    Targets that are disabled or missing credentials get marked as
+    'disabled' or 'failed' with a clear reason, but DON'T block other
+    targets from attempting their own submissions.
+    """
+    from api.services.submissions_agent import sweep_downstream_pipeline
+    return await sweep_downstream_pipeline(db, limit=limit)
+
+
 @router.post("/api/v1/admin/sweeps/metadata-projection")
 async def sweep_metadata_projection(
     db: AsyncSession = Depends(get_db),
