@@ -4459,19 +4459,17 @@ async def generate_reference_sheet(
     _admin: ApiKey = Depends(require_admin),
 ):
     """
-    PRD §20 — generate the full 8-view photographic reference sheet for
-    an artist. Each view is a separate DALL-E 3 HD call ($0.08 each)
-    following the per-angle prompt in build_8_view_prompts.
+    PRD §20 — 8-view photographic reference sheet with FACE-LOCKED
+    consistency via gpt-image-1's /v1/images/edits endpoint.
 
-    Total cost: $0.64 per artist (8 × $0.08).
-    Note: DALL-E 3 doesn't support face locking, so facial details will
-    drift between views. For guaranteed consistency we'll need Flux-PuLID
-    via Replicate in a follow-up.
+    Flow:
+      1. Generate the FRONT view via text-to-image (/v1/images/generations)
+      2. Load its bytes from visual_asset_blobs
+      3. Generate views 2-8 via reference-to-image (/v1/images/edits)
+         passing the front view's PNG as the reference — gpt-image-1
+         locks the face/hair/clothing across all 7 subsequent views.
 
-    Returns a list of generated views with their asset_ids. The front
-    view becomes the new canonical reference sheet (updates
-    visual_dna.reference_sheet_asset_id) + all other views are linked
-    via parent_sheet_id.
+    Cost: ~$0.167 × 1 (front, high quality) + $0.042 × 7 (edits, medium) ≈ $0.46 per sheet
     """
     import uuid as _uuid
     from sqlalchemy import text as _text
@@ -4503,16 +4501,40 @@ async def generate_reference_sheet(
 
     results: list[dict] = []
     front_asset_id: _uuid.UUID | None = None
+    front_bytes: bytes | None = None
 
     for view_angle, prompt in view_prompts:
-        portrait = await generate_and_store_image(
-            db,
-            artist_id=aid,
-            asset_type="sheet_view",
-            prompt=prompt,
-            view_angle=view_angle,
-            parent_sheet_id=front_asset_id,  # linked to front view once it's created
-        )
+        # Front view: high-quality text-to-image.
+        # Other views: reference-conditioned to the front view bytes.
+        if view_angle == "front":
+            portrait = await generate_and_store_image(
+                db,
+                artist_id=aid,
+                asset_type="sheet_view",
+                prompt=prompt,
+                view_angle=view_angle,
+                quality="high",
+            )
+        else:
+            if front_bytes is None:
+                logger.warning("[sheet-gen] %s skipped — no front bytes yet", view_angle)
+                results.append({
+                    "view_angle": view_angle,
+                    "asset_id": None,
+                    "error": "front view bytes missing",
+                })
+                continue
+            portrait = await generate_and_store_image(
+                db,
+                artist_id=aid,
+                asset_type="sheet_view",
+                prompt=prompt,
+                view_angle=view_angle,
+                parent_sheet_id=front_asset_id,
+                quality="medium",
+                reference_image_bytes=front_bytes,
+            )
+
         if portrait is None:
             logger.warning("[sheet-gen] %s view failed for %s", view_angle, artist.stage_name)
             results.append({
@@ -4524,7 +4546,7 @@ async def generate_reference_sheet(
 
         if view_angle == "front":
             front_asset_id = portrait.asset_id
-            # Update the front view's row to mark it as the canonical sheet
+            # Mark as canonical sheet
             await db.execute(
                 _text("""
                     UPDATE artist_visual_assets
@@ -4533,6 +4555,15 @@ async def generate_reference_sheet(
                 """),
                 {"asset_id": portrait.asset_id},
             )
+            # Pull the front bytes back out of visual_asset_blobs for
+            # subsequent reference-image calls
+            blob_row = await db.execute(
+                _text("SELECT image_bytes FROM visual_asset_blobs WHERE asset_id = :aid"),
+                {"aid": front_asset_id},
+            )
+            front_bytes_row = blob_row.fetchone()
+            if front_bytes_row:
+                front_bytes = bytes(front_bytes_row[0])
 
         results.append({
             "view_angle": view_angle,
@@ -4552,12 +4583,19 @@ async def generate_reference_sheet(
 
     await db.commit()
 
+    # Cost: front (high) ≈ $0.167 + 7 × edits (medium) ≈ $0.042 = $0.461
+    successful = [r for r in results if r.get("asset_id")]
+    approx_cost = (0.167 if any(r["view_angle"] == "front" for r in successful) else 0) + \
+                  0.042 * sum(1 for r in successful if r["view_angle"] != "front")
+
     return {
         "artist_id": str(aid),
         "stage_name": artist.stage_name,
         "views": results,
         "front_asset_id": str(front_asset_id) if front_asset_id else None,
-        "total_cost_usd": 0.08 * len([r for r in results if r.get("asset_id")]),
+        "total_cost_usd": round(approx_cost, 3),
+        "model": "gpt-image-1",
+        "face_locked": front_bytes is not None,
     }
 
 

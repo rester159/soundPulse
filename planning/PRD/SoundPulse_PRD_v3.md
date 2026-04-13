@@ -832,7 +832,7 @@ track_lyrics                    -- §10 Layer 5
 breakout_quantifications        -- §11
 ceo_profile                     -- §49 single-row
 agent_registry                  -- §50 14 agents
-tools_registry                  -- §50 42 tools
+tools_registry                  -- §50 41 tools
 agent_tool_grants               -- §50 many-to-many
 ```
 
@@ -2477,7 +2477,7 @@ Two views (toggleable):
 ### Schemas
 
 - `agent_registry` — 14 agents seeded
-- `tools_registry` — 42 tools seeded (covering all data, LLMs, generation, visual, video, distribution, rights, social, marketing, communication categories; includes openai_cli_proxy as the preferred image-gen entry point)
+- `tools_registry` — 41 tools seeded (covering all data, LLMs, generation, visual, video, distribution, rights, social, marketing, communication categories; openai_cli_proxy routes all image gen through gpt-image-1 — DALL-E 3 removed as of 2026-04-13 for insufficient realism)
 - `agent_tool_grants` — many-to-many, 51 default grants seeded
 
 ### Endpoints
@@ -2938,13 +2938,12 @@ Seeded in `tools_registry` (§17, §50). Every entry is addressable by `id` and 
 ### Video (1)
 38. **veo** — Google Veo video generation.
 
-### Visual (4)
-39. **dalle3** — DALL-E 3 (via OpenAI). Kept for reference; new paths should use `openai_cli_proxy`.
-40. **flux_falai** — Flux via fal.ai.
-41. **stable_diffusion** — Stable Diffusion + IP-Adapter (face-locked artist generation).
-42. **openai_cli_proxy** — ⭐ **Preferred image-gen entry point.** Local CLI proxy that brokers every OpenAI image call (DALL-E 3, gpt-image-1, etc.). Consolidates auth and cost tracking in one place. All visual pipelines (artist reference sheets §20, song artwork, promo assets, social post visuals) should go through this tool.
+### Visual (3)
+39. **flux_falai** — Flux via fal.ai. Fallback if OpenAI rejects.
+40. **stable_diffusion** — Stable Diffusion + IP-Adapter. Fallback for face-locked generation.
+41. **openai_cli_proxy** — ⭐ **Preferred image-gen entry point.** Routes through `gpt-image-1` (OpenAI's native multimodal model). Used for: artist reference sheets (§20, 8-view face-locked via `/v1/images/edits`), song artwork, promo assets, social post visuals. **DALL-E 3 was removed** as insufficiently photorealistic for human portraits — `gpt-image-1` replaces it entirely.
 
-**Count verification:** 1 + 3 + 7 + 3 + 4 + 3 + 6 + 5 + 5 + 1 + 4 = **42** ✓. Matches the seeded row count in `tools_registry`.
+**Count verification:** 1 + 3 + 7 + 3 + 4 + 3 + 6 + 5 + 5 + 1 + 3 = **41** ✓. Matches the seeded row count in `tools_registry` after DALL-E 3 removal.
 
 ---
 

@@ -1,15 +1,22 @@
 """
-Image generation via openai_cli_proxy (preferred) or direct OpenAI (fallback).
+Image generation via OpenAI gpt-image-1 (with openai_cli_proxy fallback).
+
+gpt-image-1 is OpenAI's native multimodal image model — noticeably more
+realistic than DALL-E 3 for human portraits, and the only OpenAI model
+that supports reference-image conditioning via /v1/images/edits. That's
+what makes face-locked 8-view reference sheets possible without adding
+a third-party provider like Flux-PuLID.
 
 Used for artist portraits (§20 visual reference sheets) and song covers.
 Writes bytes into visual_asset_blobs + a metadata row in
-artist_visual_assets. If neither the proxy nor OpenAI is configured,
-logs a warning and returns None so the caller can proceed with a
-NULL portrait/cover field and escalate to the CEO.
+artist_visual_assets. If no OpenAI credentials are configured, logs a
+warning and returns None so the caller can proceed with a NULL field
+and escalate to the CEO.
 """
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
@@ -28,13 +35,14 @@ PROXY_URL_ENV = "OPENAI_CLI_PROXY_URL"
 PROXY_KEY_ENV = "OPENAI_CLI_PROXY_KEY"
 DIRECT_KEY_ENV = "OPENAI_API_KEY"
 
-# DALL-E 3 defaults — HD quality ($0.080/image at 1024x1024, 2x standard)
-# is required for photorealistic portraits. Standard quality smooths
-# skin too much and drifts toward illustration even with aggressive
-# anti-illustration prompts.
-DEFAULT_MODEL = "dall-e-3"
+# gpt-image-1 defaults
+#   - Quality tiers: 'low' | 'medium' | 'high' | 'auto'
+#   - 'high' at 1024×1024 ≈ $0.167/image — worth it for portraits
+#   - 'medium' ≈ $0.042/image — good for song covers
+#   - Returns base64 JSON by default
+DEFAULT_MODEL = "gpt-image-1"
 DEFAULT_SIZE = "1024x1024"
-DEFAULT_QUALITY = "hd"
+DEFAULT_QUALITY = "high"
 
 
 @dataclass
@@ -63,11 +71,20 @@ async def _call_image_api(
     model: str = DEFAULT_MODEL,
     size: str = DEFAULT_SIZE,
     quality: str = DEFAULT_QUALITY,
+    reference_image_bytes: bytes | None = None,
 ) -> tuple[bytes, str] | None:
     """
-    Call the image API. Returns (bytes, content_type) on success, None
-    on failure. Supports both a proxy and direct OpenAI at the standard
-    POST /v1/images/generations shape.
+    Call OpenAI gpt-image-1 for text-to-image OR reference-to-image.
+
+    Without `reference_image_bytes`: hits /v1/images/generations
+      body: {model, prompt, size, quality, n, output_format}
+      response: {data: [{b64_json}]}  (gpt-image-1 always returns b64)
+
+    With `reference_image_bytes`: hits /v1/images/edits (multipart)
+      form: image=<png bytes>, prompt, model, size, quality, n
+      response: {data: [{b64_json}]}
+
+    Returns (bytes, content_type) or None on failure.
     """
     config = _get_client_config()
     if config is None:
@@ -75,23 +92,44 @@ async def _call_image_api(
         return None
     base_url, auth, provider = config
 
-    payload = {
-        "model": model,
-        "prompt": prompt[:4000],  # DALL-E 3 hard cap
-        "n": 1,
-        "size": size,
-        "quality": quality,
-        "response_format": "b64_json",  # get bytes inline, no second fetch
-    }
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            r = await client.post(
-                f"{base_url}/v1/images/generations",
-                json=payload,
-                headers={"Authorization": auth, "Content-Type": "application/json"},
-            )
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            if reference_image_bytes is None:
+                # Text-to-image via /v1/images/generations
+                payload = {
+                    "model": model,
+                    "prompt": prompt[:32000],  # gpt-image-1 supports long prompts
+                    "n": 1,
+                    "size": size,
+                    "quality": quality,
+                }
+                r = await client.post(
+                    f"{base_url}/v1/images/generations",
+                    json=payload,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                )
+            else:
+                # Reference-to-image via /v1/images/edits (multipart form-data)
+                files = {
+                    "image": ("reference.png", reference_image_bytes, "image/png"),
+                }
+                form_data = {
+                    "model": model,
+                    "prompt": prompt[:32000],
+                    "n": "1",
+                    "size": size,
+                }
+                # NOTE: the edits endpoint doesn't accept quality for
+                # gpt-image-1 (community-reported). We omit it.
+                r = await client.post(
+                    f"{base_url}/v1/images/edits",
+                    files=files,
+                    data=form_data,
+                    headers={"Authorization": auth},  # don't set Content-Type, httpx handles multipart
+                )
+
             if r.status_code != 200:
-                logger.error("[image-gen] %s returned %s: %s", provider, r.status_code, r.text[:400])
+                logger.error("[image-gen] %s returned %s: %s", provider, r.status_code, r.text[:600])
                 return None
             body = r.json()
             data = body.get("data") or []
@@ -100,7 +138,7 @@ async def _call_image_api(
                 return None
             b64 = data[0].get("b64_json")
             if not b64:
-                # Some providers return `url` instead — fetch it
+                # Fallback — some deployments return `url`
                 url = data[0].get("url")
                 if not url:
                     return None
@@ -123,14 +161,23 @@ async def generate_and_store_image(
     prompt: str,
     parent_sheet_id: _uuid.UUID | None = None,
     view_angle: str | None = None,
+    quality: str = DEFAULT_QUALITY,
+    reference_image_bytes: bytes | None = None,
 ) -> ImageResult | None:
     """
     Generate an image, persist an artist_visual_assets row, store the
     bytes in visual_asset_blobs, and return the asset_id + streaming
     URL. Returns None on any failure (caller decides whether to proceed
     without an image or escalate).
+
+    Pass `reference_image_bytes` to hit /v1/images/edits with the
+    reference locked (used by the face-locked 8-view sheet flow).
     """
-    result = await _call_image_api(prompt)
+    result = await _call_image_api(
+        prompt,
+        quality=quality,
+        reference_image_bytes=reference_image_bytes,
+    )
     if result is None:
         return None
     image_bytes, content_type = result
