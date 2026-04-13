@@ -3840,6 +3840,20 @@ async def music_poll(
             # from rich-metadata providers (Udio).
             if persisted_locally and row.song_id is not None:
                 await _materialize_song_audio(db, row, provider, task_id, result=result)
+                # If this was an instrumental-backed generation, enqueue
+                # a stem extraction job for the Demucs microservice.
+                # The helper is idempotent and a no-op for text-only
+                # generations (no uploadUrl in params_json).
+                source_stream_url = f"/api/v1/admin/music/audio/{provider}/{task_id}.mp3"
+                try:
+                    await _enqueue_stem_job_if_needed(
+                        db,
+                        song_id=row.song_id,
+                        music_generation_call_id=row.id,
+                        source_audio_url=source_stream_url,
+                    )
+                except Exception:
+                    logger.exception("[stem-enqueue] failed for song %s", row.song_id)
 
     # Prefer the self-hosted URL when bytes are available.
     response_audio_url = result.audio_url
@@ -6963,6 +6977,435 @@ async def list_external_submissions(
             for r in rows
         ],
     }
+
+
+# ---------------------------------------------------------------------
+# Stem-extractor worker queue endpoints — #96 Demucs microservice
+# ---------------------------------------------------------------------
+
+@router.post("/api/v1/admin/worker/stem-claim-next")
+async def worker_stem_claim_next(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Atomically claim the next pending stem extraction job.
+    Body: { worker_id: "<uuid or hostname>" }
+
+    Returns the full job payload the worker needs:
+      song_id, source_audio_url (Suno output MP3 URL),
+      source_instrumental_url (the user's original instrumental) if present,
+      song title, artist stage name — everything needed to download +
+      separate + mix without another API round-trip.
+    """
+    from sqlalchemy import text as _text
+    worker_id = (body.get("worker_id") or "").strip()
+    if not worker_id:
+        raise HTTPException(400, detail="worker_id required")
+
+    row = (await db.execute(
+        _text("""
+            SELECT j.id, j.song_id, j.source_audio_url, j.source_instrumental_id,
+                   j.retry_count,
+                   sm.title, ai.stage_name,
+                   i.content_type AS instr_content_type
+            FROM song_stem_jobs j
+            LEFT JOIN songs_master sm ON sm.song_id = j.song_id
+            LEFT JOIN ai_artists ai ON ai.artist_id = sm.primary_artist_id
+            LEFT JOIN instrumentals i ON i.id = j.source_instrumental_id
+            WHERE j.status = 'pending'
+            ORDER BY j.created_at ASC
+            LIMIT 1
+            FOR UPDATE OF j SKIP LOCKED
+        """),
+    )).fetchone()
+    if row is None:
+        return {"claimed": None, "message": "no pending stem jobs"}
+
+    await db.execute(
+        _text("""
+            UPDATE song_stem_jobs
+            SET status = 'in_progress',
+                worker_id = :wid,
+                claimed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = :id
+        """),
+        {"id": row[0], "wid": worker_id},
+    )
+    await db.commit()
+
+    import os as _os
+    public_base = _os.environ.get(
+        "PUBLIC_BASE_URL",
+        "https://soundpulse-production-5266.up.railway.app",
+    )
+    instrumental_url = None
+    if row[3]:  # source_instrumental_id
+        ext_map = {
+            "audio/mpeg": "mp3", "audio/mp3": "mp3",
+            "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+            "audio/flac": "flac", "audio/x-flac": "flac",
+            "audio/ogg": "ogg", "audio/aac": "aac",
+            "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/m4a": "m4a",
+        }
+        ext = ext_map.get(row[7] or "audio/mpeg", "mp3")
+        instrumental_url = f"{public_base}/api/v1/instrumentals/public/{row[3]}.{ext}"
+
+    return {
+        "claimed": {
+            "job_id": str(row[0]),
+            "song_id": str(row[1]),
+            "source_audio_url": row[2],
+            "source_instrumental_id": str(row[3]) if row[3] else None,
+            "source_instrumental_url": instrumental_url,
+            "retry_count": row[4],
+            "song_title": row[5],
+            "artist_stage_name": row[6],
+            "worker_id": worker_id,
+        }
+    }
+
+
+@router.post("/api/v1/admin/worker/stem-ack/{job_id}")
+async def worker_stem_ack(
+    job_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Stem worker posts back separated stems. Body:
+      {
+        "stems": [
+          {
+            "stem_type": "suno_original" | "vocals_only" | "final_mixed" |
+                         "drums" | "bass" | "other",
+            "content_type": "audio/mpeg" (default),
+            "audio_base64": "<base64-encoded mp3 bytes>",
+            "duration_seconds": 156.96 (optional),
+            "loudness_lufs": -14.2 (optional)
+          },
+          ...
+        ]
+      }
+
+    Writes one song_stems row per stem, then flips the job to status='done'.
+    """
+    import base64 as _b64
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    try:
+        jid = _uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid job_id")
+
+    # Fetch the job to get song_id
+    job_row = (await db.execute(
+        _text("SELECT song_id FROM song_stem_jobs WHERE id = :id"),
+        {"id": jid},
+    )).fetchone()
+    if job_row is None:
+        raise HTTPException(404, detail="job not found")
+    song_id = job_row[0]
+
+    stems = body.get("stems") or []
+    if not isinstance(stems, list) or not stems:
+        raise HTTPException(400, detail="stems array required")
+
+    persisted = 0
+    allowed_types = {
+        "suno_original", "vocals_only", "final_mixed", "drums", "bass", "other",
+    }
+    for stem in stems:
+        if not isinstance(stem, dict):
+            continue
+        stem_type = (stem.get("stem_type") or "").strip()
+        if stem_type not in allowed_types:
+            continue
+        audio_b64 = stem.get("audio_base64") or ""
+        if not audio_b64:
+            continue
+        try:
+            audio_bytes = _b64.b64decode(audio_b64)
+        except Exception:
+            continue
+        size_bytes = len(audio_bytes)
+        content_type = (stem.get("content_type") or "audio/mpeg").strip()
+        duration = stem.get("duration_seconds")
+        loudness = stem.get("loudness_lufs")
+
+        # UPSERT on the (song_id, stem_type) unique constraint
+        await db.execute(
+            _text("""
+                INSERT INTO song_stems
+                    (song_id, job_id, stem_type, content_type, audio_bytes,
+                     size_bytes, duration_seconds, loudness_lufs)
+                VALUES (:sid, :jid, :stype, :ctype, :bytes, :sz, :dur, :lufs)
+                ON CONFLICT (song_id, stem_type) DO UPDATE SET
+                    audio_bytes = EXCLUDED.audio_bytes,
+                    size_bytes = EXCLUDED.size_bytes,
+                    duration_seconds = EXCLUDED.duration_seconds,
+                    loudness_lufs = EXCLUDED.loudness_lufs,
+                    job_id = EXCLUDED.job_id
+            """),
+            {
+                "sid": song_id,
+                "jid": jid,
+                "stype": stem_type,
+                "ctype": content_type,
+                "bytes": audio_bytes,
+                "sz": size_bytes,
+                "dur": duration,
+                "lufs": loudness,
+            },
+        )
+        persisted += 1
+
+    await db.execute(
+        _text("""
+            UPDATE song_stem_jobs
+            SET status = 'done',
+                completed_at = NOW(),
+                error_message = NULL,
+                updated_at = NOW()
+            WHERE id = :id
+        """),
+        {"id": jid},
+    )
+    await db.commit()
+    return {"ok": True, "job_id": str(jid), "stems_persisted": persisted}
+
+
+@router.post("/api/v1/admin/worker/stem-fail/{job_id}")
+async def worker_stem_fail(
+    job_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Stem worker posts back failure. Body: {error, retry?}"""
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    try:
+        jid = _uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid job_id")
+    error = (body.get("error") or "unknown").strip()
+    retry = body.get("retry", True)
+    new_status = "pending" if retry else "failed"
+    await db.execute(
+        _text("""
+            UPDATE song_stem_jobs
+            SET status = :status,
+                retry_count = retry_count + 1,
+                error_message = :err,
+                updated_at = NOW()
+            WHERE id = :id
+        """),
+        {"id": jid, "status": new_status, "err": error[:1000]},
+    )
+    await db.commit()
+    return {"ok": True, "job_id": str(jid), "status": new_status}
+
+
+@router.get("/api/v1/admin/songs/{song_id}/stems")
+async def list_song_stems(
+    song_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """List all stems available for a song + the current job state."""
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    try:
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid song_id")
+
+    job_row = (await db.execute(
+        _text("""
+            SELECT id, status, error_message, claimed_at, completed_at,
+                   retry_count, worker_id
+            FROM song_stem_jobs
+            WHERE song_id = :sid
+            ORDER BY created_at DESC
+            LIMIT 1
+        """),
+        {"sid": sid},
+    )).fetchone()
+
+    stem_rows = (await db.execute(
+        _text("""
+            SELECT id, stem_type, content_type, size_bytes,
+                   duration_seconds, loudness_lufs, created_at
+            FROM song_stems
+            WHERE song_id = :sid
+            ORDER BY CASE stem_type
+                WHEN 'final_mixed'   THEN 1
+                WHEN 'vocals_only'   THEN 2
+                WHEN 'suno_original' THEN 3
+                WHEN 'drums'         THEN 4
+                WHEN 'bass'          THEN 5
+                WHEN 'other'         THEN 6
+                ELSE 7
+            END
+        """),
+        {"sid": sid},
+    )).fetchall()
+
+    return {
+        "song_id": str(sid),
+        "job": {
+            "id": str(job_row[0]) if job_row else None,
+            "status": job_row[1] if job_row else None,
+            "error_message": job_row[2] if job_row else None,
+            "claimed_at": job_row[3].isoformat() if job_row and job_row[3] else None,
+            "completed_at": job_row[4].isoformat() if job_row and job_row[4] else None,
+            "retry_count": job_row[5] if job_row else 0,
+            "worker_id": job_row[6] if job_row else None,
+        },
+        "stems": [
+            {
+                "id": str(r[0]),
+                "stem_type": r[1],
+                "content_type": r[2],
+                "size_bytes": r[3],
+                "duration_seconds": r[4],
+                "loudness_lufs": r[5],
+                "stream_url": f"/api/v1/admin/songs/{sid}/stems/{r[1]}.mp3",
+                "created_at": r[6].isoformat() if r[6] else None,
+            }
+            for r in stem_rows
+        ],
+    }
+
+
+@router.get("/api/v1/admin/songs/{song_id}/stems/{stem_type_with_ext}")
+async def stream_song_stem(
+    song_id: str,
+    stem_type_with_ext: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Stream a single stem by (song_id, stem_type)."""
+    import uuid as _uuid
+    from fastapi.responses import Response
+    from sqlalchemy import text as _text
+    try:
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid song_id")
+
+    stem_type = stem_type_with_ext
+    for ext in ("mp3", "wav", "flac", "ogg", "m4a"):
+        if stem_type.lower().endswith(f".{ext}"):
+            stem_type = stem_type[: -len(ext) - 1]
+            break
+
+    r = await db.execute(
+        _text("""
+            SELECT content_type, audio_bytes
+            FROM song_stems
+            WHERE song_id = :sid AND stem_type = :stype
+            LIMIT 1
+        """),
+        {"sid": sid, "stype": stem_type},
+    )
+    row = r.fetchone()
+    if row is None:
+        raise HTTPException(404, detail="stem not found")
+    audio_bytes = bytes(row[1])
+    return Response(
+        content=audio_bytes,
+        media_type=row[0] or "audio/mpeg",
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "Content-Length": str(len(audio_bytes)),
+        },
+    )
+
+
+async def _enqueue_stem_job_if_needed(
+    db: AsyncSession,
+    *,
+    song_id,
+    music_generation_call_id,
+    source_audio_url: str,
+) -> None:
+    """
+    Called from the music_poll handler when a Suno task flips to
+    'succeeded'. Checks whether the song was generated via the add-
+    vocals (instrumental) path — by looking at music_generation_calls
+    .params_json.uploadUrl or an instrumental_id in the params — and
+    if so, creates a pending song_stem_jobs row for the stem-extractor
+    microservice to pick up.
+
+    Idempotent: if a job already exists for this song, do nothing.
+    """
+    from sqlalchemy import text as _text
+
+    # Skip if we already have a job for this song
+    existing = await db.execute(
+        _text("SELECT 1 FROM song_stem_jobs WHERE song_id = :sid LIMIT 1"),
+        {"sid": song_id},
+    )
+    if existing.scalar() is not None:
+        return
+
+    # Look up the music_generation_call to see if this was an
+    # instrumental-backed generation (params_json.uploadUrl present).
+    call_row = await db.execute(
+        _text("""
+            SELECT params_json
+            FROM music_generation_calls
+            WHERE id = :cid
+            LIMIT 1
+        """),
+        {"cid": music_generation_call_id},
+    )
+    call = call_row.fetchone()
+    if call is None:
+        return
+
+    params = call[0] or {}
+    upload_url = params.get("uploadUrl")
+    if not upload_url:
+        # Not an instrumental-backed generation — skip stem extraction
+        return
+
+    # Resolve the instrumental_id from the uploadUrl. Our public URL
+    # format is .../api/v1/instrumentals/public/{uuid}.{ext}
+    instrumental_id = None
+    try:
+        import re as _re
+        match = _re.search(r"/instrumentals/public/([0-9a-f-]{36})", upload_url)
+        if match:
+            import uuid as _uuid
+            instrumental_id = _uuid.UUID(match.group(1))
+    except Exception:
+        pass
+
+    await db.execute(
+        _text("""
+            INSERT INTO song_stem_jobs
+                (song_id, music_generation_call_id, source_instrumental_id,
+                 source_audio_url, status)
+            VALUES (:sid, :cid, :iid, :src_url, 'pending')
+        """),
+        {
+            "sid": song_id,
+            "cid": music_generation_call_id,
+            "iid": instrumental_id,
+            "src_url": source_audio_url,
+        },
+    )
+    await db.commit()
+    logger.info(
+        "[stem-enqueue] song %s queued for stem extraction (instrumental=%s)",
+        song_id, instrumental_id,
+    )
 
 
 # ---------------------------------------------------------------------
