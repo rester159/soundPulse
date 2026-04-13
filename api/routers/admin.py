@@ -6303,6 +6303,108 @@ async def generate_song_with_instrumental(
 
 
 # ---------------------------------------------------------------------
+# ASCAP submissions — Fonzworth agent (T-190..T-194, PRD §31)
+# ---------------------------------------------------------------------
+
+@router.post("/api/v1/admin/songs/{song_id}/ascap-submit")
+async def ascap_submit_song(
+    song_id: str,
+    force_retry: bool = False,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Submit a song to ASCAP's Fonzworth portal via the Playwright agent.
+
+    Creates (or reuses) an ascap_submissions row and drives the browser
+    to register the work. Returns the row's current state — check
+    status field ('submitted' | 'failed' | 'accepted') and
+    last_error_message on the response.
+
+    Preconditions:
+      - ASCAP_USERNAME / ASCAP_PASSWORD env vars set
+      - playwright package + Chromium binary installed on the container
+      - song exists and has a primary_artist_id
+    """
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+    from api.models.songs_master import SongMaster
+    from api.services.ascap_fonzworth import submit_song_to_ascap
+
+    try:
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid song_id")
+
+    song = (
+        await db.execute(select(SongMaster).where(SongMaster.song_id == sid))
+    ).scalar_one_or_none()
+    if song is None:
+        raise HTTPException(404, detail="song not found")
+
+    artist = (
+        await db.execute(
+            select(AIArtist).where(AIArtist.artist_id == song.primary_artist_id)
+        )
+    ).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(500, detail="song's primary artist missing")
+
+    sub = await submit_song_to_ascap(
+        db,
+        song=song,
+        artist=artist,
+        force_retry=force_retry,
+    )
+    return {
+        "ascap_submission_id": str(sub.id),
+        "song_id": str(sub.song_id),
+        "status": sub.status,
+        "ascap_work_id": sub.ascap_work_id,
+        "attempt_number": sub.attempt_number,
+        "retry_count": sub.retry_count,
+        "last_error_message": sub.last_error_message,
+        "submitted_at": sub.submitted_at.isoformat() if sub.submitted_at else None,
+    }
+
+
+@router.get("/api/v1/admin/ascap-submissions")
+async def list_ascap_submissions(
+    status: str | None = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """List ASCAP submission rows. Used by the Submissions page."""
+    from api.models.ascap_submission import AscapSubmission
+    stmt = select(AscapSubmission).order_by(AscapSubmission.created_at.desc()).limit(
+        max(1, min(limit, 500))
+    )
+    if status:
+        stmt = stmt.where(AscapSubmission.status == status)
+    rows = (await db.execute(stmt)).scalars().all()
+    return {
+        "count": len(rows),
+        "submissions": [
+            {
+                "id": str(r.id),
+                "song_id": str(r.song_id),
+                "status": r.status,
+                "ascap_work_id": r.ascap_work_id,
+                "attempt_number": r.attempt_number,
+                "retry_count": r.retry_count,
+                "submission_title": r.submission_title,
+                "last_error_message": r.last_error_message,
+                "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
+                "accepted_at": r.accepted_at.isoformat() if r.accepted_at else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ---------------------------------------------------------------------
 # Genre traits — Task #93
 #   Multi-dimensional profile per genre (edginess, meme density,
 #   earworm demand, etc). Seeded by migration 020; CEO can override.
