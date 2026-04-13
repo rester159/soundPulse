@@ -4469,6 +4469,7 @@ async def patch_song_master(
     """Patch lifecycle fields on a song. Partial updates only."""
     import uuid as _uuid
     from datetime import date as _date
+    from sqlalchemy.exc import IntegrityError
     from api.models.songs_master import SongMaster
     try:
         sid = _uuid.UUID(song_id)
@@ -4488,7 +4489,15 @@ async def patch_song_master(
             value = _date.fromisoformat(value)
         setattr(row, key, value)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        # Most likely: duplicate ISRC. Surface as 409 with the offending field.
+        msg = str(e.orig) if e.orig else str(e)
+        if "isrc" in msg.lower():
+            raise HTTPException(409, detail=f"ISRC already in use: {body.isrc}")
+        raise HTTPException(409, detail=f"integrity constraint violated: {msg[:200]}")
     await db.refresh(row)
     return _song_to_dict(row, full=True)
 
