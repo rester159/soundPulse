@@ -4469,13 +4469,27 @@ async def create_artist_from_persona(
     # Generate + store portrait (single view — user can click
     # "Generate 8-view sheet" separately if they want the full PRD §20)
     portrait_prompt = build_artist_portrait_prompt(persona)
-    portrait = await generate_and_store_image(
-        db,
-        artist_id=row.artist_id,
-        asset_type="reference_sheet",
-        prompt=portrait_prompt,
-        quality="high",
-    )
+    portrait_error: str | None = None
+    portrait = None
+    try:
+        portrait = await generate_and_store_image(
+            db,
+            artist_id=row.artist_id,
+            asset_type="reference_sheet",
+            prompt=portrait_prompt,
+            quality="high",
+        )
+        if portrait is None:
+            portrait_error = (
+                "image_generator returned None — likely OpenAI API error, "
+                "content-policy rejection, or misconfigured env. Check logs "
+                "and call POST /admin/artists/{id}/regenerate-portrait to retry."
+            )
+            logger.warning("[create-from-persona] portrait None for %s", row.stage_name)
+    except Exception as e:
+        portrait_error = f"portrait gen raised: {type(e).__name__}: {e}"
+        logger.exception("[create-from-persona] portrait raised for %s", row.stage_name)
+
     portrait_info = None
     if portrait is not None:
         updated_visual = dict(row.visual_dna or {})
@@ -4500,6 +4514,7 @@ async def create_artist_from_persona(
         "stage_name": row.stage_name,
         "primary_genre": row.primary_genre,
         "portrait": portrait_info,
+        "portrait_error": portrait_error,
         "derived_from": persona.get("derived_from"),
         "created_at": row.created_at.isoformat(),
     }
@@ -5608,43 +5623,57 @@ async def generate_song_for_blueprint(
         logger.exception("[orchestrator] persistence failed")
         raise HTTPException(500, detail=f"persistence failed: {e}")
 
-    # Generate + store a cover image
-    from api.services.image_generator import (
-        build_song_cover_prompt,
-        generate_and_store_image,
-    )
-    cover_prompt = build_song_cover_prompt(
-        title=title,
-        genre=blueprint.primary_genre or blueprint.genre_id,
-        artist_visual=artist.visual_dna,
-        themes=blueprint.target_themes,
-    )
-    cover = await generate_and_store_image(
-        db,
-        artist_id=artist.artist_id,
-        asset_type="song_artwork",
-        prompt=cover_prompt,
-    )
+    # Cover-art strategy:
+    #   - Providers that ship their own cover art (Udio via PiAPI,
+    #     Suno wrappers, etc.) — skip DALL-E, the poll handler will
+    #     harvest the provider cover into primary_artwork_asset_id.
+    #   - Providers that don't ship cover art (MusicGen via Replicate,
+    #     raw audio models) — fire DALL-E now so the song has a cover
+    #     before the first poll.
+    providers_with_covers = {"udio", "suno_evolink", "suno_kie"}
     cover_info = None
-    if cover is not None:
-        await db.execute(
-            _text("""
-                UPDATE songs_master
-                SET primary_artwork_asset_id = :asset_id,
-                    artwork_brief = :brief,
-                    updated_at = NOW()
-                WHERE song_id = :sid
-            """),
-            {"asset_id": cover.asset_id, "brief": cover_prompt[:500], "sid": song.song_id},
+    if body.provider in providers_with_covers:
+        logger.info(
+            "[orchestrator] skipping DALL-E cover for %s — "
+            "provider will supply its own",
+            body.provider,
         )
-        await db.commit()
-        cover_info = {
-            "asset_id": str(cover.asset_id),
-            "storage_url": cover.storage_url,
-            "provider": cover.provider,
-        }
     else:
-        logger.warning("[orchestrator] cover generation skipped for song %s", song.song_id)
+        from api.services.image_generator import (
+            build_song_cover_prompt,
+            generate_and_store_image,
+        )
+        cover_prompt = build_song_cover_prompt(
+            title=title,
+            genre=blueprint.primary_genre or blueprint.genre_id,
+            artist_visual=artist.visual_dna,
+            themes=blueprint.target_themes,
+        )
+        cover = await generate_and_store_image(
+            db,
+            artist_id=artist.artist_id,
+            asset_type="song_artwork",
+            prompt=cover_prompt,
+        )
+        if cover is not None:
+            await db.execute(
+                _text("""
+                    UPDATE songs_master
+                    SET primary_artwork_asset_id = :asset_id,
+                        artwork_brief = :brief,
+                        updated_at = NOW()
+                    WHERE song_id = :sid
+                """),
+                {"asset_id": cover.asset_id, "brief": cover_prompt[:500], "sid": song.song_id},
+            )
+            await db.commit()
+            cover_info = {
+                "asset_id": str(cover.asset_id),
+                "storage_url": cover.storage_url,
+                "provider": cover.provider,
+            }
+        else:
+            logger.warning("[orchestrator] cover generation skipped for song %s", song.song_id)
 
     return {
         "song_id": str(song.song_id),
