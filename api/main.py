@@ -81,6 +81,10 @@ app.include_router(blueprint.router)
 app.include_router(assistant.router)
 app.include_router(instrumentals_public.router)
 
+# Import marketing_agents so its @register_adapter decorators run
+# and the press_release + social_media adapters replace the stubs.
+from api.services import marketing_agents  # noqa: F401
+
 
 @app.get("/")
 async def root():
