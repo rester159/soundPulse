@@ -6303,6 +6303,89 @@ async def generate_song_with_instrumental(
 
 
 # ---------------------------------------------------------------------
+# Metadata projection — T-167, PRD §27
+# ---------------------------------------------------------------------
+
+@router.post("/api/v1/admin/songs/{song_id}/project-metadata")
+async def project_song_metadata(
+    song_id: str,
+    overwrite: bool = False,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Fill ISRC, writers, publishers, marketing_hook, pr_angle,
+    playlist_fit, target_audience_tags, release_strategy on a
+    songs_master row. Uses deterministic rules for rights fields and
+    an LLM call (Gemini flash) for marketing enrichment.
+
+    Called after qa_passed, before release assembly. Set overwrite=true
+    to replace existing values; default only fills NULL fields.
+    """
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+    from api.models.songs_master import SongMaster
+    from api.services.metadata_projection import project_metadata_for_song
+    try:
+        sid = _uuid.UUID(song_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid song_id")
+    song = (
+        await db.execute(select(SongMaster).where(SongMaster.song_id == sid))
+    ).scalar_one_or_none()
+    if song is None:
+        raise HTTPException(404, detail="song not found")
+    artist = (
+        await db.execute(select(AIArtist).where(AIArtist.artist_id == song.primary_artist_id))
+    ).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(500, detail="primary artist missing")
+    result = await project_metadata_for_song(
+        db, song=song, artist=artist, overwrite=overwrite,
+    )
+    return result
+
+
+@router.post("/api/v1/admin/sweeps/metadata-projection")
+async def sweep_metadata_projection(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Bulk projection — walk every qa_passed song without an ISRC and
+    run metadata_projection.project_metadata_for_song on it.
+    """
+    from api.models.ai_artist import AIArtist
+    from api.models.songs_master import SongMaster
+    from api.services.metadata_projection import project_metadata_for_song
+
+    stmt = select(SongMaster).where(
+        SongMaster.status == "qa_passed",
+        SongMaster.isrc.is_(None),
+    ).limit(25)
+    songs = (await db.execute(stmt)).scalars().all()
+    projected = 0
+    errors: list[str] = []
+    for song in songs:
+        artist = (
+            await db.execute(select(AIArtist).where(AIArtist.artist_id == song.primary_artist_id))
+        ).scalar_one_or_none()
+        if artist is None:
+            errors.append(f"song {song.song_id} missing artist")
+            continue
+        try:
+            await project_metadata_for_song(db, song=song, artist=artist, overwrite=False)
+            projected += 1
+        except Exception as e:
+            errors.append(f"song {song.song_id}: {type(e).__name__}: {e}")
+    return {
+        "scanned": len(songs),
+        "projected": projected,
+        "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------
 # External submissions — distributor/PRO/sync/playlist/marketing agents
 # PRD §28..§37, T-200..T-229
 # ---------------------------------------------------------------------
