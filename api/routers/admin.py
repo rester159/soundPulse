@@ -6281,9 +6281,14 @@ async def generate_song_with_instrumental(
         task_id=task.task_id,
         song_id=song.song_id,
         status="pending",
-        submitted_at=task.submitted_at,
-        params_echo=task.params_echo,
+        prompt=final_prompt,
+        params_json=task.params_echo,
+        model_variant=body.get("model_variant"),
+        duration_seconds_requested=int(body.get("duration_seconds") or 60),
+        genre_hint=genre_for_prompt,
+        blueprint_id=blueprint.id,
         estimated_cost_usd=task.estimated_cost_usd,
+        submitted_at=task.submitted_at,
     )
     db.add(gen_call)
     await db.commit()
