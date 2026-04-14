@@ -42,7 +42,7 @@ from typing import Any
 
 import httpx
 
-from scrapers.base import AuthenticationError, BaseScraper, RawDataPoint
+from scrapers.base import AuthenticationError, BaseScraper, RateLimitError, RawDataPoint
 
 
 def _primary_cm_artist_id(value: Any) -> int | None:
@@ -356,7 +356,21 @@ class ChartmetricDeepUSScraper(BaseScraper):
     PLATFORM = "chartmetric"
     API_BASE = "https://api.chartmetric.com"
     TOKEN_URL = "https://api.chartmetric.com/api/token"
-    REQUEST_DELAY = 0.55     # ~1.8 req/sec, just under the 2 rps Chartmetric limit
+    # L004 (logged 2026-04-11, applied 2026-04-14 after rate-limit failures):
+    # Chartmetric's "2 req/sec" headline is enforced via a tighter token
+    # bucket. At 0.55s (≈1.8 req/sec) the deep scraper reliably hit 429
+    # cascades that failed the whole run. 1.0s/req (1 rps) is the safer
+    # steady-state. Slower backfills, zero 429 noise.
+    REQUEST_DELAY = 1.0
+    # If we hit a 429 mid-run, back off to this slower rate for the rest
+    # of the run. Token bucket is empty, pushing harder just refills our
+    # retry counter instead of our request count.
+    REQUEST_DELAY_AFTER_THROTTLE = 2.0
+    # The base class defaults to 5 retries on 429. Chartmetric's token
+    # bucket can stay empty for 20+ seconds under bursty loads, and 5
+    # retries with a 5s Retry-After = ~25s of waiting, not enough. Bump
+    # to 10 so we survive a full 60s throttle window.
+    MAX_RETRIES = 10
     BULK_BATCH_SIZE = 500    # records per bulk POST
     DATE_LOOKBACK_DAYS = 3   # try date → date-N if a chart has no data yet
 
@@ -366,6 +380,23 @@ class ChartmetricDeepUSScraper(BaseScraper):
         self._semaphore = asyncio.Semaphore(2)
         self._stats: dict[str, dict[str, int]] = {}  # per-endpoint counters
         self._buffer: list[dict[str, Any]] = []      # bulk-ingest staging buffer
+        # Adaptive throttle: once True, stays True for the rest of the run.
+        # Flipped by _on_throttle() when any request surfaces a 429.
+        self._throttled = False
+
+    def _current_delay(self) -> float:
+        """Sleep duration between requests, adjusted for adaptive throttle."""
+        return self.REQUEST_DELAY_AFTER_THROTTLE if self._throttled else self.REQUEST_DELAY
+
+    def _on_throttle(self) -> None:
+        """Mark this run as throttled so subsequent requests slow down."""
+        if not self._throttled:
+            logger.warning(
+                "[%s-deep-us] 429 observed — switching to slow rate (%.2fs/req) "
+                "for the rest of this run",
+                self.PLATFORM, self.REQUEST_DELAY_AFTER_THROTTLE,
+            )
+            self._throttled = True
 
     # ----- Auth -----
 
@@ -408,12 +439,16 @@ class ChartmetricDeepUSScraper(BaseScraper):
             raise AuthenticationError("Must authenticate first")
         url = f"{self.API_BASE}/api/track/{entity_id}"
         async with self._semaphore:
-            await asyncio.sleep(self.REQUEST_DELAY)
+            await asyncio.sleep(self._current_delay())
             try:
                 resp = await self._rate_limited_request(
                     "GET", url, headers={"Authorization": f"Bearer {self.access_token}"},
                 )
                 return resp.json()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    self._on_throttle()
+                return {"error": str(exc), "entity_id": entity_id}
             except httpx.HTTPError as exc:
                 return {"error": str(exc), "entity_id": entity_id}
 
@@ -559,15 +594,33 @@ class ChartmetricDeepUSScraper(BaseScraper):
         params.update(ep.params or {})
 
         async with self._semaphore:
-            await asyncio.sleep(self.REQUEST_DELAY)
+            await asyncio.sleep(self._current_delay())
             try:
                 resp = await self._rate_limited_request(
                     "GET", url,
                     headers={"Authorization": f"Bearer {self.access_token}"},
                     params=params,
                 )
+            except RateLimitError:
+                # Exhausted all retries against the Chartmetric token
+                # bucket on this endpoint. Trip adaptive throttle for
+                # the rest of the run and skip this endpoint instead of
+                # killing the whole scraper run (which is what happened
+                # on 2026-04-14 — L004 manifesting).
+                self._on_throttle()
+                logger.warning(
+                    "[%s-deep-us] rate-limit exhausted on %s (genre=%s) — "
+                    "skipping, continuing run at slow rate",
+                    self.PLATFORM, ep.chart_type, genre_value,
+                )
+                return []
             except httpx.HTTPStatusError as exc:
                 code = exc.response.status_code
+                if code == 429:
+                    # Token bucket empty. Trip the adaptive throttle so
+                    # the rest of this run runs at REQUEST_DELAY_AFTER_THROTTLE.
+                    self._on_throttle()
+                    return []
                 if code in (401, 403, 404):
                     if ep.confirmed:
                         logger.warning("[%s-deep-us] %s %s on confirmed endpoint %s genre=%s",

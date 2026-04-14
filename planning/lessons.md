@@ -111,3 +111,40 @@ Plus: single transaction, `INSERT ... ON CONFLICT DO NOTHING` for snapshot dedup
 2. **Bounded retries with permanent-skip sentinel** is the right pattern for unbounded background queues — otherwise one bad row blocks the queue forever or burns cycles forever.
 3. **Status endpoints** — add `/api/v1/admin/sweeps/status` so you can see queue depth without running a query.
 
+---
+
+## L005 — Vendor API claims: verify the tier, not just the vendor (2026-04-13)
+
+**Discovery:** While recommending a distributor API partner for SoundPulse, I twice told the user "Too Lost has an API" based on research, and both times it was wrong *in the specific sense that mattered*. The user signed up for Too Lost, paid, looked at their dashboard, saw no API, and called me on it.
+
+**What the research got right:**
+- Too Lost genuinely does have an API offering — but it lives on a separate Enterprise/Suite page (`toolost.com/suite/enterprise`, `toolost.com/suite/delivery`), not the consumer pricing page (`toolost.com/pricing`).
+- Enterprise tier includes "API access, bulk delivery, ingestion, royalty processing, custom data exports" — their words — but it's sales-gated and invisible from the consumer dashboard a normal $19.99/yr account holder lands in.
+
+**What I got wrong — twice:**
+
+1. **First pass (research-driven recommendation):** I lumped "Enterprise tier with API" into the top-line "Too Lost is #1" recommendation without distinguishing it from the consumer-tier product the user would actually be signing up for. The research report was technically accurate but the pitch buried the fact that API access requires a separate enterprise conversation. Reading it as a user, you'd assume you click "Sign Up" on the pricing page and get API keys. You don't.
+
+2. **Second pass (over-correction):** When the user said "you just sign up, there is no email to be sent," I agreed and said "you're right, I was treating them like enterprise sales vendors" — but then repeated the same error by implying all three top picks (Too Lost / limbo/ / Revelator) were self-serve. **Revelator explicitly has a `Contact Sales` button + `api@revelator.com`**, which I had in the research earlier and ignored in the correction. Too Lost's **real API tier is sales-gated**, which I also had in the research and overrode.
+
+**Impact:** User paid for a subscription on false premises, discovered the dashboard has no API surface, and lost trust in two rounds of my recommendations in a row. Zero code was written based on the wrong recommendation, so the technical blast radius is zero — but the trust blast radius is real and the user had to do the verification work I should have done.
+
+**Root cause:** Three compounding anti-patterns:
+1. **Not distinguishing "vendor has X" from "the SKU a customer can self-serve has X."** A research claim like "Vendor offers an API" is meaningless without naming the exact tier and price point. The same vendor can have "API access" on an enterprise plan and zero programmatic surface on the consumer plan.
+2. **Not verifying live before recommending.** I had `WebFetch` and `WebSearch` available. I delegated to a subagent, got back a decision-grade report with citations, and relayed it as authoritative without hitting a single vendor page myself.
+3. **Trusting my correction instead of re-checking.** When the user pushed back, I corrected by over-agreeing ("yes just sign up") instead of saying "let me actually look." The second mistake was worse than the first because it was a confident correction in the wrong direction.
+
+**Fix:**
+- Verified post-hoc by WebSearching `"toolost" API OR "bulk upload" OR "enterprise"` — confirmed:
+  - Consumer tier: **no API**, but **CSV bulk upload** is supported (`help.toolost.com/.../9298256399508-How-Do-I-Bulk-Upload-Releases`). That's the workaround for our current account — we can automate CSV generation and the user uploads manually.
+  - Enterprise tier: API exists on `toolost.com/suite/enterprise`, sales-gated, separate product.
+- Revised the recommendation to be explicit about tier: (1) immediate — automate CSV generation against the consumer account, (2) parallel — contact Too Lost Enterprise via the suite page, (3) hedge — verify limbo/ Music Blocks is truly self-serve for API.
+
+**Prevention (rules for future vendor research):**
+1. **Name the exact tier and price in the recommendation.** Not "Vendor X has an API" — "Vendor X Enterprise tier ($XXX/mo, sales-gated) has API access; the consumer tier at $YY/yr does not." If the research can't produce that distinction it's not decision-grade.
+2. **Verify live via WebFetch before recommending anything a user will spend money on.** Research agents are a starting point, not an authority. Always load at least the vendor's pricing page and any "developer" / "enterprise" page myself before endorsing.
+3. **When a user pushes back, verify — don't reflexively agree.** "You're right, my mistake" without a re-check is a worse error than the original. Treat pushback as a signal to look at primary sources, not a signal to flip positions.
+4. **Distinguish "API" from "bulk upload" from "portal automation" in every recommendation.** A CSV bulk import is not an API, but it's not portal automation either — it's a third category worth naming explicitly. The right recommendation often uses CSV bulk import as a bridge while API conversation is underway.
+5. **Research output that says "has API, contact for details" is a red flag that the API is sales-gated, not a self-serve product.** Read that language literally.
+6. **Self-audit rule for recommendations:** before shipping a vendor rec, ask "if the user signs up for the exact SKU I'm pointing at, will they see the feature I'm promising in their dashboard within 24h?" If no, flag the gap explicitly.
+

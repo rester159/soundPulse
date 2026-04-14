@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -201,21 +201,60 @@ async def init_scheduler(database_url: str):
 
         await db.commit()
 
-    # Load configs from DB and schedule enabled scrapers
+    # Load configs from DB and schedule enabled scrapers.
+    #
+    # L004/L005 follow-up (2026-04-14): APScheduler's default behavior is
+    # "fire N hours from NOW." That means on every container restart the
+    # clock resets and long-interval jobs (24h+) never reach their first
+    # fire before the next restart. Diagnosis: chartmetric_artist_stats,
+    # chartmetric_artist_tracks, chartmetric_playlist_crawler all hadn't
+    # run in 2+ days despite being scheduled.
+    #
+    # Fix: compute `next_run_time` explicitly from `last_run_at + interval_hours`.
+    # If that's in the past (missed fire), run soon (NOW + 60s stagger).
+    # Also: coalesce=True collapses multiple missed fires into one,
+    # misfire_grace_time=3600 gives APScheduler a 1-hour window to
+    # reconcile missed runs on restart.
+    now = datetime.now(timezone.utc)
     async with _session_factory() as db:
         result = await db.execute(select(ScraperConfig).where(ScraperConfig.enabled == True))
         configs = result.scalars().all()
 
-        for config in configs:
+        for idx, config in enumerate(configs):
+            # Stagger missed-fire startup by 30s per job so we don't
+            # hammer the Chartmetric API with 10 scrapers all firing
+            # simultaneously on boot.
+            if config.last_run_at:
+                last_run = config.last_run_at
+                if last_run.tzinfo is None:
+                    last_run = last_run.replace(tzinfo=timezone.utc)
+                scheduled = last_run + timedelta(hours=config.interval_hours)
+                if scheduled <= now:
+                    # Missed at least one fire while the container was
+                    # restarted — run soon with a stagger.
+                    next_run = now + timedelta(seconds=60 + idx * 30)
+                else:
+                    next_run = scheduled
+            else:
+                # Never run before — fire shortly after startup.
+                next_run = now + timedelta(seconds=60 + idx * 30)
+
             _scheduler.add_job(
                 _run_scraper_job,
                 trigger=IntervalTrigger(hours=config.interval_hours),
                 id=f"scraper_{config.id}",
                 args=[config.id],
+                next_run_time=next_run,
+                coalesce=True,
+                misfire_grace_time=3600,
+                max_instances=1,
                 replace_existing=True,
                 name=f"{config.id} scraper",
             )
-            logger.info("Scheduled scraper '%s' every %.1f hours", config.id, config.interval_hours)
+            logger.info(
+                "Scheduled scraper '%s' every %.1f hours (next run: %s)",
+                config.id, config.interval_hours, next_run.isoformat(),
+            )
 
     # Deferred sweeps — run every 15 minutes regardless of scraper config.
     # These process the queues created by the bulk ingest endpoint
