@@ -6459,8 +6459,10 @@ async def get_instrumental_analysis(
 ):
     """Return cached librosa analysis for an instrumental. Used by the
     stem-extractor worker to skip re-analysis on repeated use, and by
-    the Songs UI nudge control to show the current detected entry
-    point. Returns empty fields if never analyzed."""
+    the Songs UI vocal-entry studio to render the instrumental waveform
+    + current detected entry point. Returns empty analysis fields if
+    never analyzed, but always returns public_url_path + title +
+    duration_seconds so the player has a source."""
     import uuid as _uuid
     from api.models.instrumental import Instrumental
     try:
@@ -6472,8 +6474,12 @@ async def get_instrumental_analysis(
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail="not found")
+    ext = INSTRUMENTAL_EXT_FOR_CTYPE.get(row.content_type, "mp3")
     return {
         "instrumental_id": str(iid),
+        "title": row.title,
+        "public_url_path": f"/api/v1/instrumentals/public/{row.id}.{ext}",
+        "duration_seconds": row.duration_seconds,
         "vocal_entry_seconds": row.vocal_entry_seconds,
         "vocal_entry_source": row.vocal_entry_source,
         "analysis_json": row.analysis_json,

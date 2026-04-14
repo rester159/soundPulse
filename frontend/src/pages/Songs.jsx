@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   Disc3, Loader2, ChevronDown, ChevronUp, CheckCircle2, Music2,
   Clock, FileAudio, AlertCircle, PlayCircle, Layers, Mic2,
-  Crosshair, Minus, Plus, Save,
+  Crosshair, Save, Play, Square,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -144,14 +144,15 @@ function StemAwareAudioPlayer({ song, masterUrl, masterMeta }) {
         </div>
       )}
 
-      {/* Nudge vocal entry — CEO correction for the auto-detected
-          verse-1 start point on the source instrumental. Only shown
-          once the first full stem extraction has completed (the
-          remix_only path requires a cached vocals_only stem). */}
-      {job?.source_instrumental_id && stems.some(s => s.stem_type === 'vocals_only') && (
-        <VocalEntryNudge
+      {/* Vocal entry studio — two-track alignment UI. Only shown once
+          the first full stem extraction has completed, because the
+          vocals_only stem is what we preview against the instrumental
+          and the remix_only path requires it to be cached. */}
+      {job?.source_instrumental_id && stems.find(s => s.stem_type === 'vocals_only') && (
+        <VocalEntryStudio
           instrumentalId={job.source_instrumental_id}
           songId={song.song_id}
+          vocalsStem={stems.find(s => s.stem_type === 'vocals_only')}
           jobStatus={job.status}
         />
       )}
@@ -160,95 +161,335 @@ function StemAwareAudioPlayer({ song, masterUrl, masterMeta }) {
 }
 
 
-// Nudge control for the instrumental's vocal entry point. Shown when
-// a song has a completed stem job and a source instrumental. The
-// value lives on the instrumentals row (so it's reused across every
-// song that uses this beat); the "save" action here writes the new
-// value + enqueues a remix_only job for this specific song so the CEO
-// can hear the corrected mix without waiting 15 min for Demucs again.
-function VocalEntryNudge({ instrumentalId, songId, jobStatus }) {
+// Two-track vocal-entry studio. The CEO gets an instrumental lane with
+// start+end pins (to scope an audition region), a voice lane with a
+// single draggable entry pin (mouse drag OR arrow-key ±0.1s), and
+// three playback modes: instrumental region only, voice alone, and
+// "play together" which overlays both at the current alignment so
+// the CEO can hear the mix before committing. Save writes the new
+// value to instrumentals.vocal_entry_seconds and enqueues a
+// remix_only stem job that reuses the cached vocals_only stem.
+//
+// Positions are stored in seconds; pin px positions are derived from
+// the instrumental duration and the live lane width on each render.
+// Keyboard nudging is only active while the green voice block is
+// focused (tabIndex=0) — click the block to capture the keyboard.
+function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   const { data: analysisData } = useInstrumentalAnalysis(instrumentalId)
   const analysis = analysisData?.data
   const nudge = useNudgeVocalEntry()
-  const [localValue, setLocalValue] = useState(null)
 
-  // Initialize local state when server value arrives / changes
-  const serverValue = analysis?.vocal_entry_seconds
-  const source = analysis?.vocal_entry_source
-  const current = localValue !== null ? localValue : (serverValue ?? 0)
-  const dirty = localValue !== null && localValue !== serverValue
+  const instrUrl = resolveAudioUrl(analysis?.public_url_path)
+  const instrDur = Number(analysis?.duration_seconds) || 0
+  const voiceUrl = resolveAudioUrl(vocalsStem?.stream_url)
+  const voiceDur = Number(vocalsStem?.duration_seconds) || 0
+  const serverVoiceEntry = Number(analysis?.vocal_entry_seconds) || 0
 
-  const adjust = (delta) => {
-    setLocalValue(Math.max(0, Number((current + delta).toFixed(3))))
+  const [instrStart, setInstrStart] = useState(0)
+  const [instrEnd, setInstrEnd] = useState(0)
+  const [voiceEntry, setVoiceEntry] = useState(0)
+  // Bump this counter any time the user ENDS an interaction
+  // (pointerup on a drag, or key press). The useEffect watches it
+  // and (re)starts the preview playback — we don't auto-play on
+  // every render, only on user-intent boundaries.
+  const [playKey, setPlayKey] = useState(0)
+
+  // Seed state when the analysis first arrives / the instrumental changes
+  useEffect(() => {
+    if (analysis?.duration_seconds) {
+      setInstrStart(0)
+      setInstrEnd(Number(analysis.duration_seconds))
+      setVoiceEntry(Number(analysis.vocal_entry_seconds) || 0)
+    }
+  }, [analysis?.instrumental_id, analysis?.duration_seconds])
+
+  const instrRef = useRef(null)
+  const voiceRef = useRef(null)
+  const laneRef = useRef(null)
+  const playCtlRef = useRef({ voiceStartTimer: null, stopTimer: null })
+
+  const busy = nudge.isPending || jobStatus === 'in_progress' || jobStatus === 'pending'
+  const dirty = Math.abs(voiceEntry - serverVoiceEntry) > 0.0005
+
+  function stopAll() {
+    const p = playCtlRef.current
+    if (p.voiceStartTimer) { clearTimeout(p.voiceStartTimer); p.voiceStartTimer = null }
+    if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null }
+    if (instrRef.current) { instrRef.current.pause() }
+    if (voiceRef.current) { voiceRef.current.pause() }
   }
 
-  const save = () => {
+  function playInstrRegion() {
+    stopAll()
+    const ia = instrRef.current
+    if (!ia || !instrUrl) return
+    try { ia.currentTime = Math.max(0, Math.min(instrDur, instrStart)) } catch {}
+    ia.play().catch(() => {})
+    const durationMs = Math.max(0, (instrEnd - instrStart) * 1000)
+    if (durationMs > 0) {
+      playCtlRef.current.stopTimer = setTimeout(() => {
+        if (instrRef.current) instrRef.current.pause()
+      }, durationMs)
+    }
+  }
+
+  function playVoiceAlone() {
+    stopAll()
+    const va = voiceRef.current
+    if (!va || !voiceUrl) return
+    try { va.currentTime = 0 } catch {}
+    va.play().catch(() => {})
+  }
+
+  function playTogether() {
+    stopAll()
+    const ia = instrRef.current
+    const va = voiceRef.current
+    if (!ia || !va || !instrUrl || !voiceUrl) return
+    // Start the instrumental at instrStart. When the playhead reaches
+    // voiceEntry, start the voice from its own t=0. If voiceEntry <
+    // instrStart we clamp the delay to 0 and seek the voice forward
+    // to cover the missing head — that way the two stay aligned even
+    // when the user has zoomed the instrumental region past the
+    // intended vocal entry.
+    try { ia.currentTime = Math.max(0, Math.min(instrDur, instrStart)) } catch {}
+    ia.play().catch(() => {})
+
+    const delaySec = voiceEntry - instrStart
+    if (delaySec >= 0) {
+      try { va.currentTime = 0 } catch {}
+      playCtlRef.current.voiceStartTimer = setTimeout(() => {
+        if (voiceRef.current) voiceRef.current.play().catch(() => {})
+      }, delaySec * 1000)
+    } else {
+      try { va.currentTime = -delaySec } catch {}
+      va.play().catch(() => {})
+    }
+
+    const durationMs = Math.max(0, (instrEnd - instrStart) * 1000)
+    if (durationMs > 0) {
+      playCtlRef.current.stopTimer = setTimeout(() => {
+        if (instrRef.current) instrRef.current.pause()
+        if (voiceRef.current) voiceRef.current.pause()
+      }, durationMs)
+    }
+  }
+
+  // Auto-preview the instrumental region whenever the user has just
+  // finished a drag/key action. Skip the initial seed render.
+  const initRef = useRef(false)
+  useEffect(() => {
+    if (!initRef.current) { initRef.current = true; return }
+    playInstrRegion()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playKey])
+
+  // Clean up audio on unmount
+  useEffect(() => () => stopAll(), [])
+
+  // --- Drag handling -------------------------------------------------
+  // We use window-level pointermove/pointerup so the drag continues
+  // even when the cursor leaves the lane rect. On pointerup we bump
+  // playKey which triggers the preview auto-play effect above.
+  function startDrag(pinKind, startEvent) {
+    if (busy) return
+    startEvent.preventDefault()
+    startEvent.stopPropagation()
+    const laneEl = laneRef.current
+    if (!laneEl || instrDur <= 0) return
+    const rect = laneEl.getBoundingClientRect()
+
+    function onMove(e) {
+      const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+      const t = (x / rect.width) * instrDur
+      if (pinKind === 'start') {
+        setInstrStart(prev => Math.min(Math.max(0, t), Math.max(0, instrEnd - 0.5)))
+      } else if (pinKind === 'end') {
+        setInstrEnd(prev => Math.max(Math.min(instrDur, t), instrStart + 0.5))
+      } else if (pinKind === 'voice') {
+        setVoiceEntry(Math.max(0, Math.min(instrDur, Number(t.toFixed(3)))))
+      }
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      setPlayKey(k => k + 1)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  function onVoiceKey(e) {
+    if (busy) return
+    let step = 0
+    if (e.key === 'ArrowLeft')  step = -0.1
+    else if (e.key === 'ArrowRight') step = +0.1
+    else if (e.key === 'ArrowDown')  step = -1.0
+    else if (e.key === 'ArrowUp')    step = +1.0
+    else return
+    e.preventDefault()
+    setVoiceEntry(v => {
+      const next = Math.max(0, Math.min(instrDur, Number((v + step).toFixed(3))))
+      return next
+    })
+    setPlayKey(k => k + 1)
+  }
+
+  function save() {
     if (!dirty) return
-    nudge.mutate(
-      { instrumentalId, vocalEntrySeconds: current, songId },
-      { onSuccess: () => setLocalValue(null) },
+    nudge.mutate({ instrumentalId, vocalEntrySeconds: voiceEntry, songId })
+  }
+
+  // --- Rendering -----------------------------------------------------
+  if (!analysis) {
+    return (
+      <div className="mt-2 p-2 text-[10px] text-zinc-600">
+        <Loader2 size={10} className="inline animate-spin mr-1" /> loading vocal-entry analysis…
+      </div>
+    )
+  }
+  if (!instrDur) {
+    return (
+      <div className="mt-2 p-2 text-[10px] text-amber-400 border border-amber-500/30 rounded">
+        This instrumental has no duration recorded yet — run the stem extractor once
+        to populate it. (Or upload a fresh copy and re-link.)
+      </div>
     )
   }
 
-  const busy = nudge.isPending || jobStatus === 'in_progress' || jobStatus === 'pending'
+  // Helper: seconds → percentage of full lane width
+  const pct = (s) => `${(Math.max(0, Math.min(instrDur, s)) / instrDur) * 100}%`
+  const regionLeftPct = pct(instrStart)
+  const regionWidthPct = `${((Math.max(0, instrEnd - instrStart)) / instrDur) * 100}%`
+  const voiceLeftPct = pct(voiceEntry)
+  const voiceRightPct = pct(Math.min(instrDur, voiceEntry + voiceDur))
+  const voiceWidthPct = `${Math.max(0.5, ((Math.min(instrDur, voiceEntry + voiceDur) - voiceEntry)) / instrDur * 100)}%`
 
   return (
-    <div className="mt-2 p-2 rounded border border-zinc-800 bg-zinc-950/60 text-[10px]">
-      <div className="flex items-center gap-1.5 text-zinc-400 mb-1.5">
+    <div className="mt-2 p-3 rounded border border-zinc-800 bg-zinc-950/60 text-[10px]">
+      <div className="flex items-center gap-1.5 text-zinc-400 mb-2">
         <Crosshair size={10} className="text-violet-300" />
-        <span className="uppercase tracking-wider">Vocal entry on instrumental</span>
-        {source && (
+        <span className="uppercase tracking-wider">Vocal entry studio</span>
+        {analysis.title && (
+          <span className="text-zinc-600 truncate">· {analysis.title}</span>
+        )}
+        {analysis.vocal_entry_source && (
           <span className={`ml-auto px-1.5 py-0.5 rounded text-[9px] ${
-            source === 'manual' ? 'bg-violet-500/20 text-violet-300' : 'bg-zinc-800 text-zinc-500'
+            analysis.vocal_entry_source === 'manual'
+              ? 'bg-violet-500/20 text-violet-300'
+              : 'bg-zinc-800 text-zinc-500'
           }`}>
-            {source === 'manual' ? 'CEO-set' : 'auto-detected'}
+            {analysis.vocal_entry_source === 'manual' ? 'CEO-set' : 'auto'}
           </span>
         )}
       </div>
+
+      {/* Instrumental lane */}
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-zinc-500">Instrumental · {instrDur.toFixed(2)}s</span>
+        <span className="text-zinc-600 font-mono">
+          region {instrStart.toFixed(2)}→{instrEnd.toFixed(2)}s
+        </span>
+      </div>
+      <div
+        ref={laneRef}
+        className="relative h-10 bg-zinc-900 border border-zinc-800 rounded mb-3 select-none"
+      >
+        {/* Region highlight (between pins) */}
+        <div
+          className="absolute top-0 bottom-0 bg-violet-500/15 border-x border-violet-500/30"
+          style={{ left: regionLeftPct, width: regionWidthPct }}
+        />
+        {/* Start pin */}
+        <div
+          onPointerDown={(e) => startDrag('start', e)}
+          className="absolute top-0 bottom-0 flex items-start cursor-ew-resize touch-none"
+          style={{ left: regionLeftPct, transform: 'translateX(-50%)', width: '14px' }}
+          title={`start ${instrStart.toFixed(3)}s`}
+        >
+          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-violet-400" />
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-violet-400 rounded-sm" />
+          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[9px] text-violet-300 font-mono whitespace-nowrap">
+            {instrStart.toFixed(2)}
+          </div>
+        </div>
+        {/* End pin */}
+        <div
+          onPointerDown={(e) => startDrag('end', e)}
+          className="absolute top-0 bottom-0 flex items-start cursor-ew-resize touch-none"
+          style={{ left: pct(instrEnd), transform: 'translateX(-50%)', width: '14px' }}
+          title={`end ${instrEnd.toFixed(3)}s`}
+        >
+          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-violet-400" />
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-violet-400 rounded-sm" />
+          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[9px] text-violet-300 font-mono whitespace-nowrap">
+            {instrEnd.toFixed(2)}
+          </div>
+        </div>
+      </div>
+
+      {/* Voice lane */}
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-zinc-500">
+          Voice · entry at <span className="font-mono text-emerald-300">{voiceEntry.toFixed(3)}s</span>
+        </span>
+        <span className="text-zinc-600 text-[9px]">click block · drag · ←→ ±0.1s · ↑↓ ±1s</span>
+      </div>
+      <div className="relative h-10 bg-zinc-900 border border-zinc-800 rounded mb-3 select-none">
+        {/* Voice block positioned at voiceEntry, width = voiceDur */}
+        <div
+          tabIndex={0}
+          onPointerDown={(e) => startDrag('voice', e)}
+          onKeyDown={onVoiceKey}
+          className="absolute top-0 bottom-0 bg-emerald-500/25 border border-emerald-400 rounded-sm cursor-ew-resize touch-none focus:outline-none focus:ring-2 focus:ring-emerald-300"
+          style={{ left: voiceLeftPct, width: voiceWidthPct }}
+          title={`voice ${voiceEntry.toFixed(3)}s → ${Math.min(instrDur, voiceEntry + voiceDur).toFixed(3)}s`}
+        >
+          <div className="absolute top-0 left-0 w-0.5 h-full bg-emerald-300" />
+          <div className="absolute top-0 left-0 w-2 h-2 bg-emerald-300 rounded-sm" />
+          <div className="absolute bottom-0 left-1 text-[9px] text-emerald-200 font-mono pointer-events-none">
+            {voiceEntry.toFixed(2)}
+          </div>
+        </div>
+      </div>
+
+      {/* Playback + save controls */}
       <div className="flex items-center gap-1.5">
         <button
-          onClick={() => adjust(-1)}
-          disabled={busy}
-          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
-          title="−1 second"
-        ><Minus size={10} /> 1s</button>
+          onClick={playInstrRegion}
+          disabled={!instrUrl || busy}
+          className="px-2 py-1 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-200 flex items-center gap-1 disabled:opacity-40"
+          title="Play instrumental from start pin to end pin"
+        >
+          <Play size={10} /> instr
+        </button>
         <button
-          onClick={() => adjust(-0.5)}
-          disabled={busy}
-          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
-          title="−500 ms"
-        ><Minus size={10} /> 0.5s</button>
+          onClick={playVoiceAlone}
+          disabled={!voiceUrl || busy}
+          className="px-2 py-1 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-200 flex items-center gap-1 disabled:opacity-40"
+          title="Play the vocals stem from its own t=0"
+        >
+          <Play size={10} /> voice
+        </button>
         <button
-          onClick={() => adjust(-0.1)}
-          disabled={busy}
-          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
-          title="−100 ms"
-        ><Minus size={10} /> 0.1s</button>
-        <div className="px-2 py-0.5 mx-1 rounded border border-zinc-800 bg-zinc-900 min-w-[60px] text-center font-mono">
-          {current.toFixed(3)}s
-        </div>
+          onClick={playTogether}
+          disabled={!instrUrl || !voiceUrl || busy}
+          className="px-2 py-1 rounded border border-violet-500/60 bg-violet-500/10 hover:bg-violet-500/25 text-violet-100 flex items-center gap-1 disabled:opacity-40"
+          title="Play instrumental region + voice aligned at the current entry point"
+        >
+          <Play size={10} /> together
+        </button>
         <button
-          onClick={() => adjust(0.1)}
-          disabled={busy}
-          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
-          title="+100 ms"
-        ><Plus size={10} /> 0.1s</button>
-        <button
-          onClick={() => adjust(0.5)}
-          disabled={busy}
-          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
-          title="+500 ms"
-        ><Plus size={10} /> 0.5s</button>
-        <button
-          onClick={() => adjust(1)}
-          disabled={busy}
-          className="px-1.5 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 text-zinc-400 disabled:opacity-40"
-          title="+1 second"
-        ><Plus size={10} /> 1s</button>
+          onClick={stopAll}
+          className="px-2 py-1 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-400 flex items-center gap-1"
+          title="Stop playback"
+        >
+          <Square size={10} />
+        </button>
         <button
           onClick={save}
           disabled={!dirty || busy}
-          className={`ml-2 px-2 py-0.5 rounded border flex items-center gap-1 ${
+          className={`ml-auto px-2 py-1 rounded border flex items-center gap-1 ${
             dirty && !busy
               ? 'bg-violet-500/20 border-violet-500 text-violet-200 hover:bg-violet-500/30'
               : 'border-zinc-800 text-zinc-600 cursor-not-allowed'
@@ -259,10 +500,15 @@ function VocalEntryNudge({ instrumentalId, songId, jobStatus }) {
         </button>
       </div>
       <div className="mt-1.5 text-[9px] text-zinc-500">
-        Nudge where verse 1 starts on the instrumental, then Save & Remix re-runs only
-        the ffmpeg mix (~10 s) using the cached vocals stem. Value is saved to the
-        instrumental so all future songs using this beat inherit the correction.
+        Drag the instrumental pins to scope an audition region. Click the green
+        voice block to focus it, then drag or use arrow keys (±0.1s / ±1s) to set
+        the vocal entry point. Save &amp; Remix re-mixes in ~10 s using the cached
+        vocals stem — the value is persisted on the instrumental so every song using
+        this beat inherits the correction.
       </div>
+
+      <audio ref={instrRef} src={instrUrl || undefined} preload="auto" />
+      <audio ref={voiceRef} src={voiceUrl || undefined} preload="auto" />
     </div>
   )
 }
