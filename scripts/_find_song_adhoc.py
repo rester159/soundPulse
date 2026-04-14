@@ -60,7 +60,8 @@ def main() -> int:
         total_seen += len(items)
         for s in items:
             sid = str(s.get("song_id") or s.get("id") or "")
-            if needle in sid:
+            title = str(s.get("title") or "")
+            if needle in sid or needle.lower() in title.lower():
                 _print_song(s, base, headers)
                 return 0
         offset += page_size

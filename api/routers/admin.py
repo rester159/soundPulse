@@ -6475,11 +6475,32 @@ async def get_instrumental_analysis(
     if row is None:
         raise HTTPException(404, detail="not found")
     ext = INSTRUMENTAL_EXT_FOR_CTYPE.get(row.content_type, "mp3")
+    # Fallback: early versions of the stem-extractor's
+    # _analyze_instrumental_full stashed detected fields inside
+    # analysis_json without promoting them to the top-level columns.
+    # The studio UI needs a numeric duration to draw its time axis,
+    # so surface whichever source has one.
+    aj = row.analysis_json if isinstance(row.analysis_json, dict) else {}
+    duration_seconds = row.duration_seconds
+    if duration_seconds is None:
+        try:
+            duration_seconds = float(aj.get("detected_duration_seconds"))
+        except (TypeError, ValueError):
+            duration_seconds = None
+    tempo_bpm = row.tempo_bpm
+    if tempo_bpm is None:
+        try:
+            tempo_bpm = float(aj.get("detected_bpm"))
+        except (TypeError, ValueError):
+            tempo_bpm = None
+    key_hint = row.key_hint or aj.get("detected_key_pitch_class")
     return {
         "instrumental_id": str(iid),
         "title": row.title,
         "public_url_path": f"/api/v1/instrumentals/public/{row.id}.{ext}",
-        "duration_seconds": row.duration_seconds,
+        "duration_seconds": duration_seconds,
+        "tempo_bpm": tempo_bpm,
+        "key_hint": key_hint,
         "vocal_entry_seconds": row.vocal_entry_seconds,
         "vocal_entry_source": row.vocal_entry_source,
         "analysis_json": row.analysis_json,
@@ -6519,6 +6540,27 @@ async def post_instrumental_analysis(
 
     row.analysis_json = body.get("analysis_json") or row.analysis_json
     row.analyzed_at = _dt.now(_tz.utc)
+
+    # Promote detected scalar features from the analysis blob into
+    # the top-level instrumentals columns so downstream consumers
+    # (Songs UI, SongLab picker, blueprint engine) can read
+    # duration/tempo/key without rehydrating the blob. Existing non-
+    # null values are preserved so a manual edit to tempo_bpm (etc.)
+    # isn't clobbered by a later auto-detect.
+    aj = body.get("analysis_json") if isinstance(body.get("analysis_json"), dict) else None
+    if aj:
+        if row.duration_seconds is None and aj.get("detected_duration_seconds") is not None:
+            try:
+                row.duration_seconds = float(aj["detected_duration_seconds"])
+            except (TypeError, ValueError):
+                pass
+        if row.tempo_bpm is None and aj.get("detected_bpm") is not None:
+            try:
+                row.tempo_bpm = float(aj["detected_bpm"])
+            except (TypeError, ValueError):
+                pass
+        if row.key_hint is None and aj.get("detected_key_pitch_class"):
+            row.key_hint = str(aj["detected_key_pitch_class"])
 
     # Only overwrite the vocal entry if the existing value is not
     # manual (CEO correction always wins over auto-detect).
