@@ -621,8 +621,19 @@ def _align_vocals_to_instrumental(
         t_voc_suno = None
         alignment_note["suno_entry_error"] = str(e)[:200]
 
+    # If silero/pyin couldn't pin the Suno vocal entry, don't abort —
+    # assume the singer starts at t=0 of the Demucs stem. That's the
+    # conservative default for a Suno output whose vocal-forward lead
+    # is almost always at the head of the file, and — more importantly
+    # — it preserves the CEO's manual nudge downstream. Previously
+    # this path returned `vocal_path` unchanged, which silently
+    # ignored vocal_entry_seconds from the instrumentals row and made
+    # the vocal appear to "snap to zero" in the final mix regardless
+    # of what the CEO set.
     if t_voc_suno is None:
-        return vocal_path
+        t_voc_suno = 0.0
+        alignment_note["suno_entry_fallback"] = "assumed_zero"
+        log.info("suno vocal entry detection returned None — assuming 0.0s")
 
     # (b) Intended vocal entry on the instrumental. Prefer the
     # CEO-set / cached value over re-running librosa every time.
