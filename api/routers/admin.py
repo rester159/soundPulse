@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -7710,14 +7710,19 @@ async def list_song_stems(
 async def stream_song_stem(
     song_id: str,
     stem_type_with_ext: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Stream a single stem by (song_id, stem_type). Open endpoint (no
     X-API-Key) so HTML5 <audio> can load it without custom headers —
-    same posture as /admin/music/audio/{provider}/{task_id}.mp3."""
+    same posture as /admin/music/audio/{provider}/{task_id}.mp3.
+
+    Supports HTTP Range requests so the browser can seek mid-file.
+    Without this the VocalEntryStudio's seek-and-play would silently
+    fall back to t=0 until the whole stem had been downloaded."""
     import uuid as _uuid
-    from fastapi.responses import Response
     from sqlalchemy import text as _text
+    from api.utils.audio_range import audio_range_response
     try:
         sid = _uuid.UUID(song_id)
     except ValueError:
@@ -7742,14 +7747,7 @@ async def stream_song_stem(
     if row is None:
         raise HTTPException(404, detail="stem not found")
     audio_bytes = bytes(row[1])
-    return Response(
-        content=audio_bytes,
-        media_type=row[0] or "audio/mpeg",
-        headers={
-            "Cache-Control": "public, max-age=3600",
-            "Content-Length": str(len(audio_bytes)),
-        },
-    )
+    return audio_range_response(audio_bytes, row[0] or "audio/mpeg", request)
 
 
 async def _enqueue_stem_job_if_needed(

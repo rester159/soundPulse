@@ -62,6 +62,7 @@ def _check_public_rate(client_ip: str) -> None:
 @router.get("/api/v1/instrumentals/public/{path_id_with_ext}")
 async def stream_instrumental_public(
     path_id_with_ext: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -73,8 +74,11 @@ async def stream_instrumental_public(
     Returns the raw audio bytes with the original content type. Returns
     404 if the row doesn't exist, isn't active, or the extension doesn't
     match the stored content type (minor defense against URL tampering).
+
+    Supports HTTP Range requests so HTML5 <audio> can seek mid-file.
     """
     import uuid as _uuid
+    from api.utils.audio_range import audio_range_response
     # Strip extension — we accept mp3 | wav | flac | ogg | aac | m4a
     stem = path_id_with_ext
     for ext in ("mp3", "wav", "flac", "ogg", "aac", "m4a"):
@@ -103,14 +107,7 @@ async def stream_instrumental_public(
 
     content_type = row[0] or "audio/mpeg"
     audio_bytes = bytes(row[1])
-    return Response(
-        content=audio_bytes,
-        media_type=content_type,
-        headers={
-            "Cache-Control": "public, max-age=3600",
-            "Content-Length": str(len(audio_bytes)),
-        },
-    )
+    return audio_range_response(audio_bytes, content_type, request)
 
 
 # --------------------------------------------------------------------
