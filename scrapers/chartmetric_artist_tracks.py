@@ -1,28 +1,35 @@
 """
-Chartmetric per-artist tracks enrichment — Phase 2 Lever 2.
+Chartmetric per-artist tracks enrichment — Phase 2 Lever 2
+(Stage 2C deep-catalog expansion, 2026-04-14).
 
-For every artist in our DB that has a chartmetric_id, call
-`/api/artist/{id}/tracks?limit=100` and bulk-POST the results.
-Harvests deep catalog tracks that never appear on any chart — the
-artist's full discography as Chartmetric knows it.
+For every artist in our DB that has a chartmetric_id, paginate
+`/api/artist/{id}/tracks?limit=500&offset=N` and bulk-POST the
+results. Harvests the full deep catalog — previously this scraper
+only grabbed the top 100 tracks per artist, so artists with large
+discographies (Drake, Taylor Swift, etc.) had most of their catalog
+missing from our DB.
 
 Discovery → Crawl → Ingest flow:
   1. GET /api/v1/admin/artists/with-chartmetric-id?limit=500&offset=N
      (paginated, hits our own API which reads the artists table).
-  2. For each returned artist, call
-     /api/artist/{chartmetric_id}/tracks?limit=100 on Chartmetric.
+  2. For each returned artist, paginate
+     /api/artist/{chartmetric_id}/tracks until the response is short
+     or we hit MAX_TRACKS_PER_ARTIST (2,000). Typical artists only
+     need 1-2 pages; deep catalogs may use 4.
   3. Parse tracks into TrendingIngest-shaped records with
-     signals.source_platform="artist_catalog", signals.artist_id=<uuid>.
+     signals.source_platform="artist_catalog".
   4. Flush buffer every 500 records via /api/v1/trending/bulk.
 
-Cadence: weekly (168h). With ~2,500 tracked artists × 0.55s/call =
-~23 minutes runtime. Budget: ~2,500 calls/week = ~350/day amortized
-= 0.2% of the 172,800/day Chartmetric quota.
+Cadence: 48h. With ~2,500 tracked artists × avg 1.5 pages × 1.0s/req
+= ~1.5 h runtime. Budget: ~3,750 calls per run × 0.5/day amortized
+= ~1,875 calls/day = 1.1% of the 172,800/day Chartmetric quota.
 
-The scraper is idempotent — rerunning it re-pulls artist catalogs,
-which only adds NEW tracks (dedupe via the ISRC/spotify_id path in
-entity_resolution + ON CONFLICT DO NOTHING on the snapshot unique
-constraint).
+L004 applied: REQUEST_DELAY is 1.0 s/req with adaptive 2.0 s backoff
+on first 429. No more "works locally / rate-limited in prod" drift.
+
+Idempotent — rerunning re-pulls catalogs, which only adds NEW tracks
+(dedupe via ISRC/spotify_id in entity_resolution + ON CONFLICT DO
+NOTHING on the snapshot unique constraint).
 """
 
 from __future__ import annotations
@@ -39,7 +46,13 @@ from scrapers.base import AuthenticationError, BaseScraper, RawDataPoint
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 500   # how many artists per admin-endpoint page
-TRACKS_LIMIT = 100  # limit param on /api/artist/{id}/tracks
+# Stage 2C expansion (2026-04-14): previously capped at the top-100
+# tracks per artist, missing the long tail of deep catalogs. Now we
+# paginate — TRACKS_PAGE_SIZE is the per-call limit, and we keep
+# pulling until Chartmetric returns a partial page or we hit the
+# per-artist cap below.
+TRACKS_PAGE_SIZE = 500
+MAX_TRACKS_PER_ARTIST = 2_000
 MAX_ARTISTS = 20_000   # hard cap to prevent runaway runs
 
 
@@ -54,22 +67,40 @@ class ChartmetricArtistTracksScraper(BaseScraper):
     PLATFORM = "chartmetric"
     API_BASE = "https://api.chartmetric.com"
     TOKEN_URL = "https://api.chartmetric.com/api/token"
-    REQUEST_DELAY = 0.55
+    # L004: Chartmetric's token bucket needs 1.0s/req steady-state, not
+    # 0.55. On first 429 we flip to 2.0s until the process restarts.
+    REQUEST_DELAY = 1.0
+    REQUEST_DELAY_AFTER_THROTTLE = 2.0
     BULK_BATCH_SIZE = 500
 
     def __init__(self, credentials: dict, api_base_url: str, admin_key: str):
         super().__init__(credentials, api_base_url, admin_key)
         self.access_token: str | None = None
         self._semaphore = asyncio.Semaphore(2)
+        self._throttled = False
         self._buffer: list[dict[str, Any]] = []
         self._stats: dict[str, int] = {
             "artists_discovered": 0,
             "artists_processed": 0,
             "artists_skipped": 0,
             "tracks_buffered": 0,
+            "catalog_pages": 0,
             "calls": 0,
             "errors": 0,
         }
+
+    def _current_delay(self) -> float:
+        return (
+            self.REQUEST_DELAY_AFTER_THROTTLE if self._throttled else self.REQUEST_DELAY
+        )
+
+    def _on_throttle(self) -> None:
+        if not self._throttled:
+            logger.warning(
+                "[artist-tracks] 429 observed — slowing to %.1fs/req",
+                self.REQUEST_DELAY_AFTER_THROTTLE,
+            )
+            self._throttled = True
 
     async def authenticate(self) -> None:
         api_key = self.credentials.get("api_key")
@@ -191,49 +222,68 @@ class ChartmetricArtistTracksScraper(BaseScraper):
     async def _fetch_and_buffer_artist_tracks(
         self, *, cm_id: int, db_artist_uuid: str | None, name: str
     ) -> None:
-        """Call /api/artist/{cm_id}/tracks and buffer the records."""
+        """Paginate /api/artist/{cm_id}/tracks and buffer every record.
+
+        Stage 2C expansion: previously pulled a single page of the top
+        100 tracks per artist. Now walks offset=0, page, 2*page, ...
+        until the response is short (end of catalog) or we hit the
+        MAX_TRACKS_PER_ARTIST safety cap.
+        """
         url = f"{self.API_BASE}/api/artist/{cm_id}/tracks"
-        params = {"limit": TRACKS_LIMIT}
-        async with self._semaphore:
-            await asyncio.sleep(self.REQUEST_DELAY)
-            self._stats["calls"] += 1
-            try:
-                resp = await self._rate_limited_request(
-                    "GET", url,
-                    headers={"Authorization": f"Bearer {self.access_token}"},
-                    params=params,
-                )
-            except httpx.HTTPStatusError as exc:
-                code = exc.response.status_code
-                if code in (401, 403, 404):
-                    return  # artist no longer exists on Chartmetric, skip
-                raise
-
-        try:
-            data = resp.json()
-        except Exception:
-            return
-
-        tracks = []
-        if isinstance(data, dict):
-            obj = data.get("obj")
-            if isinstance(obj, list):
-                tracks = obj
-            elif isinstance(obj, dict):
-                tracks = obj.get("data") or obj.get("tracks") or []
-
-        if not tracks:
-            return
-
         snapshot_date = date.today()
-        for t in tracks:
-            point = self._parse_artist_track(
-                t, cm_artist_id=cm_id, db_artist_uuid=db_artist_uuid,
-                artist_name=name, snapshot=snapshot_date,
-            )
-            if point:
-                self._buffer.append(point)
-                self._stats["tracks_buffered"] += 1
+        offset = 0
+        total_for_artist = 0
+
+        while total_for_artist < MAX_TRACKS_PER_ARTIST:
+            params = {"limit": TRACKS_PAGE_SIZE, "offset": offset}
+            async with self._semaphore:
+                await asyncio.sleep(self._current_delay())
+                self._stats["calls"] += 1
+                try:
+                    resp = await self._rate_limited_request(
+                        "GET", url,
+                        headers={"Authorization": f"Bearer {self.access_token}"},
+                        params=params,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    code = exc.response.status_code
+                    if code == 429:
+                        self._on_throttle()
+                    if code in (401, 403, 404, 429):
+                        return
+                    raise
+
+            try:
+                data = resp.json()
+            except Exception:
+                return
+
+            tracks = []
+            if isinstance(data, dict):
+                obj = data.get("obj")
+                if isinstance(obj, list):
+                    tracks = obj
+                elif isinstance(obj, dict):
+                    tracks = obj.get("data") or obj.get("tracks") or []
+
+            if not tracks:
+                return
+
+            self._stats["catalog_pages"] += 1
+            for t in tracks:
+                point = self._parse_artist_track(
+                    t, cm_artist_id=cm_id, db_artist_uuid=db_artist_uuid,
+                    artist_name=name, snapshot=snapshot_date,
+                )
+                if point:
+                    self._buffer.append(point)
+                    self._stats["tracks_buffered"] += 1
+                    total_for_artist += 1
+
+            # Partial page = end of catalog for this artist
+            if len(tracks) < TRACKS_PAGE_SIZE:
+                return
+            offset += TRACKS_PAGE_SIZE
 
     def _parse_artist_track(
         self,
