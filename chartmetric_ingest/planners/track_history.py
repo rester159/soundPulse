@@ -74,9 +74,14 @@ PLATFORM_SPECS: list[dict[str, Any]] = [
 API_BASE = "https://api.chartmetric.com"
 HANDLER_NAME = "track_history"
 PRODUCER_NAME = "planner_track_history"
-PLANNER_INTERVAL_SECONDS = 300.0  # 5 minutes
-BATCH_SIZE_PER_PLATFORM = 500      # per run, per enabled platform
-JOB_EXPIRES_IN_HOURS = 12.0
+# Sized to keep the queue saturated against the 1.8 req/s fetcher:
+#   runs/hour = 3600 / PLANNER_INTERVAL_SECONDS
+#   emission/hour = BATCH_SIZE_PER_PLATFORM * 3 platforms * runs/hour
+# Must exceed 6,480 req/hour (the fetcher drain rate) with margin
+# so dedup-merged re-emits don't accidentally starve the queue.
+PLANNER_INTERVAL_SECONDS = 180.0   # 3 minutes
+BATCH_SIZE_PER_PLATFORM = 1500     # 1500 * 3 * 20 = 90k/hr emission ceiling
+JOB_EXPIRES_IN_HOURS = 6.0
 
 
 @register("track_history", interval_seconds=PLANNER_INTERVAL_SECONDS)

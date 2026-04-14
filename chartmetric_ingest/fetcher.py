@@ -8,10 +8,10 @@ becomes "nothing except this file talks to Chartmetric."
 
 Dry mode
 --------
-Controlled by `CHARTMETRIC_FETCHER_DRY_MODE` env var. When true
-(Phase A default), the fetcher claims jobs, waits on the quota, and
-then logs what it *would* have fetched without actually hitting the
-API or calling any handler. Flip to 0 after Phase B migration lands.
+Controlled by `CHARTMETRIC_FETCHER_DRY_MODE` env var. Defaults to
+OFF (live) now that Phase B + C1 have shipped. Set the env var to 1
+to force dry-run — the fetcher will claim jobs, wait on the quota,
+and log what it *would* have fetched without hitting the API.
 
 Idle behavior
 -------------
@@ -50,7 +50,9 @@ ERROR_BACKOFF_SECONDS = 5.0
 
 
 def _dry_mode_enabled() -> bool:
-    return os.environ.get("CHARTMETRIC_FETCHER_DRY_MODE", "1") == "1"
+    # Default OFF (Stage 3 Phase B/C1 is live). Operators can still
+    # force dry mode for debugging via CHARTMETRIC_FETCHER_DRY_MODE=1.
+    return os.environ.get("CHARTMETRIC_FETCHER_DRY_MODE", "0") == "1"
 
 
 class ChartmetricFetcher:

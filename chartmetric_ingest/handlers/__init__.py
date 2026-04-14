@@ -68,3 +68,4 @@ def clear_for_tests() -> None:
 # matter — the registry is a plain dict keyed on name.
 from chartmetric_ingest.handlers import track_history  # noqa: F401,E402
 from chartmetric_ingest.handlers import artist_stats   # noqa: F401,E402
+from chartmetric_ingest.handlers import chart_sweep    # noqa: F401,E402

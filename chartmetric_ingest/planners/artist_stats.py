@@ -63,9 +63,12 @@ PLATFORM_SPECS: list[dict[str, Any]] = [
 API_BASE = "https://api.chartmetric.com"
 HANDLER_NAME = "artist_stats"
 PRODUCER_NAME = "planner_artist_stats"
-PLANNER_INTERVAL_SECONDS = 600.0  # 10 minutes
-BATCH_SIZE_PER_PLATFORM = 200
-JOB_EXPIRES_IN_HOURS = 24.0
+# Artist stats are secondary — smaller batch, longer cadence than
+# track_history. The primary saturation source is track_history;
+# artist_stats fills in remaining capacity when tracks run fresh.
+PLANNER_INTERVAL_SECONDS = 300.0  # 5 minutes
+BATCH_SIZE_PER_PLATFORM = 500
+JOB_EXPIRES_IN_HOURS = 12.0
 
 
 @register("artist_stats", interval_seconds=PLANNER_INTERVAL_SECONDS)
