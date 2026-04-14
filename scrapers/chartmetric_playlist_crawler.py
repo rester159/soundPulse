@@ -85,7 +85,7 @@ class ChartmetricPlaylistCrawler(BaseScraper):
     PLATFORM = "chartmetric"
     API_BASE = "https://api.chartmetric.com"
     TOKEN_URL = "https://api.chartmetric.com/api/token"
-    REQUEST_DELAY = 0.55   # ~1.8 req/sec, just under the 2 rps limit
+    REQUEST_DELAY = 1.0   # L004: Chartmetric token bucket needs 1.0s/req
     BULK_BATCH_SIZE = 500  # records per bulk POST
 
     def __init__(self, credentials: dict, api_base_url: str, admin_key: str):

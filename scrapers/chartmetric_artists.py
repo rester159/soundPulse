@@ -81,7 +81,7 @@ class ChartmetricArtistsScraper(BaseScraper):
     # Re-authenticate every N artists to avoid token expiry mid-run
     REAUTH_EVERY = 25
     # Conservative rate limiting
-    REQUEST_DELAY = 0.6
+    REQUEST_DELAY = 1.0  # L004: Chartmetric token bucket needs 1.0s/req
 
     def __init__(self, credentials: dict, api_base_url: str, admin_key: str):
         super().__init__(credentials, api_base_url, admin_key)
