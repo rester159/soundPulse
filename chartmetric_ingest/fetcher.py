@@ -47,12 +47,21 @@ TOKEN_URL = "https://api.chartmetric.com/api/token"
 IDLE_SLEEP_SECONDS = 2.0
 STUCK_RELEASE_INTERVAL_SECONDS = 120.0
 ERROR_BACKOFF_SECONDS = 5.0
+# Hold off on claiming any work for the first STARTUP_DELAY_SECONDS of
+# the process lifetime. This gives Railway's healthcheck a quiet
+# window to probe /health without competing with the fetcher's DB/API
+# traffic during a cold boot.
+STARTUP_DELAY_SECONDS = 30.0
 
 
 def _dry_mode_enabled() -> bool:
-    # Default OFF (Stage 3 Phase B/C1 is live). Operators can still
-    # force dry mode for debugging via CHARTMETRIC_FETCHER_DRY_MODE=1.
-    return os.environ.get("CHARTMETRIC_FETCHER_DRY_MODE", "0") == "1"
+    # Default ON while the live path is still being hardened — the first
+    # Phase D live attempt spammed 76 "429 observed" log lines in 40s and
+    # the container's Railway healthcheck on /health failed. Rolled back
+    # here so the fetcher drains the queue (proving the bookkeeping path
+    # is healthy) without actually hitting Chartmetric. Opt in to live
+    # mode per-deployment via CHARTMETRIC_FETCHER_DRY_MODE=0.
+    return os.environ.get("CHARTMETRIC_FETCHER_DRY_MODE", "1") == "1"
 
 
 class ChartmetricFetcher:
@@ -84,10 +93,14 @@ class ChartmetricFetcher:
 
         dry = _dry_mode_enabled()
         logger.info(
-            "[cm-fetcher] starting loop dry_mode=%s rate=%.2f req/s",
-            dry, self._quota.current_rate,
+            "[cm-fetcher] starting loop dry_mode=%s rate=%.2f req/s "
+            "(holding %.0fs for healthcheck window)",
+            dry, self._quota.current_rate, STARTUP_DELAY_SECONDS,
         )
         try:
+            await self._sleep_interruptible(STARTUP_DELAY_SECONDS)
+            if self._stop.is_set():
+                return
             await self._loop()
         finally:
             if self._client is not None:

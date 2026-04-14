@@ -172,7 +172,15 @@ class ChartmetricQuota:
 
     async def on_429(self) -> None:
         """Called by the fetcher when Chartmetric returns HTTP 429."""
-        logger.warning("[cm-quota] 429 observed — clamping to %.2fx base rate", THROTTLE_MULTIPLIER)
+        # Dedupe the log: only warn on the FIRST 429 after a recovery
+        # window, not on every rate-limited request. A flood of 429s
+        # during a burst produces one log line, not dozens.
+        was_fresh = self._multiplier >= 1.0 - PERSIST_EPSILON
+        if was_fresh:
+            logger.warning(
+                "[cm-quota] 429 observed — clamping to %.2fx base rate",
+                THROTTLE_MULTIPLIER,
+            )
         self._multiplier = THROTTLE_MULTIPLIER
         self._last_429_at = datetime.now(timezone.utc)
         self._bucket.set_rate(BASE_RATE * self._multiplier)

@@ -83,10 +83,12 @@ async def start() -> None:
 async def _run_planner_loop(spec, session_factory) -> None:
     """Sleep-then-plan loop for a single planner."""
     assert _stop_event is not None
-    # Small initial delay so planners don't all fire at the same instant
-    # as the fetcher spins up.
+    # Hold off for the same window the fetcher uses so the Railway
+    # healthcheck has uncontested event-loop time on cold boot. The
+    # first planner run does expensive DB GROUP-BY queries against
+    # `tracks` and would otherwise compete with /health probes.
     try:
-        await asyncio.wait_for(_stop_event.wait(), timeout=5.0)
+        await asyncio.wait_for(_stop_event.wait(), timeout=30.0)
         return  # stopped before we started
     except asyncio.TimeoutError:
         pass
