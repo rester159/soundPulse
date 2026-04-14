@@ -2454,6 +2454,128 @@ async def get_tracks_needing_audio_features_cm(
     }
 
 
+@router.get("/api/v1/admin/tracks/with-chartmetric-id")
+async def get_tracks_with_chartmetric_id(
+    limit: int = 500,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Tracks with a known chartmetric_id, for per-track /stat/{platform} crawls.
+
+    Consumed by `scrapers/chartmetric_track_history.py` (Stage 2B) to
+    discover what tracks to pull historical stats for. Ordered by
+    chartmetric_id so callers can paginate deterministically.
+    """
+    from api.models.track import Track
+
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
+
+    result = await db.execute(
+        select(Track.id, Track.title, Track.chartmetric_id, Track.isrc, Track.artist_id)
+        .where(Track.chartmetric_id.isnot(None))
+        .order_by(Track.chartmetric_id)
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = result.all()
+
+    return {
+        "data": [
+            {
+                "track_id": str(r.id),
+                "title": r.title,
+                "chartmetric_id": r.chartmetric_id,
+                "isrc": r.isrc,
+                "artist_id": str(r.artist_id) if r.artist_id else None,
+            }
+            for r in rows
+        ],
+        "limit": limit,
+        "offset": offset,
+        "returned": len(rows),
+    }
+
+
+@router.post("/api/v1/admin/track-stat-history/bulk")
+async def bulk_insert_track_stat_history(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Bulk-insert Stage 2B per-track historical stat rows.
+
+    Body shape:
+    ```
+    {
+      "rows": [
+        {
+          "track_id": "<uuid>",
+          "chartmetric_track_id": 12345,
+          "platform": "spotify",
+          "metric": "streams",
+          "snapshot_date": "2026-03-01",
+          "value": 1234567,            // integer metric
+          "value_float": null          // or float metric
+        },
+        ...
+      ]
+    }
+    ```
+
+    ON CONFLICT (track_id, platform, metric, snapshot_date) DO UPDATE
+    — idempotent so replays and overlapping windows don't duplicate.
+    """
+    from sqlalchemy import func as sa_func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from api.models.track_stat_history import TrackStatHistory
+
+    rows = payload.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return {"inserted": 0, "updated": 0, "skipped": 0}
+
+    prepared: list[dict] = []
+    skipped = 0
+    for r in rows:
+        try:
+            track_id = r.get("track_id")
+            platform = r.get("platform")
+            metric = r.get("metric")
+            snapshot_date = r.get("snapshot_date")
+            if not (track_id and platform and metric and snapshot_date):
+                skipped += 1
+                continue
+            prepared.append({
+                "track_id": track_id,
+                "chartmetric_track_id": r.get("chartmetric_track_id"),
+                "platform": platform,
+                "metric": metric,
+                "snapshot_date": snapshot_date,
+                "value": r.get("value"),
+                "value_float": r.get("value_float"),
+            })
+        except Exception:
+            skipped += 1
+
+    if not prepared:
+        return {"inserted": 0, "updated": 0, "skipped": skipped}
+
+    stmt = pg_insert(TrackStatHistory).values(prepared)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_track_stat_history_natural",
+        set_={
+            "value": stmt.excluded.value,
+            "value_float": stmt.excluded.value_float,
+            "chartmetric_track_id": stmt.excluded.chartmetric_track_id,
+            "pulled_at": sa_func.now(),
+        },
+    )
+    await db.execute(stmt)
+    await db.commit()
+    return {"accepted": len(prepared), "skipped": skipped}
+
+
 @router.get("/api/v1/admin/tracks/needing-audio-features")
 async def get_tracks_needing_audio_features(
     limit: int = 500,

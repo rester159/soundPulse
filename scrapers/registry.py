@@ -54,6 +54,17 @@ SCRAPER_REGISTRY: dict[str, dict] = {
             "api_key": "CHARTMETRIC_API_KEY",
         },
     },
+    # Per-track historical stats (Stage 2B, 2026-04-14). Crawls tracks
+    # with chartmetric_id in cursor-resumable chunks, calling
+    # /api/track/{cm_id}/stat/{platform} to pull daily time-series for
+    # curated (platform, metric) pairs. Writes to track_stat_history.
+    "chartmetric_track_history": {
+        "module": "scrapers.chartmetric_track_history",
+        "class": "ChartmetricTrackHistoryScraper",
+        "credentials": {
+            "api_key": "CHARTMETRIC_API_KEY",
+        },
+    },
     "chartmetric_playlist_crawler": {
         "module": "scrapers.chartmetric_playlist_crawler",
         "class": "ChartmetricPlaylistCrawler",

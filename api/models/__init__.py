@@ -12,9 +12,11 @@ from api.models.song_blueprint import SongBlueprint
 from api.models.ai_artist import AIArtist
 from api.models.ceo_decision import CEODecision
 from api.models.songs_master import SongMaster
+from api.models.track_stat_history import TrackStatHistory
 
 __all__ = [
     "Artist", "Track", "Genre", "TrendingSnapshot", "Prediction", "Feedback",
     "ApiKey", "ScraperConfig", "BacktestResult", "MusicGenerationCall",
     "SongBlueprint", "AIArtist", "CEODecision", "SongMaster",
+    "TrackStatHistory",
 ]
