@@ -130,12 +130,14 @@ async def init_scheduler(database_url: str):
         # ~91 days of history. Daily cadence. ~1,967 calls/run,
         # ~33 min runtime at 1.0s/req adaptive throttle.
         "chartmetric_historical_replay": {"interval_hours": 24, "enabled": True},
-        # Per-track historical stats (Stage 2B). Iterates tracks with a
-        # chartmetric_id and pulls daily time-series from
-        # /api/track/{cm_id}/stat/{platform}. ~5k tracks/run × 3 platforms
-        # = ~15k calls/run × 24h cadence → ~15k/day. Yields ~1.35M rows/day
-        # into track_stat_history (tall/narrow daily time-series).
-        "chartmetric_track_history": {"interval_hours": 24, "enabled": True},
+        # Per-track historical stats — MIGRATED to chartmetric_ingest
+        # pipeline (Stage 3 Phase B, 2026-04-14). The new planner at
+        # `chartmetric_ingest/planners/track_history.py` emits jobs into
+        # the global queue every 5 minutes; the old standalone scraper
+        # would duplicate effort and waste API budget. Left in the
+        # registry so historical DB rows keep their foreign key, but
+        # seeded disabled.
+        "chartmetric_track_history": {"interval_hours": 24, "enabled": False},
         # Long-tail playlist crawler. ~15k calls per full run, 72h cadence
         # → ~5k/day amortized.
         "chartmetric_playlist_crawler": {"interval_hours": 72, "enabled": True},

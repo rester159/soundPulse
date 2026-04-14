@@ -1,4 +1,9 @@
-"""Unit tests for the handler registry — register / get / duplicate guard."""
+"""Unit tests for the handler registry — register / get / duplicate guard.
+
+Fixture snapshots and restores the real registry rather than clearing
+it — otherwise we'd wipe the bootstrapped `track_history` handler
+and break any later test that depends on it.
+"""
 from __future__ import annotations
 
 import pytest
@@ -7,10 +12,12 @@ from chartmetric_ingest import handlers as cmq_handlers
 
 
 @pytest.fixture(autouse=True)
-def _reset_registry():
-    cmq_handlers.clear_for_tests()
+def _isolate_registry():
+    saved = dict(cmq_handlers._HANDLERS)  # type: ignore[attr-defined]
+    cmq_handlers._HANDLERS.clear()        # type: ignore[attr-defined]
     yield
-    cmq_handlers.clear_for_tests()
+    cmq_handlers._HANDLERS.clear()        # type: ignore[attr-defined]
+    cmq_handlers._HANDLERS.update(saved)  # type: ignore[attr-defined]
 
 
 def test_register_and_get():
