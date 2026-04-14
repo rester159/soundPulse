@@ -68,3 +68,4 @@ def clear_for_tests() -> None:
 
 # ---- self-bootstrapping planners ----
 from chartmetric_ingest.planners import track_history  # noqa: F401,E402
+from chartmetric_ingest.planners import artist_stats   # noqa: F401,E402

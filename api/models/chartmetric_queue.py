@@ -1,7 +1,8 @@
+import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Float, Index, SmallInteger, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Float, Index, PrimaryKeyConstraint, SmallInteger, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from api.database import Base
@@ -49,6 +50,29 @@ class ChartmetricQuotaState(Base):
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_cm_quota_singleton"),
+    )
+
+
+class ChartmetricEntityFetchLog(Base):
+    __tablename__ = "chartmetric_entity_fetch_log"
+
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    endpoint_key: Mapped[str] = mapped_column(Text, nullable=False)
+    last_fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_status: Mapped[int | None] = mapped_column(SmallInteger)
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "entity_type", "entity_id", "endpoint_key",
+            name="pk_cm_entity_fetch_log",
+        ),
+        Index(
+            "idx_cm_fetch_log_stale",
+            "entity_type", "endpoint_key", "last_fetched_at",
+        ),
     )
 
 

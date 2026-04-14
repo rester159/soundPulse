@@ -67,3 +67,4 @@ def clear_for_tests() -> None:
 # Each import below triggers @register for one handler. Order doesn't
 # matter — the registry is a plain dict keyed on name.
 from chartmetric_ingest.handlers import track_history  # noqa: F401,E402
+from chartmetric_ingest.handlers import artist_stats   # noqa: F401,E402

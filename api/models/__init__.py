@@ -15,6 +15,7 @@ from api.models.songs_master import SongMaster
 from api.models.track_stat_history import TrackStatHistory
 from api.models.chartmetric_queue import (
     ChartmetricEndpointConfig,
+    ChartmetricEntityFetchLog,
     ChartmetricQuotaState,
     ChartmetricRequestQueue,
 )
@@ -25,5 +26,5 @@ __all__ = [
     "SongBlueprint", "AIArtist", "CEODecision", "SongMaster",
     "TrackStatHistory",
     "ChartmetricRequestQueue", "ChartmetricQuotaState",
-    "ChartmetricEndpointConfig",
+    "ChartmetricEndpointConfig", "ChartmetricEntityFetchLog",
 ]

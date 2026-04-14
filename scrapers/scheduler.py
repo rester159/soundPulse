@@ -149,10 +149,10 @@ async def init_scheduler(database_url: str):
         # 140 calls per run × 12h cadence → ~280/day. Captures regionally-
         # popular tracks the national charts miss.
         "chartmetric_us_cities": {"interval_hours": 12, "enabled": True},
-        # Per-artist platform stats enrichment. ~2.5k artists × 6 platforms
-        # = ~15k calls per full run × 48h cadence → ~7.5k/day. Merges
-        # latest follower/listener/stream counts into artists.metadata_json.
-        "chartmetric_artist_stats": {"interval_hours": 48, "enabled": True},
+        # Per-artist platform stats enrichment — MIGRATED to
+        # chartmetric_ingest pipeline (Stage 3 Phase C1, 2026-04-14).
+        # See chartmetric_ingest/planners/artist_stats.py.
+        "chartmetric_artist_stats": {"interval_hours": 48, "enabled": False},
         # Shazam: disabled. Public API endpoints (shazam.com/services/*,
         # amp-api.shazam.com, cdn.shazam.com) are all dead (404/204/DNS
         # failure as of 2026-04-12). RapidAPI shazam-core free tier was

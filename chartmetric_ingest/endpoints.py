@@ -50,6 +50,44 @@ DEFAULT_ENDPOINT_CONFIGS: list[dict[str, Any]] = [
         "priority_weight": 0.8,
         "notes": "Per-track Shazam count (lower weight)",
     },
+    # Per-artist latest stats — 6 platforms. Longer target interval
+    # than per-track because artist metrics move more slowly.
+    {
+        "endpoint_key": "artist_stat_spotify",
+        "target_interval_hours": 48.0,
+        "priority_weight": 1.0,
+        "notes": "Per-artist Spotify followers/monthly_listeners/popularity",
+    },
+    {
+        "endpoint_key": "artist_stat_instagram",
+        "target_interval_hours": 48.0,
+        "priority_weight": 0.9,
+        "notes": "Per-artist Instagram followers",
+    },
+    {
+        "endpoint_key": "artist_stat_tiktok",
+        "target_interval_hours": 48.0,
+        "priority_weight": 1.0,
+        "notes": "Per-artist TikTok followers/likes",
+    },
+    {
+        "endpoint_key": "artist_stat_youtube",
+        "target_interval_hours": 48.0,
+        "priority_weight": 1.0,
+        "notes": "Per-artist YouTube subscribers/views",
+    },
+    {
+        "endpoint_key": "artist_stat_twitter",
+        "target_interval_hours": 72.0,
+        "priority_weight": 0.6,
+        "notes": "Per-artist Twitter followers (slow-moving, lower weight)",
+    },
+    {
+        "endpoint_key": "artist_stat_shazam",
+        "target_interval_hours": 48.0,
+        "priority_weight": 0.8,
+        "notes": "Per-artist total Shazam count",
+    },
 ]
 
 
