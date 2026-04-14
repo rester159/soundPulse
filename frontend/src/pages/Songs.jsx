@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   Disc3, Loader2, ChevronDown, ChevronUp, CheckCircle2, Music2,
   Clock, FileAudio, AlertCircle, PlayCircle, Layers, Mic2,
-  Crosshair, Save, Play, Square,
+  Crosshair, Save, Play, Pause, Square,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -188,6 +188,8 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   const [instrStart, setInstrStart] = useState(0)
   const [instrEnd, setInstrEnd] = useState(0)
   const [voiceEntry, setVoiceEntry] = useState(0)
+  // What's currently playing. Drives the lane-level play/pause icons.
+  const [playing, setPlaying] = useState('none')  // 'none' | 'instr' | 'voice' | 'together'
   // Bump this counter any time the user ENDS an interaction
   // (pointerup on a drag, or key press). The useEffect watches it
   // and (re)starts the preview playback — we don't auto-play on
@@ -217,53 +219,106 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null }
     if (instrRef.current) { instrRef.current.pause() }
     if (voiceRef.current) { voiceRef.current.pause() }
+    setPlaying('none')
   }
 
-  function playInstrRegion() {
+  // Pause → seek → wait for 'seeked' (or metadata ready) → play.
+  // The naive `ia.currentTime = X; ia.play()` sequence loses the seek
+  // on browsers that haven't buffered far enough yet — you get audio
+  // from t=0 instead of t=X. The 'seeked' event fires only once the
+  // browser has committed the new playhead position; waiting for it
+  // means play() always starts at the requested time.
+  async function seekAndPlay(audioEl, targetTime) {
+    if (!audioEl) return
+    audioEl.pause()
+
+    // Metadata needs to be loaded before currentTime can be written.
+    if (audioEl.readyState < 1 /* HAVE_METADATA */) {
+      await new Promise((resolve) => {
+        let done = false
+        const finish = () => {
+          if (done) return
+          done = true
+          audioEl.removeEventListener('loadedmetadata', finish)
+          resolve()
+        }
+        audioEl.addEventListener('loadedmetadata', finish)
+        // Kick the load in case preload was deferred by the browser
+        try { audioEl.load() } catch {}
+        setTimeout(finish, 3000)  // hard fallback
+      })
+    }
+
+    const clamped = Math.max(0, Math.min(audioEl.duration || targetTime, targetTime))
+    if (Math.abs(audioEl.currentTime - clamped) > 0.01) {
+      await new Promise((resolve) => {
+        let done = false
+        const finish = () => {
+          if (done) return
+          done = true
+          audioEl.removeEventListener('seeked', finish)
+          resolve()
+        }
+        audioEl.addEventListener('seeked', finish)
+        try { audioEl.currentTime = clamped } catch {}
+        setTimeout(finish, 500)  // fallback if 'seeked' never fires
+      })
+    }
+
+    try { await audioEl.play() } catch {}
+  }
+
+  async function playInstrRegion() {
     stopAll()
     const ia = instrRef.current
     if (!ia || !instrUrl) return
-    try { ia.currentTime = Math.max(0, Math.min(instrDur, instrStart)) } catch {}
-    ia.play().catch(() => {})
+    setPlaying('instr')
+    await seekAndPlay(ia, Math.max(0, Math.min(instrDur, instrStart)))
     const durationMs = Math.max(0, (instrEnd - instrStart) * 1000)
     if (durationMs > 0) {
       playCtlRef.current.stopTimer = setTimeout(() => {
         if (instrRef.current) instrRef.current.pause()
+        setPlaying('none')
       }, durationMs)
     }
   }
 
-  function playVoiceAlone() {
+  async function playVoiceAlone() {
     stopAll()
     const va = voiceRef.current
     if (!va || !voiceUrl) return
-    try { va.currentTime = 0 } catch {}
-    va.play().catch(() => {})
+    setPlaying('voice')
+    await seekAndPlay(va, 0)
   }
 
-  function playTogether() {
+  async function playTogether() {
     stopAll()
     const ia = instrRef.current
     const va = voiceRef.current
     if (!ia || !va || !instrUrl || !voiceUrl) return
+    setPlaying('together')
+
     // Start the instrumental at instrStart. When the playhead reaches
     // voiceEntry, start the voice from its own t=0. If voiceEntry <
     // instrStart we clamp the delay to 0 and seek the voice forward
     // to cover the missing head — that way the two stay aligned even
     // when the user has zoomed the instrumental region past the
     // intended vocal entry.
-    try { ia.currentTime = Math.max(0, Math.min(instrDur, instrStart)) } catch {}
-    ia.play().catch(() => {})
-
     const delaySec = voiceEntry - instrStart
+    if (delaySec < 0) {
+      // Voice needs to start ahead — seek forward in the voice stem
+      await seekAndPlay(va, -delaySec)
+    }
+    // Now line up the instrumental. seekAndPlay awaits the seeked
+    // event so when it returns, the playhead is at instrStart.
+    await seekAndPlay(ia, Math.max(0, Math.min(instrDur, instrStart)))
+
     if (delaySec >= 0) {
-      try { va.currentTime = 0 } catch {}
+      // Voice joins after `delaySec` of instrumental. Schedule its
+      // play from t=0. seekAndPlay handles the seek robustness.
       playCtlRef.current.voiceStartTimer = setTimeout(() => {
-        if (voiceRef.current) voiceRef.current.play().catch(() => {})
+        seekAndPlay(voiceRef.current, 0)
       }, delaySec * 1000)
-    } else {
-      try { va.currentTime = -delaySec } catch {}
-      va.play().catch(() => {})
     }
 
     const durationMs = Math.max(0, (instrEnd - instrStart) * 1000)
@@ -271,8 +326,25 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
       playCtlRef.current.stopTimer = setTimeout(() => {
         if (instrRef.current) instrRef.current.pause()
         if (voiceRef.current) voiceRef.current.pause()
+        setPlaying('none')
       }, durationMs)
     }
+  }
+
+  // Lane-level play/pause toggle handlers. The button on each lane
+  // either starts that lane's preview or stops everything if it's
+  // already the thing that's playing.
+  function toggleInstr() {
+    if (playing === 'instr') stopAll()
+    else playInstrRegion()
+  }
+  function toggleVoice() {
+    if (playing === 'voice') stopAll()
+    else playVoiceAlone()
+  }
+  function toggleTogether() {
+    if (playing === 'together') stopAll()
+    else playTogether()
   }
 
   // Auto-preview the instrumental region whenever the user has just
@@ -385,9 +457,21 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
       </div>
 
       {/* Instrumental lane */}
-      <div className="flex items-center justify-between mb-1">
+      <div className="flex items-center gap-2 mb-1">
+        <button
+          onClick={toggleInstr}
+          disabled={!instrUrl || busy}
+          className={`w-6 h-6 flex items-center justify-center rounded border transition-colors ${
+            playing === 'instr'
+              ? 'bg-violet-500/30 border-violet-400 text-violet-100'
+              : 'border-zinc-700 hover:border-zinc-500 text-zinc-300'
+          } disabled:opacity-40`}
+          title={playing === 'instr' ? 'Stop' : 'Play region'}
+        >
+          {playing === 'instr' ? <Pause size={12} /> : <Play size={12} />}
+        </button>
         <span className="text-zinc-500">Instrumental · {instrDur.toFixed(2)}s</span>
-        <span className="text-zinc-600 font-mono">
+        <span className="ml-auto text-zinc-600 font-mono">
           region {instrStart.toFixed(2)}→{instrEnd.toFixed(2)}s
         </span>
       </div>
@@ -429,11 +513,23 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
       </div>
 
       {/* Voice lane */}
-      <div className="flex items-center justify-between mb-1">
+      <div className="flex items-center gap-2 mb-1">
+        <button
+          onClick={toggleVoice}
+          disabled={!voiceUrl || busy}
+          className={`w-6 h-6 flex items-center justify-center rounded border transition-colors ${
+            playing === 'voice'
+              ? 'bg-emerald-500/30 border-emerald-400 text-emerald-100'
+              : 'border-zinc-700 hover:border-zinc-500 text-zinc-300'
+          } disabled:opacity-40`}
+          title={playing === 'voice' ? 'Stop' : 'Play voice alone'}
+        >
+          {playing === 'voice' ? <Pause size={12} /> : <Play size={12} />}
+        </button>
         <span className="text-zinc-500">
           Voice · entry at <span className="font-mono text-emerald-300">{voiceEntry.toFixed(3)}s</span>
         </span>
-        <span className="text-zinc-600 text-[9px]">click block · drag · ←→ ±0.1s · ↑↓ ±1s</span>
+        <span className="ml-auto text-zinc-600 text-[9px]">click block · drag · ←→ ±0.1s · ↑↓ ±1s</span>
       </div>
       <div className="relative h-10 bg-zinc-900 border border-zinc-800 rounded mb-3 select-none">
         {/* Voice block positioned at voiceEntry, width = voiceDur */}
@@ -453,38 +549,30 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         </div>
       </div>
 
-      {/* Playback + save controls */}
+      {/* Playback + save controls. Per-lane play buttons are above;
+          down here we only need "together" (which needs both tracks
+          synced) and a global stop. */}
       <div className="flex items-center gap-1.5">
         <button
-          onClick={playInstrRegion}
-          disabled={!instrUrl || busy}
-          className="px-2 py-1 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-200 flex items-center gap-1 disabled:opacity-40"
-          title="Play instrumental from start pin to end pin"
-        >
-          <Play size={10} /> instr
-        </button>
-        <button
-          onClick={playVoiceAlone}
-          disabled={!voiceUrl || busy}
-          className="px-2 py-1 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-200 flex items-center gap-1 disabled:opacity-40"
-          title="Play the vocals stem from its own t=0"
-        >
-          <Play size={10} /> voice
-        </button>
-        <button
-          onClick={playTogether}
+          onClick={toggleTogether}
           disabled={!instrUrl || !voiceUrl || busy}
-          className="px-2 py-1 rounded border border-violet-500/60 bg-violet-500/10 hover:bg-violet-500/25 text-violet-100 flex items-center gap-1 disabled:opacity-40"
+          className={`px-2 py-1 rounded border flex items-center gap-1 disabled:opacity-40 ${
+            playing === 'together'
+              ? 'bg-violet-500/30 border-violet-400 text-violet-100'
+              : 'border-violet-500/60 bg-violet-500/10 hover:bg-violet-500/25 text-violet-100'
+          }`}
           title="Play instrumental region + voice aligned at the current entry point"
         >
-          <Play size={10} /> together
+          {playing === 'together' ? <Pause size={10} /> : <Play size={10} />}
+          together
         </button>
         <button
           onClick={stopAll}
-          className="px-2 py-1 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-400 flex items-center gap-1"
-          title="Stop playback"
+          disabled={playing === 'none'}
+          className="px-2 py-1 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-400 flex items-center gap-1 disabled:opacity-40"
+          title="Stop all playback"
         >
-          <Square size={10} />
+          <Square size={10} /> stop
         </button>
         <button
           onClick={save}
@@ -507,8 +595,18 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         this beat inherits the correction.
       </div>
 
-      <audio ref={instrRef} src={instrUrl || undefined} preload="auto" />
-      <audio ref={voiceRef} src={voiceUrl || undefined} preload="auto" />
+      <audio
+        ref={instrRef}
+        src={instrUrl || undefined}
+        preload="auto"
+        onEnded={() => { if (playing === 'instr') setPlaying('none') }}
+      />
+      <audio
+        ref={voiceRef}
+        src={voiceUrl || undefined}
+        preload="auto"
+        onEnded={() => { if (playing === 'voice') setPlaying('none') }}
+      />
     </div>
   )
 }
