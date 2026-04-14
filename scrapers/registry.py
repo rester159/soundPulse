@@ -42,6 +42,18 @@ SCRAPER_REGISTRY: dict[str, dict] = {
             "api_key": "CHARTMETRIC_API_KEY",
         },
     },
+    # Historical chart replay (Stage 2A, 2026-04-14). Inherits
+    # ChartmetricDeepUSScraper and iterates the ENDPOINT_MATRIX over a
+    # rotating 7-day window into the past (13-cycle rotation covers
+    # ~91 days). Fills in the historical rank grid for every tracked
+    # entity without blocking the live deep_us scraper.
+    "chartmetric_historical_replay": {
+        "module": "scrapers.chartmetric_historical_replay",
+        "class": "ChartmetricHistoricalReplayScraper",
+        "credentials": {
+            "api_key": "CHARTMETRIC_API_KEY",
+        },
+    },
     "chartmetric_playlist_crawler": {
         "module": "scrapers.chartmetric_playlist_crawler",
         "class": "ChartmetricPlaylistCrawler",

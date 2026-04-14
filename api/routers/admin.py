@@ -927,6 +927,65 @@ async def run_scraper_now(
     return {"detail": f"Scraper '{scraper_id}' triggered"}
 
 
+@router.get("/api/v1/admin/scraper-config/{scraper_id}/state")
+async def get_scraper_state(
+    scraper_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Return scraper_configs.config_json for a scraper.
+
+    Used by scrapers that need to persist small pieces of state across
+    runs (backfill cycle counters, cursor positions, etc.) without
+    needing their own sidecar table. Config is per-scraper-id.
+    """
+    result = await db.execute(select(ScraperConfig).where(ScraperConfig.id == scraper_id))
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Scraper '{scraper_id}' not found")
+    return {
+        "scraper_id": config.id,
+        "config_json": config.config_json or {},
+        "last_run_at": config.last_run_at.isoformat() if config.last_run_at else None,
+        "last_status": config.last_status,
+    }
+
+
+@router.patch("/api/v1/admin/scraper-config/{scraper_id}/state")
+async def patch_scraper_state(
+    scraper_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Merge new keys into scraper_configs.config_json for a scraper.
+
+    Body shape: {"config_json": {...}}. The provided dict is SHALLOW
+    merged into the existing config — pass a key with null to delete
+    it. Scrapers use this to persist resumable state.
+    """
+    result = await db.execute(select(ScraperConfig).where(ScraperConfig.id == scraper_id))
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Scraper '{scraper_id}' not found")
+    incoming = (body or {}).get("config_json") or {}
+    if not isinstance(incoming, dict):
+        raise HTTPException(status_code=422, detail="config_json must be an object")
+    current = dict(config.config_json or {})
+    for k, v in incoming.items():
+        if v is None:
+            current.pop(k, None)
+        else:
+            current[k] = v
+    config.config_json = current
+    config.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return {
+        "scraper_id": config.id,
+        "config_json": config.config_json,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Backfill endpoint
 # ---------------------------------------------------------------------------

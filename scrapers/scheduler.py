@@ -125,6 +125,11 @@ async def init_scheduler(database_url: str):
         # ENDPOINT_MATRIX. 3h cadence → ~2.2k/day. Captures intraday
         # rank changes on every confirmed platform × chart × genre combo.
         "chartmetric_deep_us": {"interval_hours": 3, "enabled": True},
+        # Historical chart replay (Stage 2A). Rotating 7-day backfill
+        # window through the ENDPOINT_MATRIX, 13-cycle rotation covers
+        # ~91 days of history. Daily cadence. ~1,967 calls/run,
+        # ~33 min runtime at 1.0s/req adaptive throttle.
+        "chartmetric_historical_replay": {"interval_hours": 24, "enabled": True},
         # Long-tail playlist crawler. ~15k calls per full run, 72h cadence
         # → ~5k/day amortized.
         "chartmetric_playlist_crawler": {"interval_hours": 72, "enabled": True},
