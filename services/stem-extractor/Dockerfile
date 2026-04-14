@@ -28,9 +28,14 @@ RUN pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu \
     torch==2.2.0 torchaudio==2.2.0
 
-# Demucs + the worker's HTTP + env loader deps
+# Demucs + the worker's HTTP + env loader deps.
+# diffq is required at model-load time for the quantized mdx_extra_q
+# variant — without it, get_model('mdx_extra_q') raises
+# "FATAL: Trying to use DiffQ, but diffq is not installed"
+# and the whole container crashes on first job.
 RUN pip install --no-cache-dir \
     demucs==4.0.1 \
+    diffq==0.2.4 \
     httpx==0.28.1 \
     python-dotenv==1.0.1
 
