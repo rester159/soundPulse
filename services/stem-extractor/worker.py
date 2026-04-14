@@ -59,11 +59,13 @@ API_BASE = (os.environ.get("SOUNDPULSE_API") or "http://localhost:8000").rstrip(
 API_KEY = os.environ.get("API_ADMIN_KEY", "").strip()
 WORKER_ID = os.environ.get("WORKER_ID", socket.gethostname())
 POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "30"))
-# mdx_extra_q is ~2-3x faster than htdemucs on CPU with a small
-# quality hit on the vocals stem — worth it on Railway's shared
-# vCPU where htdemucs on a ~3min track can brush the 30min wall.
-# Override with DEMUCS_MODEL=htdemucs if you're on a dedicated box.
-DEMUCS_MODEL = os.environ.get("DEMUCS_MODEL", "mdx_extra_q")
+# htdemucs is the default 4-stem hybrid-transformer model — best
+# quality on vocals. Slower than mdx_extra_q but the latter needs
+# diffq+gcc at build time which is more trouble than it's worth.
+# The DEMUCS_TIMEOUT_SEC=1800 default below covers ~3min songs on
+# Railway's shared vCPU. Override via DEMUCS_MODEL env var if you
+# pre-download another model into the container.
+DEMUCS_MODEL = os.environ.get("DEMUCS_MODEL", "htdemucs")
 # Hard cap on the Demucs subprocess. Set high enough to survive
 # shared-CPU contention on Railway, but still bounded so a bug
 # doesn't hang a worker forever. 30 min = 3x the typical p95.

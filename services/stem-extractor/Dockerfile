@@ -29,13 +29,12 @@ RUN pip install --no-cache-dir \
     torch==2.2.0 torchaudio==2.2.0
 
 # Demucs + the worker's HTTP + env loader deps.
-# diffq is required at model-load time for the quantized mdx_extra_q
-# variant — without it, get_model('mdx_extra_q') raises
-# "FATAL: Trying to use DiffQ, but diffq is not installed"
-# and the whole container crashes on first job.
+# We deliberately do NOT install diffq / use mdx_extra_q — the
+# quantized variant needs gcc at build time (for the bitpack C
+# extension) which bloats this image, and the plain htdemucs model
+# works fine within the 1800s Demucs timeout set in worker.py.
 RUN pip install --no-cache-dir \
     demucs==4.0.1 \
-    diffq==0.2.4 \
     httpx==0.28.1 \
     python-dotenv==1.0.1
 
@@ -58,15 +57,12 @@ RUN pip install --no-cache-dir "scipy>=1.11,<1.14" "librosa==0.10.2.post1"
 # PyTorch is already installed above — this is pure Python glue.
 RUN pip install --no-cache-dir silero-vad==5.1
 
-# Pre-download BOTH Demucs model weights at build time so cold start
-# is free regardless of which model the worker picks at runtime.
-#  - mdx_extra_q (default): ~2-3x faster on CPU, small quality hit
-#    on the vocals stem; comfortably fits in the 30min timeout on
-#    Railway's shared vCPU even for 3min+ songs.
-#  - htdemucs: best quality hybrid-transformer, kept as a fallback
-#    when DEMUCS_MODEL=htdemucs is set explicitly (dedicated CPU /
-#    quality-first jobs).
-RUN python -c "from demucs.pretrained import get_model; get_model('mdx_extra_q'); get_model('htdemucs')"
+# Pre-download the default Demucs model weights at build time so the
+# first job doesn't pay a ~500MB cold start. htdemucs is the
+# hybrid-transformer model, best quality for 4-stem separation.
+# On Railway's shared vCPU expect ~5-15 min per 3min song; the
+# worker's DEMUCS_TIMEOUT_SEC=1800 default covers this.
+RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
 
 COPY worker.py /app/
 
