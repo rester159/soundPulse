@@ -8859,3 +8859,171 @@ async def list_ceo_decisions(
         ],
         "count": len(rows),
     }
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — Chartmetric global ingest pipeline observability
+# ---------------------------------------------------------------------------
+#
+# Three endpoints power the "are we saturating the Chartmetric quota?"
+# dashboard without shelling into Neon:
+#
+#   GET /api/v1/admin/chartmetric/queue    — depth by priority bucket
+#   GET /api/v1/admin/chartmetric/burn     — calls/hour & calls/day vs quota
+#   GET /api/v1/admin/chartmetric/handlers — registered handlers + stats
+#
+# These read from chartmetric_request_queue (completed rows for burn,
+# pending rows for depth) and from the in-process handler registry.
+
+@router.get("/api/v1/admin/chartmetric/queue")
+async def get_chartmetric_queue_depth(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Depth of the request queue, bucketed by priority + producer."""
+    from sqlalchemy import text as sa_text
+
+    result = await db.execute(sa_text("""
+        SELECT
+            producer,
+            handler,
+            CASE
+                WHEN priority < 25 THEN 'p0_urgent'
+                WHEN priority < 50 THEN 'p1_high'
+                WHEN priority < 75 THEN 'p2_med'
+                ELSE 'p3_low'
+            END AS bucket,
+            COUNT(*) AS pending,
+            MIN(created_at) AS oldest
+        FROM chartmetric_request_queue
+        WHERE completed_at IS NULL AND started_at IS NULL
+        GROUP BY producer, handler, bucket
+        ORDER BY producer, handler, bucket
+    """))
+    rows = result.fetchall()
+
+    in_flight_result = await db.execute(sa_text("""
+        SELECT COUNT(*) AS n, MIN(started_at) AS oldest
+        FROM chartmetric_request_queue
+        WHERE completed_at IS NULL AND started_at IS NOT NULL
+    """))
+    in_flight = in_flight_result.fetchone()
+
+    return {
+        "pending_by_bucket": [
+            {
+                "producer": r.producer,
+                "handler": r.handler,
+                "priority_bucket": r.bucket,
+                "count": int(r.pending),
+                "oldest": r.oldest.isoformat() if r.oldest else None,
+            }
+            for r in rows
+        ],
+        "in_flight": {
+            "count": int(in_flight.n) if in_flight else 0,
+            "oldest": in_flight.oldest.isoformat() if in_flight and in_flight.oldest else None,
+        },
+    }
+
+
+@router.get("/api/v1/admin/chartmetric/burn")
+async def get_chartmetric_burn(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Rolling burn counts against the Chartmetric daily quota.
+
+    Reports last-1h, last-24h, and last-7d completed-job counts split
+    by response-status category, plus the computed utilization vs
+    the nominal 172,800 calls/day quota (2 req/s × 86,400 s).
+    """
+    from sqlalchemy import text as sa_text
+
+    result = await db.execute(sa_text("""
+        SELECT
+            SUM(CASE WHEN completed_at > now() - interval '1 hour' THEN 1 ELSE 0 END) AS last_1h,
+            SUM(CASE WHEN completed_at > now() - interval '24 hours' THEN 1 ELSE 0 END) AS last_24h,
+            SUM(CASE WHEN completed_at > now() - interval '7 days' THEN 1 ELSE 0 END) AS last_7d,
+            SUM(CASE
+                WHEN completed_at > now() - interval '24 hours'
+                 AND response_status BETWEEN 200 AND 299
+                THEN 1 ELSE 0
+            END) AS last_24h_success,
+            SUM(CASE
+                WHEN completed_at > now() - interval '24 hours'
+                 AND response_status = 429
+                THEN 1 ELSE 0
+            END) AS last_24h_rate_limited,
+            SUM(CASE
+                WHEN completed_at > now() - interval '24 hours'
+                 AND (response_status IS NULL OR response_status >= 400)
+                 AND response_status <> 429
+                THEN 1 ELSE 0
+            END) AS last_24h_errors
+        FROM chartmetric_request_queue
+        WHERE completed_at > now() - interval '7 days'
+    """))
+    row = result.fetchone()
+
+    quota_state = await db.execute(sa_text("""
+        SELECT adaptive_multiplier, last_429_at, updated_at
+        FROM chartmetric_quota_state
+        WHERE id = 1
+    """))
+    qstate = quota_state.fetchone()
+
+    daily_quota = 172_800  # 2 req/s × 86,400 s
+    last_24h = int(row.last_24h or 0) if row else 0
+    utilization_pct = (last_24h / daily_quota) * 100.0 if daily_quota else 0.0
+
+    return {
+        "daily_quota": daily_quota,
+        "utilization_pct_24h": round(utilization_pct, 2),
+        "calls_last_1h": int(row.last_1h or 0) if row else 0,
+        "calls_last_24h": last_24h,
+        "calls_last_7d": int(row.last_7d or 0) if row else 0,
+        "successes_last_24h": int(row.last_24h_success or 0) if row else 0,
+        "rate_limited_last_24h": int(row.last_24h_rate_limited or 0) if row else 0,
+        "errors_last_24h": int(row.last_24h_errors or 0) if row else 0,
+        "adaptive_multiplier": float(qstate.adaptive_multiplier) if qstate else None,
+        "last_429_at": qstate.last_429_at.isoformat() if qstate and qstate.last_429_at else None,
+    }
+
+
+@router.get("/api/v1/admin/chartmetric/handlers")
+async def get_chartmetric_handlers(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Registered handlers + per-handler success/error counts (last 24h)."""
+    from sqlalchemy import text as sa_text
+
+    from chartmetric_ingest import handlers as cmq_handlers
+
+    result = await db.execute(sa_text("""
+        SELECT
+            handler,
+            SUM(CASE WHEN response_status BETWEEN 200 AND 299 THEN 1 ELSE 0 END) AS ok,
+            SUM(CASE WHEN response_status = 429 THEN 1 ELSE 0 END) AS rl,
+            SUM(CASE WHEN response_status IS NULL OR response_status >= 400 THEN 1 ELSE 0 END) AS err,
+            COUNT(*) AS total
+        FROM chartmetric_request_queue
+        WHERE completed_at > now() - interval '24 hours'
+        GROUP BY handler
+        ORDER BY total DESC
+    """))
+    stats_by_handler = {
+        r.handler: {
+            "total_24h": int(r.total),
+            "ok": int(r.ok or 0),
+            "rate_limited": int(r.rl or 0),
+            "errors": int(r.err or 0),
+        }
+        for r in result.fetchall()
+    }
+
+    return {
+        "registered": cmq_handlers.all_handlers(),
+        "stats_24h": stats_by_handler,
+    }

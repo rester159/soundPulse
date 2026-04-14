@@ -41,7 +41,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("Scheduler startup failed: %s", e, exc_info=True)
 
+    # Stage 3 Phase A: spawn the single Chartmetric fetcher. Runs in
+    # dry-mode unless CHARTMETRIC_FETCHER_DRY_MODE=0 is set.
+    try:
+        from chartmetric_ingest import runner as cm_runner
+        await cm_runner.start()
+    except Exception as e:
+        log.warning("Chartmetric fetcher startup failed: %s", e, exc_info=True)
+
     yield
+
+    # Shutdown Chartmetric fetcher
+    try:
+        from chartmetric_ingest import runner as cm_runner
+        await cm_runner.stop()
+    except Exception:
+        pass
 
     # Shutdown scheduler
     try:
