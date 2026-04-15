@@ -6,12 +6,20 @@ handler registry, and logs metrics. No other code in the codebase is
 allowed to call `api.chartmetric.com` directly — L004 enforcement
 becomes "nothing except this file talks to Chartmetric."
 
-Dry mode
---------
-Controlled by `CHARTMETRIC_FETCHER_DRY_MODE` env var. Defaults to
-OFF (live) now that Phase B + C1 have shipped. Set the env var to 1
-to force dry-run — the fetcher will claim jobs, wait on the quota,
-and log what it *would* have fetched without hitting the API.
+Dry mode (removed 2026-04-15)
+-----------------------------
+Dry mode used to be a startup flag controlled by
+CHARTMETRIC_FETCHER_DRY_MODE. It's gone now. Rationale: Railway's
+rolling deploys sometimes left stale containers alive alongside the
+new one, and each container snapshotted its env vars at start time,
+so we ended up with two fetchers in different dry/live states
+fighting over the same queue. That made the pipeline state
+impossible to reason about.
+
+Deleting the dry path means any container — current or zombie —
+is forced into live mode. The single 1.5 req/s token bucket + the
+FOR UPDATE SKIP LOCKED job claim are enough to keep concurrent
+fetchers from doubling the API burn rate.
 
 Idle behavior
 -------------
@@ -54,14 +62,15 @@ ERROR_BACKOFF_SECONDS = 5.0
 STARTUP_DELAY_SECONDS = 30.0
 
 
-def _dry_mode_enabled() -> bool:
-    # Default ON while the live path is still being hardened — the first
-    # Phase D live attempt spammed 76 "429 observed" log lines in 40s and
-    # the container's Railway healthcheck on /health failed. Rolled back
-    # here so the fetcher drains the queue (proving the bookkeeping path
-    # is healthy) without actually hitting Chartmetric. Opt in to live
-    # mode per-deployment via CHARTMETRIC_FETCHER_DRY_MODE=0.
-    return os.environ.get("CHARTMETRIC_FETCHER_DRY_MODE", "1") == "1"
+def _instance_id() -> str:
+    """Short identifier for this fetcher process so we can tell how
+    many are running concurrently. Logged on start + on 429 events."""
+    import socket
+    try:
+        host = socket.gethostname()[:12]
+    except Exception:
+        host = "unknown"
+    return f"{host}:{os.getpid()}"
 
 
 class ChartmetricFetcher:
@@ -79,7 +88,6 @@ class ChartmetricFetcher:
             "claimed": 0,
             "completed": 0,
             "errors": 0,
-            "dry_logged": 0,
             "rate_limited": 0,
         }
 
@@ -91,11 +99,10 @@ class ChartmetricFetcher:
         except Exception:
             logger.exception("[cm-fetcher] load_state failed — using defaults")
 
-        dry = _dry_mode_enabled()
         logger.info(
-            "[cm-fetcher] starting loop dry_mode=%s rate=%.2f req/s "
+            "[cm-fetcher] starting loop instance=%s rate=%.2f req/s "
             "(holding %.0fs for healthcheck window)",
-            dry, self._quota.current_rate, STARTUP_DELAY_SECONDS,
+            _instance_id(), self._quota.current_rate, STARTUP_DELAY_SECONDS,
         )
         try:
             await self._sleep_interruptible(STARTUP_DELAY_SECONDS)
@@ -149,17 +156,6 @@ class ChartmetricFetcher:
         self._stats["claimed"] += 1
 
         await self._quota.acquire()
-
-        if _dry_mode_enabled():
-            self._stats["dry_logged"] += 1
-            logger.info(
-                "[cm-fetcher][dry] would fetch id=%d handler=%s url=%s params=%s",
-                job.id, job.handler, job.url, job.params,
-            )
-            async with self._session_factory() as db:
-                await cmq_queue.complete(db, job.id, status=0, error="dry-mode")
-            self._stats["completed"] += 1
-            return True
 
         resp = await self._fetch_one(job.url, job.params)
         if resp is None:
