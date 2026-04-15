@@ -84,7 +84,14 @@ BATCH_SIZE_PER_PLATFORM = 1500     # 1500 * 3 * 20 = 90k/hr emission ceiling
 JOB_EXPIRES_IN_HOURS = 6.0
 
 
-@register("track_history", interval_seconds=PLANNER_INTERVAL_SECONDS)
+# DISABLED 2026-04-15 — Chartmetric's per-track stat endpoints
+# (/api/track/{id}/stat/{source} and all variants probed) return
+# 401 "not authorized to access this Chartmetric internal API
+# endpoint" on our plan. The `@register` decorator is commented out
+# so importing this module does not install the planner. The
+# function + PLATFORM_SPECS stay in place so the handler and the
+# tests can keep importing them.
+# @register("track_history", interval_seconds=PLANNER_INTERVAL_SECONDS)
 async def plan_track_history(db: AsyncSession) -> int:
     """Enqueue the stalest (track, platform) pairs up to BATCH_SIZE each."""
     enabled_specs = await _enabled_specs(db)

@@ -67,6 +67,16 @@ def clear_for_tests() -> None:
 
 
 # ---- self-bootstrapping planners ----
-from chartmetric_ingest.planners import track_history  # noqa: F401,E402
+# track_history is DISABLED as of 2026-04-15. Live probe against
+# Chartmetric returned 401 "Session token not found or was expired.
+# User is not authorized to access this Chartmetric internal API
+# endpoint." on every candidate URL for per-track stats
+# (/api/track/{id}/stat/{source}, /stats/{source}, /fanmetric/{source},
+# /{source}/history, ...). Those endpoints are internal-API-tier and
+# not on our Chartmetric plan. Leaving the module in the tree so the
+# handler import chain stays intact, but NOT registering the planner
+# means zero jobs get emitted. Re-enable once we either upgrade the
+# tier or wire up a non-Chartmetric track-stat source.
+# from chartmetric_ingest.planners import track_history  # noqa: F401,E402
 from chartmetric_ingest.planners import artist_stats   # noqa: F401,E402
 from chartmetric_ingest.planners import chart_sweep    # noqa: F401,E402
