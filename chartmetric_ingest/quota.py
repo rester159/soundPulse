@@ -34,9 +34,19 @@ from api.models.chartmetric_queue import ChartmetricQuotaState
 
 logger = logging.getLogger(__name__)
 
-# 90% of Chartmetric's documented 2 req/s ceiling. This is a per-second
+# 75% of Chartmetric's documented 2 req/s ceiling. This is a per-second
 # average — the bucket absorbs short bursts via BURST.
-BASE_RATE = 1.8
+#
+# We dropped from 1.8 (90%) to 1.5 (75%) after the 2026-04-15 saturation
+# attempt showed 1.8 req/s immediately triggered 429s, which dragged the
+# adaptive multiplier down to 0.5x — NET throughput ended up BELOW 1.0
+# req/s. The 90% headline gave us 54% actual. 1.5 req/s gives a wider
+# safety margin and avoids the throttle-bounce: with no 429s, effective
+# throughput is 1.5 req/s × 86,400 s/day = 129,600 req/day = 75% of
+# quota — a real 75% beats a theoretical 90% that adaptive-throttles to
+# 54%. Once we verify this settles cleanly, we can tick back up to 1.65
+# or 1.75 to recover some headroom.
+BASE_RATE = 1.5
 BURST = 5
 
 # How much the multiplier drops on a 429 event.

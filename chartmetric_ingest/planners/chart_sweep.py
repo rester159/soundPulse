@@ -56,186 +56,121 @@ BATCH_SIZE = 100
 JOB_EXPIRES_IN_HOURS = 2.0
 
 
-# (endpoint_key, path, params, chart_type, country, platform)
-# The endpoint_key must match a row in chartmetric_endpoint_config.
+# Each entry specifies the (endpoint_key, path, params) needed for one
+# chart sweep call. Param shapes were cross-referenced against
+# `scrapers/chartmetric_deep_us.py` ENDPOINT_MATRIX, which was probed
+# against the live Chartmetric API on 2026-04-11 and has been running
+# in production without 400s. Key param rules we rediscovered the
+# hard way:
+#   - Most chart endpoints want `country_code` (lowercase value).
+#     Amazon is the one exception — it wants `code2` (uppercase value).
+#   - Spotify /artists is a GLOBAL chart. No country param at all.
+#   - Shazam /charts/shazam wants country_code=us (the "global" chart
+#     also needs a specific country).
+#   - TikTok charts are GLOBAL — no country param.
+#   - Deezer's path ends with a trailing slash: `/api/charts/deezer/`.
+#
+# Endpoints that REQUIRE a genre fan-out (Apple Music tracks, iTunes,
+# SoundCloud, Beatport, Amazon) are OMITTED from chart_sweep for now
+# — they'd require a per-genre loop that bloats the matrix, and the
+# primary saturation sources are track_history + artist_stats anyway.
+# chart_sweep is the "always has work" floor, not the volume driver.
 CHART_ENDPOINTS: list[dict[str, Any]] = [
-    # Spotify — regional + viral across top markets
-    {
-        "endpoint_key": "chart_sweep_spotify_regional_us",
-        "path": "/api/charts/spotify",
-        "params": {"type": "regional", "code2": "US", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "regional",
-        "country": "us",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_regional_gb",
-        "path": "/api/charts/spotify",
-        "params": {"type": "regional", "code2": "GB", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "regional",
-        "country": "gb",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_regional_de",
-        "path": "/api/charts/spotify",
-        "params": {"type": "regional", "code2": "DE", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "regional",
-        "country": "de",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_regional_fr",
-        "path": "/api/charts/spotify",
-        "params": {"type": "regional", "code2": "FR", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "regional",
-        "country": "fr",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_regional_br",
-        "path": "/api/charts/spotify",
-        "params": {"type": "regional", "code2": "BR", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "regional",
-        "country": "br",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_regional_mx",
-        "path": "/api/charts/spotify",
-        "params": {"type": "regional", "code2": "MX", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "regional",
-        "country": "mx",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_viral_us",
-        "path": "/api/charts/spotify",
-        "params": {"type": "viral", "code2": "US", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "viral",
-        "country": "us",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_viral_gb",
-        "path": "/api/charts/spotify",
-        "params": {"type": "viral", "code2": "GB", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "viral",
-        "country": "gb",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_viral_de",
-        "path": "/api/charts/spotify",
-        "params": {"type": "viral", "code2": "DE", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "viral",
-        "country": "de",
-    },
-    {
-        "endpoint_key": "chart_sweep_spotify_viral_br",
-        "path": "/api/charts/spotify",
-        "params": {"type": "viral", "code2": "BR", "interval": "daily"},
-        "platform": "spotify",
-        "chart_type": "viral",
-        "country": "br",
-    },
-    # Shazam top — single global plus US
-    {
-        "endpoint_key": "chart_sweep_shazam_us",
-        "path": "/api/charts/shazam",
-        "params": {"type": "top", "country_iso_code": "US"},
-        "platform": "shazam",
-        "chart_type": "top",
-        "country": "us",
-    },
-    {
-        "endpoint_key": "chart_sweep_shazam_world",
-        "path": "/api/charts/shazam",
-        "params": {"type": "top", "country_iso_code": "WORLD"},
-        "platform": "shazam",
-        "chart_type": "top",
-        "country": "world",
-    },
-    # Apple Music top songs by region
-    {
-        "endpoint_key": "chart_sweep_apple_top_us",
-        "path": "/api/charts/applemusic",
-        "params": {"type": "top", "country_iso_code": "US"},
-        "platform": "apple_music",
-        "chart_type": "top",
-        "country": "us",
-    },
-    {
-        "endpoint_key": "chart_sweep_apple_top_gb",
-        "path": "/api/charts/applemusic",
-        "params": {"type": "top", "country_iso_code": "GB"},
-        "platform": "apple_music",
-        "chart_type": "top",
-        "country": "gb",
-    },
-    {
-        "endpoint_key": "chart_sweep_apple_top_de",
-        "path": "/api/charts/applemusic",
-        "params": {"type": "top", "country_iso_code": "DE"},
-        "platform": "apple_music",
-        "chart_type": "top",
-        "country": "de",
-    },
-    # Amazon Music
-    {
-        "endpoint_key": "chart_sweep_amazon_us",
-        "path": "/api/charts/amazon",
-        "params": {"type": "top", "code2": "US"},
-        "platform": "amazon",
-        "chart_type": "top",
-        "country": "us",
-    },
-    # Deezer
-    {
-        "endpoint_key": "chart_sweep_deezer_us",
-        "path": "/api/charts/deezer",
-        "params": {"type": "top", "code2": "US"},
-        "platform": "deezer",
-        "chart_type": "top",
-        "country": "us",
-    },
-    # SoundCloud
-    {
-        "endpoint_key": "chart_sweep_soundcloud_global",
-        "path": "/api/charts/soundcloud",
-        "params": {"type": "top", "code2": "US"},
-        "platform": "soundcloud",
-        "chart_type": "top",
-        "country": "us",
-    },
-    # YouTube
-    {
-        "endpoint_key": "chart_sweep_youtube_us",
-        "path": "/api/charts/youtube",
-        "params": {"type": "top", "code2": "US"},
-        "platform": "youtube",
-        "chart_type": "top",
-        "country": "us",
-    },
-    # iTunes
-    {
-        "endpoint_key": "chart_sweep_itunes_us",
-        "path": "/api/charts/itunes",
-        "params": {"type": "top", "code2": "US"},
-        "platform": "itunes",
-        "chart_type": "top",
-        "country": "us",
-    },
-    # Beatport
-    {
-        "endpoint_key": "chart_sweep_beatport_global",
-        "path": "/api/charts/beatport",
-        "params": {"type": "top"},
-        "platform": "beatport",
-        "chart_type": "top",
-        "country": None,
-    },
+    # ---------- Spotify tracks: regional (daily) across top markets ----------
+    {"endpoint_key": "chart_sweep_spotify_regional_us",
+     "path": "/api/charts/spotify",
+     "params": {"type": "regional", "interval": "daily", "country_code": "us"},
+     "platform": "spotify", "chart_type": "regional", "country": "us"},
+    {"endpoint_key": "chart_sweep_spotify_regional_gb",
+     "path": "/api/charts/spotify",
+     "params": {"type": "regional", "interval": "daily", "country_code": "gb"},
+     "platform": "spotify", "chart_type": "regional", "country": "gb"},
+    {"endpoint_key": "chart_sweep_spotify_regional_de",
+     "path": "/api/charts/spotify",
+     "params": {"type": "regional", "interval": "daily", "country_code": "de"},
+     "platform": "spotify", "chart_type": "regional", "country": "de"},
+    {"endpoint_key": "chart_sweep_spotify_regional_fr",
+     "path": "/api/charts/spotify",
+     "params": {"type": "regional", "interval": "daily", "country_code": "fr"},
+     "platform": "spotify", "chart_type": "regional", "country": "fr"},
+    {"endpoint_key": "chart_sweep_spotify_regional_br",
+     "path": "/api/charts/spotify",
+     "params": {"type": "regional", "interval": "daily", "country_code": "br"},
+     "platform": "spotify", "chart_type": "regional", "country": "br"},
+    {"endpoint_key": "chart_sweep_spotify_regional_mx",
+     "path": "/api/charts/spotify",
+     "params": {"type": "regional", "interval": "daily", "country_code": "mx"},
+     "platform": "spotify", "chart_type": "regional", "country": "mx"},
+
+    # ---------- Spotify tracks: viral (daily) across top markets ----------
+    {"endpoint_key": "chart_sweep_spotify_viral_us",
+     "path": "/api/charts/spotify",
+     "params": {"type": "viral", "interval": "daily", "country_code": "us"},
+     "platform": "spotify", "chart_type": "viral", "country": "us"},
+    {"endpoint_key": "chart_sweep_spotify_viral_gb",
+     "path": "/api/charts/spotify",
+     "params": {"type": "viral", "interval": "daily", "country_code": "gb"},
+     "platform": "spotify", "chart_type": "viral", "country": "gb"},
+    {"endpoint_key": "chart_sweep_spotify_viral_de",
+     "path": "/api/charts/spotify",
+     "params": {"type": "viral", "interval": "daily", "country_code": "de"},
+     "platform": "spotify", "chart_type": "viral", "country": "de"},
+    {"endpoint_key": "chart_sweep_spotify_viral_br",
+     "path": "/api/charts/spotify",
+     "params": {"type": "viral", "interval": "daily", "country_code": "br"},
+     "platform": "spotify", "chart_type": "viral", "country": "br"},
+
+    # ---------- Spotify /artists (GLOBAL, no country param) ----------
+    # 5 type variants: monthly_listeners / popularity / followers /
+    # playlist_count / playlist_reach. Interval is weekly.
+    {"endpoint_key": "chart_sweep_spotify_artists_monthly_listeners",
+     "path": "/api/charts/spotify/artists",
+     "params": {"type": "monthly_listeners", "interval": "weekly"},
+     "platform": "spotify", "chart_type": "artists_monthly_listeners", "country": None,
+     "entity_type": "artist"},
+    {"endpoint_key": "chart_sweep_spotify_artists_popularity",
+     "path": "/api/charts/spotify/artists",
+     "params": {"type": "popularity", "interval": "weekly"},
+     "platform": "spotify", "chart_type": "artists_popularity", "country": None,
+     "entity_type": "artist"},
+    {"endpoint_key": "chart_sweep_spotify_artists_followers",
+     "path": "/api/charts/spotify/artists",
+     "params": {"type": "followers", "interval": "weekly"},
+     "platform": "spotify", "chart_type": "artists_followers", "country": None,
+     "entity_type": "artist"},
+    {"endpoint_key": "chart_sweep_spotify_artists_playlist_reach",
+     "path": "/api/charts/spotify/artists",
+     "params": {"type": "playlist_reach", "interval": "weekly"},
+     "platform": "spotify", "chart_type": "artists_playlist_reach", "country": None,
+     "entity_type": "artist"},
+
+    # ---------- Shazam (country_code required) ----------
+    {"endpoint_key": "chart_sweep_shazam_us",
+     "path": "/api/charts/shazam",
+     "params": {"country_code": "us"},
+     "platform": "shazam", "chart_type": "top", "country": "us"},
+
+    # ---------- TikTok (GLOBAL, no country, weekly interval) ----------
+    {"endpoint_key": "chart_sweep_tiktok_tracks",
+     "path": "/api/charts/tiktok/tracks",
+     "params": {"interval": "weekly"},
+     "platform": "tiktok", "chart_type": "tracks_weekly", "country": None},
+    {"endpoint_key": "chart_sweep_tiktok_videos",
+     "path": "/api/charts/tiktok/videos",
+     "params": {"interval": "weekly"},
+     "platform": "tiktok", "chart_type": "videos_weekly", "country": None},
+
+    # ---------- Deezer (trailing slash in path, country_code required) ----------
+    {"endpoint_key": "chart_sweep_deezer_us",
+     "path": "/api/charts/deezer/",
+     "params": {"country_code": "us"},
+     "platform": "deezer", "chart_type": "top", "country": "us"},
+
+    # ---------- Apple Music videos (global, no genre) ----------
+    {"endpoint_key": "chart_sweep_apple_videos",
+     "path": "/api/charts/applemusic/videos",
+     "params": {},
+     "platform": "apple_music", "chart_type": "videos", "country": None},
 ]
 
 

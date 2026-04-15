@@ -26,6 +26,18 @@ from chartmetric_ingest.priority import freshness_score, priority_from_scores
 logger = logging.getLogger(__name__)
 
 
+# IMPORTANT: the `platform` value is the URL segment that goes into
+# /api/artist/{id}/stat/{platform}, and Chartmetric enforces a strict
+# enum there. Valid sources (observed via 400-error messages in
+# production 2026-04-14):
+#   spotify, deezer, facebook, twitter, instagram, youtube_channel,
+#   youtube_artist, wikipedia, bandsintown, soundcloud, tiktok,
+#   twitch, line, melon, bilibili, snap
+# Notably: "youtube" and "shazam" are NOT valid. Use `youtube_channel`
+# for the artist's channel subscribers/views, and drop shazam entirely
+# (artist-level shazam stats are served from a different endpoint
+# family — follow-up task to wire up /api/artist/{id}/shazam/counts
+# or whatever the correct path turns out to be).
 PLATFORM_SPECS: list[dict[str, Any]] = [
     {
         "endpoint_key": "artist_stat_spotify",
@@ -43,19 +55,17 @@ PLATFORM_SPECS: list[dict[str, Any]] = [
         "metrics": ["followers", "likes"],
     },
     {
+        # Endpoint-key stays 'artist_stat_youtube' for continuity with
+        # the pre-existing config row — the URL segment is
+        # 'youtube_channel' which is what Chartmetric actually accepts.
         "endpoint_key": "artist_stat_youtube",
-        "platform": "youtube",
+        "platform": "youtube_channel",
         "metrics": ["subscribers", "views"],
     },
     {
         "endpoint_key": "artist_stat_twitter",
         "platform": "twitter",
         "metrics": ["followers"],
-    },
-    {
-        "endpoint_key": "artist_stat_shazam",
-        "platform": "shazam",
-        "metrics": ["shazams"],
     },
 ]
 

@@ -106,25 +106,18 @@ DEFAULT_ENDPOINT_CONFIGS: list[dict[str, Any]] = [
         "priority_weight": 0.6,
         "notes": "Per-artist Twitter followers (slow-moving, lower weight)",
     },
-    {
-        "endpoint_key": "artist_stat_shazam",
-        "target_interval_hours": 12.0,
-        "priority_weight": 0.8,
-        "notes": "Per-artist total Shazam count",
-    },
+    # NOTE: artist_stat_shazam was removed after 2026-04-14 — Chartmetric's
+    # /api/artist/{id}/stat/{source} endpoint does not accept "shazam" as
+    # a source (400 'source must be one of [...]'). Wire to a dedicated
+    # shazam endpoint in a follow-up task if per-artist shazam stats
+    # become important again.
 
     # ---------------------------------------------------------------
-    # Chart sweep — fixed matrix of chart endpoints. Entity-count
-    # independent: these endpoints always exist regardless of how
-    # many tracks/artists we have. This is the saturation floor that
-    # keeps the queue warm when per-entity planners run out of work.
-    #
-    # 30-minute target interval on most rows = each endpoint fires
-    # ~48 times/day. With ~20 endpoints below, that's 960 job-
-    # emission events/day from chart_sweep alone — dedup-merged
-    # against pending rows, so the effective rate is bounded by the
-    # fetcher's 1.8 req/s drain.
+    # Chart sweep — confirmed-working matrix, no genre-required
+    # endpoints. Keys must match CHART_ENDPOINTS in
+    # chartmetric_ingest/planners/chart_sweep.py.
     # ---------------------------------------------------------------
+    # Spotify regional (daily) across 6 markets
     {"endpoint_key": "chart_sweep_spotify_regional_us", "target_interval_hours": 0.5, "priority_weight": 1.2,
      "notes": "Spotify regional chart US"},
     {"endpoint_key": "chart_sweep_spotify_regional_gb", "target_interval_hours": 1.0, "priority_weight": 1.0,
@@ -137,6 +130,8 @@ DEFAULT_ENDPOINT_CONFIGS: list[dict[str, Any]] = [
      "notes": "Spotify regional chart BR"},
     {"endpoint_key": "chart_sweep_spotify_regional_mx", "target_interval_hours": 1.0, "priority_weight": 1.0,
      "notes": "Spotify regional chart MX"},
+
+    # Spotify viral (daily) across 4 markets
     {"endpoint_key": "chart_sweep_spotify_viral_us", "target_interval_hours": 0.5, "priority_weight": 1.2,
      "notes": "Spotify viral chart US"},
     {"endpoint_key": "chart_sweep_spotify_viral_gb", "target_interval_hours": 1.0, "priority_weight": 1.0,
@@ -145,28 +140,34 @@ DEFAULT_ENDPOINT_CONFIGS: list[dict[str, Any]] = [
      "notes": "Spotify viral chart DE"},
     {"endpoint_key": "chart_sweep_spotify_viral_br", "target_interval_hours": 1.0, "priority_weight": 1.0,
      "notes": "Spotify viral chart BR"},
-    {"endpoint_key": "chart_sweep_shazam_us", "target_interval_hours": 0.5, "priority_weight": 1.2,
+
+    # Spotify /artists (GLOBAL, no country) — 4 confirmed-working type variants
+    {"endpoint_key": "chart_sweep_spotify_artists_monthly_listeners", "target_interval_hours": 6.0, "priority_weight": 1.0,
+     "notes": "Spotify artists ranked by monthly listeners"},
+    {"endpoint_key": "chart_sweep_spotify_artists_popularity", "target_interval_hours": 6.0, "priority_weight": 1.0,
+     "notes": "Spotify artists ranked by popularity"},
+    {"endpoint_key": "chart_sweep_spotify_artists_followers", "target_interval_hours": 6.0, "priority_weight": 1.0,
+     "notes": "Spotify artists ranked by follower count"},
+    {"endpoint_key": "chart_sweep_spotify_artists_playlist_reach", "target_interval_hours": 6.0, "priority_weight": 1.0,
+     "notes": "Spotify artists ranked by playlist reach"},
+
+    # Shazam top US (country_code=us)
+    {"endpoint_key": "chart_sweep_shazam_us", "target_interval_hours": 1.0, "priority_weight": 1.0,
      "notes": "Shazam top chart US"},
-    {"endpoint_key": "chart_sweep_shazam_world", "target_interval_hours": 1.0, "priority_weight": 1.0,
-     "notes": "Shazam top chart WORLD"},
-    {"endpoint_key": "chart_sweep_apple_top_us", "target_interval_hours": 0.5, "priority_weight": 1.2,
-     "notes": "Apple Music top US"},
-    {"endpoint_key": "chart_sweep_apple_top_gb", "target_interval_hours": 1.0, "priority_weight": 1.0,
-     "notes": "Apple Music top GB"},
-    {"endpoint_key": "chart_sweep_apple_top_de", "target_interval_hours": 1.0, "priority_weight": 1.0,
-     "notes": "Apple Music top DE"},
-    {"endpoint_key": "chart_sweep_amazon_us", "target_interval_hours": 1.0, "priority_weight": 0.9,
-     "notes": "Amazon Music top US"},
-    {"endpoint_key": "chart_sweep_deezer_us", "target_interval_hours": 1.0, "priority_weight": 0.8,
+
+    # TikTok tracks + videos, weekly (GLOBAL, no country)
+    {"endpoint_key": "chart_sweep_tiktok_tracks", "target_interval_hours": 6.0, "priority_weight": 1.1,
+     "notes": "TikTok tracks weekly (global)"},
+    {"endpoint_key": "chart_sweep_tiktok_videos", "target_interval_hours": 6.0, "priority_weight": 1.1,
+     "notes": "TikTok videos weekly (global)"},
+
+    # Deezer top (trailing-slash path, country_code=us)
+    {"endpoint_key": "chart_sweep_deezer_us", "target_interval_hours": 6.0, "priority_weight": 0.7,
      "notes": "Deezer top US"},
-    {"endpoint_key": "chart_sweep_soundcloud_global", "target_interval_hours": 1.0, "priority_weight": 0.8,
-     "notes": "SoundCloud top"},
-    {"endpoint_key": "chart_sweep_youtube_us", "target_interval_hours": 1.0, "priority_weight": 1.0,
-     "notes": "YouTube top US"},
-    {"endpoint_key": "chart_sweep_itunes_us", "target_interval_hours": 1.0, "priority_weight": 0.9,
-     "notes": "iTunes top US"},
-    {"endpoint_key": "chart_sweep_beatport_global", "target_interval_hours": 2.0, "priority_weight": 0.7,
-     "notes": "Beatport top global"},
+
+    # Apple Music videos (global, no genre)
+    {"endpoint_key": "chart_sweep_apple_videos", "target_interval_hours": 12.0, "priority_weight": 0.6,
+     "notes": "Apple Music videos (global)"},
 ]
 
 
