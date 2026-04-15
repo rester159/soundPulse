@@ -791,9 +791,14 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
           region {instrStart.toFixed(2)}→{instrEnd.toFixed(2)}s
         </span>
         <button
-          onClick={() => setZoomLevel(z => z === 1 ? 3 : z === 3 ? 5 : 1)}
+          onClick={() => {
+            const cycle = [1, 3, 5, 7, 10]
+            const idx = cycle.indexOf(zoomLevel)
+            const next = cycle[(idx + 1) % cycle.length]
+            setZoomLevel(next)
+          }}
           className="px-1.5 py-0.5 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-400 font-mono text-[9px]"
-          title="Cycle timeline zoom (1x / 3x / 5x)"
+          title="Cycle timeline zoom (1x / 3x / 5x / 7x / 10x)"
         >
           {zoomLevel}x
         </button>
