@@ -255,10 +255,12 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   const [instrEnd, setInstrEnd] = useState(0)
   const [voiceEntry, setVoiceEntry] = useState(0)
   // Session-only scratch pin on the voice lane. `null` means no pin;
-  // number = seconds on the shared instrumental time axis. The CEO
-  // toggles it via the "+ orange pin" button, then drags or arrow-
-  // keys it to test alignments without touching the persisted
-  // vocal_entry_seconds.
+  // number = OFFSET in seconds from voiceEntry (NOT absolute
+  // instrumental-axis seconds). Storing as an offset means the pin
+  // is "attached" to the voice block — when the CEO drags the green
+  // block from 10s to 20s, the orange pin slides with it instead of
+  // staying at its old absolute position. Absolute render position
+  // is always voiceEntry + orangePin.
   const [orangePin, setOrangePin] = useState(null)
   // Horizontal zoom level for the timeline lanes. 1x = the whole
   // duration fits in the visible width; 3x / 5x widen the inner
@@ -607,7 +609,12 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
       } else if (pinKind === 'voice') {
         setVoiceEntry(Math.max(0, Math.min(instrDur, Number(t.toFixed(3)))))
       } else if (pinKind === 'orangePin') {
-        setOrangePin(Math.max(0, Math.min(instrDur, Number(t.toFixed(3)))))
+        // Drag position is in absolute instrumental-axis seconds;
+        // persist as an offset from voiceEntry so the pin stays
+        // attached to the green block if it moves later.
+        const offset = t - voiceEntry
+        const maxOffset = instrDur - voiceEntry
+        setOrangePin(Math.max(-voiceEntry, Math.min(maxOffset, Number(offset.toFixed(3)))))
       }
     }
     function onUp() {
@@ -699,15 +706,18 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     e.preventDefault()
     setOrangePin(v => {
       if (v == null) return v
-      return Math.max(0, Math.min(instrDur, Number((v + step).toFixed(3))))
+      // Clamp so the pin's absolute position (voiceEntry + offset)
+      // stays inside [0, instrDur].
+      const next = Number((v + step).toFixed(3))
+      return Math.max(-voiceEntry, Math.min(instrDur - voiceEntry, next))
     })
   }
 
   function toggleOrangePin() {
     if (orangePin == null) {
-      // Spawn it at the current voice entry so it starts somewhere
-      // meaningful. The CEO then drags / nudges it from there.
-      setOrangePin(voiceEntry)
+      // Spawn the pin AT the voice entry (offset = 0). The CEO
+      // then drags / nudges the offset from there.
+      setOrangePin(0)
     } else {
       setOrangePin(null)
     }
@@ -943,22 +953,28 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
             in the footer, then drags it or nudges it with ←→ ±0.1s /
             ↑↓ ±1s. Not wired to playback or the persisted vocal
             entry; purely a reference/experiment marker. */}
-        {orangePin !== null && (
-          <div
-            tabIndex={0}
-            onPointerDown={(e) => startDrag('orangePin', e)}
-            onKeyDown={onOrangePinKey}
-            className="absolute top-0 bottom-0 cursor-ew-resize touch-none focus:outline-none z-20 group"
-            style={{ left: pct(orangePin), transform: 'translateX(-50%)', width: '14px' }}
-            title={`scratch pin ${orangePin.toFixed(3)}s (click to focus, ←→ ±0.1s, ↑↓ ±1s, Del to remove)`}
-          >
-            <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-orange-400 group-focus:bg-orange-300 group-focus:w-[3px] transition-all" />
-            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-orange-400 rounded-sm group-focus:bg-orange-300 group-focus:scale-125 group-focus:ring-2 group-focus:ring-orange-300/60 transition-all" />
-            <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-[9px] text-orange-300 font-mono whitespace-nowrap pointer-events-none">
-              {orangePin.toFixed(2)}
+        {orangePin !== null && (() => {
+          // Absolute position on the instrumental axis = voice entry
+          // + the saved offset. This is what we render at and what
+          // we show in the hover/label.
+          const abs = voiceEntry + orangePin
+          return (
+            <div
+              tabIndex={0}
+              onPointerDown={(e) => startDrag('orangePin', e)}
+              onKeyDown={onOrangePinKey}
+              className="absolute top-0 bottom-0 cursor-ew-resize touch-none focus:outline-none z-20 group"
+              style={{ left: pct(abs), transform: 'translateX(-50%)', width: '14px' }}
+              title={`scratch pin ${abs.toFixed(3)}s (voice-relative +${orangePin.toFixed(3)}s; click to focus, ←→ ±0.1s, ↑↓ ±1s, Del to remove)`}
+            >
+              <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-orange-400 group-focus:bg-orange-300 group-focus:w-[3px] transition-all" />
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-orange-400 rounded-sm group-focus:bg-orange-300 group-focus:scale-125 group-focus:ring-2 group-focus:ring-orange-300/60 transition-all" />
+              <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-[9px] text-orange-300 font-mono whitespace-nowrap pointer-events-none">
+                {abs.toFixed(2)}
+              </div>
             </div>
-          </div>
-        )}
+          )
+        })()}
         {/* Voice playhead — same visual as the instrumental one. The
             position is in the shared instrumental time axis (so when
             voice is playing, the bar slides through the green block). */}
