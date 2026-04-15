@@ -34,20 +34,27 @@ from api.models.chartmetric_queue import ChartmetricQuotaState
 
 logger = logging.getLogger(__name__)
 
-# 75% of Chartmetric's documented 2 req/s ceiling. This is a per-second
+# 50% of Chartmetric's documented 2 req/s ceiling. This is a per-second
 # average — the bucket absorbs short bursts via BURST.
 #
-# We dropped from 1.8 (90%) to 1.5 (75%) after the 2026-04-15 saturation
-# attempt showed 1.8 req/s immediately triggered 429s, which dragged the
-# adaptive multiplier down to 0.5x — NET throughput ended up BELOW 1.0
-# req/s. The 90% headline gave us 54% actual. 1.5 req/s gives a wider
-# safety margin and avoids the throttle-bounce: with no 429s, effective
-# throughput is 1.5 req/s × 86,400 s/day = 129,600 req/day = 75% of
-# quota — a real 75% beats a theoretical 90% that adaptive-throttles to
-# 54%. Once we verify this settles cleanly, we can tick back up to 1.65
-# or 1.75 to recover some headroom.
-BASE_RATE = 1.5
-BURST = 5
+# Setting history for this codebase:
+#   1.8 req/s (90%) — first Phase D attempt. Immediately tripped
+#                     Chartmetric's per-burst enforcement, adaptive
+#                     multiplier stuck at 0.5x, net throughput ~0.9.
+#   1.5 req/s (75%) — second attempt. Still triggered 429 bounce
+#                     (~60% 429 rate sustained). adaptive multiplier
+#                     also stuck at 0.5x. Chartmetric's actual per-tier
+#                     ceiling seems to be well below the documented 2.
+#   1.0 req/s (50%) — current. Aiming BELOW the observed throttle-
+#                     bounce point so the multiplier can recover to
+#                     1.0 and STAY there. At 1.0 clean: 86,400 calls/day
+#                     = 50% of quota, deterministic, no waste.
+#
+# 50% sustained > 75% theoretical with throttle bounce. We can tick
+# back up toward 1.25/1.35 once the multiplier has held at 1.0 for
+# an hour. See L004 in planning/lessons.md.
+BASE_RATE = 1.0
+BURST = 3
 
 # How much the multiplier drops on a 429 event.
 THROTTLE_MULTIPLIER = 0.5
