@@ -209,6 +209,12 @@ async def plan_chart_sweep(db: AsyncSession) -> int:
     enqueued = 0
     for spec, cfg, last_fetched in candidates[:BATCH_SIZE]:
         url = f"{API_BASE}{spec['path']}"
+        # Chartmetric's chart endpoints require a `date` param or an
+        # explicit `latest=true` to return the most recent chart.
+        # Without either they respond 400 "No date was given". We want
+        # the newest chart every poll, so latest=true is the simplest
+        # shape — merged with the per-endpoint static params.
+        params = {**spec["params"], "latest": "true"}
         freshness = freshness_score(last_fetched, cfg.target_interval_hours)
         priority = priority_from_scores(
             freshness=freshness,
@@ -218,7 +224,7 @@ async def plan_chart_sweep(db: AsyncSession) -> int:
         job_id = await cmq_queue.enqueue(
             db,
             url=url,
-            params=spec["params"],
+            params=params,
             producer=PRODUCER_NAME,
             handler=HANDLER_NAME,
             priority=priority,
