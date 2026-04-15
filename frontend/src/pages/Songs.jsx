@@ -188,6 +188,10 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   const [instrStart, setInstrStart] = useState(0)
   const [instrEnd, setInstrEnd] = useState(0)
   const [voiceEntry, setVoiceEntry] = useState(0)
+  // Visual-only marker pins the CEO drops on the instrumental lane
+  // to annotate "verse 2 here", "chorus here", etc. Session-state
+  // only — nothing persisted yet, nothing wired to playback.
+  const [visualPins, setVisualPins] = useState([])  // seconds[]
   // What's currently playing. Drives the lane-level play/pause icons.
   const [playing, setPlaying] = useState('none')  // 'none' | 'instr' | 'voice' | 'together'
   // Bump this counter any time the user ENDS an interaction
@@ -209,6 +213,14 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   const voiceRef = useRef(null)
   const laneRef = useRef(null)
   const playCtlRef = useRef({ voiceStartTimer: null, stopTimer: null })
+  // Playhead DOM refs — bars + labels that slide across each lane
+  // while that audio is playing. Direct-manipulated via rAF so we
+  // don't trigger React re-renders 60 times a second.
+  const instrPlayheadRef = useRef(null)
+  const instrPlayheadLabelRef = useRef(null)
+  const voicePlayheadRef = useRef(null)
+  const voicePlayheadLabelRef = useRef(null)
+  const rafRef = useRef(null)
 
   const busy = nudge.isPending || jobStatus === 'in_progress' || jobStatus === 'pending'
   const dirty = Math.abs(voiceEntry - serverVoiceEntry) > 0.0005
@@ -219,7 +231,72 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null }
     if (instrRef.current) { instrRef.current.pause() }
     if (voiceRef.current) { voiceRef.current.pause() }
+    stopPlayheadLoop()
     setPlaying('none')
+  }
+
+  // rAF-driven playhead: reads instr/voice currentTime every frame
+  // and positions the yellow bars inside each lane. Text label shows
+  // the instrumental-time-axis position (so the voice label reads the
+  // same coordinate system as the green block the user dragged).
+  function startPlayheadLoop() {
+    if (rafRef.current != null) return  // already running
+    const tick = () => {
+      const instrEl = instrRef.current
+      const voiceEl = voiceRef.current
+      const instrBar = instrPlayheadRef.current
+      const instrLabel = instrPlayheadLabelRef.current
+      const voiceBar = voicePlayheadRef.current
+      const voiceLabel = voicePlayheadLabelRef.current
+
+      // Instrumental playhead
+      if (instrBar) {
+        if (instrEl && !instrEl.paused && instrDur > 0) {
+          const t = instrEl.currentTime
+          const pctVal = (Math.max(0, Math.min(instrDur, t)) / instrDur) * 100
+          instrBar.style.left = `${pctVal}%`
+          instrBar.style.display = 'block'
+          if (instrLabel) instrLabel.textContent = `${t.toFixed(2)}s`
+        } else {
+          instrBar.style.display = 'none'
+        }
+      }
+
+      // Voice playhead — mapped into the shared instrumental time
+      // axis. The voice file's own t=0 corresponds to the left edge
+      // of the green block at `voiceEntry`.
+      if (voiceBar) {
+        if (voiceEl && !voiceEl.paused && instrDur > 0) {
+          const vt = voiceEl.currentTime
+          const mapped = voiceEntry + vt
+          const pctVal = (Math.max(0, Math.min(instrDur, mapped)) / instrDur) * 100
+          voiceBar.style.left = `${pctVal}%`
+          voiceBar.style.display = 'block'
+          if (voiceLabel) voiceLabel.textContent = `${mapped.toFixed(2)}s`
+        } else {
+          voiceBar.style.display = 'none'
+        }
+      }
+
+      // Keep ticking as long as something is still playing
+      const stillPlaying =
+        (instrEl && !instrEl.paused) || (voiceEl && !voiceEl.paused)
+      if (stillPlaying) {
+        rafRef.current = requestAnimationFrame(tick)
+      } else {
+        rafRef.current = null
+      }
+    }
+    rafRef.current = requestAnimationFrame(tick)
+  }
+
+  function stopPlayheadLoop() {
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+    if (instrPlayheadRef.current) instrPlayheadRef.current.style.display = 'none'
+    if (voicePlayheadRef.current) voicePlayheadRef.current.style.display = 'none'
   }
 
   // Pause → seek → wait for 'seeked' (or metadata ready) → play.
@@ -274,10 +351,12 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     if (!ia || !instrUrl) return
     setPlaying('instr')
     await seekAndPlay(ia, Math.max(0, Math.min(instrDur, instrStart)))
+    startPlayheadLoop()
     const durationMs = Math.max(0, (instrEnd - instrStart) * 1000)
     if (durationMs > 0) {
       playCtlRef.current.stopTimer = setTimeout(() => {
         if (instrRef.current) instrRef.current.pause()
+        stopPlayheadLoop()
         setPlaying('none')
       }, durationMs)
     }
@@ -289,6 +368,7 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     if (!va || !voiceUrl) return
     setPlaying('voice')
     await seekAndPlay(va, 0)
+    startPlayheadLoop()
   }
 
   async function playTogether() {
@@ -321,11 +401,14 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
       }, delaySec * 1000)
     }
 
+    startPlayheadLoop()
+
     const durationMs = Math.max(0, (instrEnd - instrStart) * 1000)
     if (durationMs > 0) {
       playCtlRef.current.stopTimer = setTimeout(() => {
         if (instrRef.current) instrRef.current.pause()
         if (voiceRef.current) voiceRef.current.pause()
+        stopPlayheadLoop()
         setPlaying('none')
       }, durationMs)
     }
@@ -356,8 +439,8 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playKey])
 
-  // Clean up audio on unmount
-  useEffect(() => () => stopAll(), [])
+  // Clean up audio + playhead rAF on unmount
+  useEffect(() => () => { stopAll(); stopPlayheadLoop() }, [])
 
   // --- Drag handling -------------------------------------------------
   // We use window-level pointermove/pointerup so the drag continues
@@ -389,6 +472,25 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
+  }
+
+  // Visual marker pins — dropped by double-click on either lane.
+  // Rendered in both lanes so they form a visual line across the
+  // studio at that time. Click the little dot to remove.
+  function addVisualPin(event) {
+    if (!laneRef.current || instrDur <= 0) return
+    const rect = laneRef.current.getBoundingClientRect()
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+    const t = Number(((x / rect.width) * instrDur).toFixed(3))
+    if (t < 0 || t > instrDur) return
+    setVisualPins(prev => {
+      // Dedupe: if within 0.2s of an existing pin, no-op
+      if (prev.some(p => Math.abs(p - t) < 0.2)) return prev
+      return [...prev, t].sort((a, b) => a - b)
+    })
+  }
+  function removeVisualPin(t) {
+    setVisualPins(prev => prev.filter(p => p !== t))
   }
 
   function onVoiceKey(e) {
@@ -477,13 +579,47 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
       </div>
       <div
         ref={laneRef}
+        onDoubleClick={addVisualPin}
         className="relative h-10 bg-zinc-900 border border-zinc-800 rounded mb-3 select-none"
+        title="Double-click to drop a marker pin"
       >
         {/* Region highlight (between pins) */}
         <div
           className="absolute top-0 bottom-0 bg-violet-500/15 border-x border-violet-500/30"
           style={{ left: regionLeftPct, width: regionWidthPct }}
         />
+        {/* Visual marker pins — double-click to add, click dot to remove */}
+        {visualPins.map((t) => (
+          <div
+            key={`ip-${t}`}
+            className="absolute top-0 bottom-0"
+            style={{ left: pct(t), transform: 'translateX(-50%)' }}
+          >
+            <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[1px] bg-amber-400/80 pointer-events-none" />
+            <div
+              onClick={(e) => { e.stopPropagation(); removeVisualPin(t) }}
+              className="absolute top-0.5 left-1/2 -translate-x-1/2 w-2 h-2 bg-amber-400 rounded-full cursor-pointer hover:bg-rose-400 hover:scale-125 transition-all"
+              title={`marker ${t.toFixed(2)}s — click to remove`}
+            />
+            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[8px] text-amber-300 font-mono whitespace-nowrap pointer-events-none">
+              {t.toFixed(1)}
+            </div>
+          </div>
+        ))}
+        {/* Playhead — hidden until playback starts; updated by rAF */}
+        <div
+          ref={instrPlayheadRef}
+          className="absolute top-0 bottom-0 pointer-events-none"
+          style={{ left: '0%', display: 'none', transform: 'translateX(-50%)' }}
+        >
+          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] bg-yellow-300 shadow-[0_0_6px_rgba(253,224,71,0.7)]" />
+          <div
+            ref={instrPlayheadLabelRef}
+            className="absolute -top-3 left-1/2 -translate-x-1/2 text-[9px] text-yellow-300 font-mono whitespace-nowrap"
+          >
+            0.00s
+          </div>
+        </div>
         {/* Start pin */}
         <div
           onPointerDown={(e) => startDrag('start', e)}
@@ -531,7 +667,27 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         </span>
         <span className="ml-auto text-zinc-600 text-[9px]">click block · drag · ←→ ±0.1s · ↑↓ ±1s</span>
       </div>
-      <div className="relative h-10 bg-zinc-900 border border-zinc-800 rounded mb-3 select-none">
+      <div
+        onDoubleClick={addVisualPin}
+        className="relative h-10 bg-zinc-900 border border-zinc-800 rounded mb-3 select-none"
+        title="Double-click to drop a marker pin"
+      >
+        {/* Visual marker pins — shared with the instrumental lane so
+            the markers form a full vertical line across both tracks. */}
+        {visualPins.map((t) => (
+          <div
+            key={`vp-${t}`}
+            className="absolute top-0 bottom-0"
+            style={{ left: pct(t), transform: 'translateX(-50%)' }}
+          >
+            <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[1px] bg-amber-400/80 pointer-events-none" />
+            <div
+              onClick={(e) => { e.stopPropagation(); removeVisualPin(t) }}
+              className="absolute top-0.5 left-1/2 -translate-x-1/2 w-2 h-2 bg-amber-400 rounded-full cursor-pointer hover:bg-rose-400 hover:scale-125 transition-all z-10"
+              title={`marker ${t.toFixed(2)}s — click to remove`}
+            />
+          </div>
+        ))}
         {/* Voice block positioned at voiceEntry, width = voiceDur */}
         <div
           tabIndex={0}
@@ -545,6 +701,22 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
           <div className="absolute top-0 left-0 w-2 h-2 bg-emerald-300 rounded-sm" />
           <div className="absolute bottom-0 left-1 text-[9px] text-emerald-200 font-mono pointer-events-none">
             {voiceEntry.toFixed(2)}
+          </div>
+        </div>
+        {/* Voice playhead — same visual as the instrumental one. The
+            position is in the shared instrumental time axis (so when
+            voice is playing, the bar slides through the green block). */}
+        <div
+          ref={voicePlayheadRef}
+          className="absolute top-0 bottom-0 pointer-events-none"
+          style={{ left: '0%', display: 'none', transform: 'translateX(-50%)' }}
+        >
+          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] bg-yellow-300 shadow-[0_0_6px_rgba(253,224,71,0.7)]" />
+          <div
+            ref={voicePlayheadLabelRef}
+            className="absolute -top-3 left-1/2 -translate-x-1/2 text-[9px] text-yellow-300 font-mono whitespace-nowrap"
+          >
+            0.00s
           </div>
         </div>
       </div>
@@ -587,12 +759,13 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
           Save &amp; Remix
         </button>
       </div>
-      <div className="mt-1.5 text-[9px] text-zinc-500">
-        Drag the instrumental pins to scope an audition region. Click the green
+      <div className="mt-1.5 text-[9px] text-zinc-500 leading-relaxed">
+        Drag the violet instrumental pins to scope an audition region. Click the green
         voice block to focus it, then drag or use arrow keys (±0.1s / ±1s) to set
-        the vocal entry point. Save &amp; Remix re-mixes in ~10 s using the cached
-        vocals stem — the value is persisted on the instrumental so every song using
-        this beat inherits the correction.
+        the vocal entry point. Double-click either lane to drop an amber marker pin
+        (click the dot to remove). Yellow playhead shows the current playback position.
+        Save &amp; Remix re-mixes in ~10 s using the cached vocals stem — the value is
+        persisted on the instrumental so every song using this beat inherits the correction.
       </div>
 
       <audio
