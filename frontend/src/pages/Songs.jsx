@@ -565,9 +565,13 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
 
   useEffect(() => {
     if (voicePeaks && voiceCanvasRef.current) {
-      drawWaveform(voiceCanvasRef.current, voicePeaks, 'rgba(52, 211, 153, 0.35)')
+      drawWaveform(voiceCanvasRef.current, voicePeaks, 'rgba(52, 211, 153, 0.4)')
     }
-  }, [voicePeaks, zoomLevel])
+    // voiceEntry / voiceDur are in the dep list because the voice
+    // canvas lives inside the green block, whose CSS width clips at
+    // instrDur when the block would overflow. Any change to either
+    // can resize the canvas and needs a fresh draw.
+  }, [voicePeaks, zoomLevel, voiceEntry, voiceDur])
 
   // --- Drag handling -------------------------------------------------
   // We use window-level pointermove/pointerup so the drag continues
@@ -580,6 +584,14 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     if (busy) return
     startEvent.preventDefault()
     startEvent.stopPropagation()
+    // `preventDefault` on pointerdown suppresses the browser's default
+    // "focus on click" behavior — which means tabIndex never activates
+    // and our onKeyDown handlers never fire. Put focus back manually
+    // so clicking a pin lights it up AND arms the keyboard nudges.
+    const pinEl = startEvent.currentTarget
+    if (pinEl && typeof pinEl.focus === 'function') {
+      pinEl.focus()
+    }
     const isVoiceSide = pinKind === 'voice' || pinKind === 'orangePin'
     const laneEl = isVoiceSide ? voiceLaneRef.current : laneRef.current
     if (!laneEl || instrDur <= 0) return
@@ -885,10 +897,6 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         style={{ width: `${zoomLevel * 100}%`, minWidth: '100%' }}
         title="Double-click to drop a marker pin"
       >
-        <canvas
-          ref={voiceCanvasRef}
-          className="absolute inset-0 w-full h-full pointer-events-none"
-        />
         {/* Visual marker pins — shared with the instrumental lane so
             the markers form a full vertical line across both tracks. */}
         {visualPins.map((t) => (
@@ -907,15 +915,23 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         ))}
         {/* Voice block positioned at voiceEntry, width = voiceDur.
             Click to focus, arrow keys ±0.1s / ±1s. This is the one
-            that drives the persisted vocal_entry_seconds. */}
+            that drives the persisted vocal_entry_seconds. The voice
+            waveform canvas sits INSIDE the block so dragging the
+            block also drags the waveform — when you move the start
+            to 10s, the voice audio actually begins at 10s and the
+            soundwave visually begins there too. */}
         <div
           tabIndex={0}
           onPointerDown={(e) => startDrag('voice', e)}
           onKeyDown={onVoiceKey}
-          className="absolute top-0 bottom-0 bg-emerald-500/25 border border-emerald-400 rounded-sm cursor-ew-resize touch-none focus:outline-none focus:ring-2 focus:ring-emerald-300"
+          className="absolute top-0 bottom-0 bg-emerald-500/25 border border-emerald-400 rounded-sm cursor-ew-resize touch-none focus:outline-none focus:ring-2 focus:ring-emerald-300 overflow-hidden"
           style={{ left: voiceLeftPct, width: voiceWidthPct }}
           title={`voice ${voiceEntry.toFixed(3)}s → ${Math.min(instrDur, voiceEntry + voiceDur).toFixed(3)}s`}
         >
+          <canvas
+            ref={voiceCanvasRef}
+            className="absolute inset-0 w-full h-full pointer-events-none"
+          />
           <div className="absolute top-0 left-0 w-0.5 h-full bg-emerald-300" />
           <div className="absolute top-0 left-0 w-2 h-2 bg-emerald-300 rounded-sm" />
           <div className="absolute bottom-0 left-1 text-[9px] text-emerald-200 font-mono pointer-events-none">
