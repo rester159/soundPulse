@@ -150,14 +150,18 @@ CHART_ENDPOINTS: list[dict[str, Any]] = [
      "params": {"country_code": "us"},
      "platform": "shazam", "chart_type": "top", "country": "us"},
 
-    # ---------- TikTok (GLOBAL, no country, weekly interval) ----------
+    # ---------- TikTok (GLOBAL, no country, no interval) ----------
+    # The `interval=weekly` param works with an explicit `date=...`,
+    # but conflicts with `latest=true` which we merge at enqueue time
+    # ('interval' is not allowed when latest=true). Drop interval and
+    # let latest=true pick the current week on its own.
     {"endpoint_key": "chart_sweep_tiktok_tracks",
      "path": "/api/charts/tiktok/tracks",
-     "params": {"interval": "weekly"},
+     "params": {},
      "platform": "tiktok", "chart_type": "tracks_weekly", "country": None},
     {"endpoint_key": "chart_sweep_tiktok_videos",
      "path": "/api/charts/tiktok/videos",
-     "params": {"interval": "weekly"},
+     "params": {},
      "platform": "tiktok", "chart_type": "videos_weekly", "country": None},
 
     # ---------- Deezer (trailing slash in path, country_code required) ----------

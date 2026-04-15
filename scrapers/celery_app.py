@@ -30,26 +30,42 @@ app.config_from_object({
     "task_acks_late": True,
     "worker_prefetch_multiplier": 1,
     "beat_schedule": {
-        "spotify-every-6h": {
-            "task": "scrapers.tasks.run_scraper",
-            "schedule": crontab(minute=0, hour="0,6,12,18"),
-            "args": ("spotify",),
-        },
-        "chartmetric-every-4h": {
-            "task": "scrapers.tasks.run_scraper",
-            "schedule": crontab(minute=15, hour="*/4"),
-            "args": ("chartmetric",),
-        },
-        "shazam-every-4h": {
-            "task": "scrapers.tasks.run_scraper",
-            "schedule": crontab(minute=30, hour="*/4"),
-            "args": ("shazam",),
-        },
-        "apple-music-every-6h": {
-            "task": "scrapers.tasks.run_scraper",
-            "schedule": crontab(minute=0, hour="1,7,13,19"),
-            "args": ("apple_music",),
-        },
+        # ----- LEGACY SCRAPER BEAT ENTRIES (DISABLED 2026-04-15) -----
+        # Every one of the scraper fallback chains in scrapers/fallback.py
+        # has ChartmetricScraper as a fallback tier. That means each of
+        # these Celery beat tasks (spotify/chartmetric/shazam/apple_music/
+        # spotify_audio) ends up hitting the Chartmetric API independently
+        # of scraper_configs.enabled, because run_scraper() doesn't check
+        # that flag. Result: a stream of legacy requests hitting
+        # Chartmetric behind the fetcher's back, driving calls_last_1h to
+        # 3x what the token bucket should allow and triggering a steady
+        # 429 bounce on the new pipeline.
+        #
+        # The chartmetric_ingest pipeline is the replacement. These beat
+        # entries stay commented-out in source until we have a reason
+        # to reinstate them (direct DSP API, not via Chartmetric).
+        # "spotify-every-6h": {
+        #     "task": "scrapers.tasks.run_scraper",
+        #     "schedule": crontab(minute=0, hour="0,6,12,18"),
+        #     "args": ("spotify",),
+        # },
+        # "chartmetric-every-4h": {
+        #     "task": "scrapers.tasks.run_scraper",
+        #     "schedule": crontab(minute=15, hour="*/4"),
+        #     "args": ("chartmetric",),
+        # },
+        # "shazam-every-4h": {
+        #     "task": "scrapers.tasks.run_scraper",
+        #     "schedule": crontab(minute=30, hour="*/4"),
+        #     "args": ("shazam",),
+        # },
+        # "apple-music-every-6h": {
+        #     "task": "scrapers.tasks.run_scraper",
+        #     "schedule": crontab(minute=0, hour="1,7,13,19"),
+        #     "args": ("apple_music",),
+        # },
+        # radio + musicbrainz are direct, non-Chartmetric fetches, so
+        # they stay enabled.
         "radio-daily": {
             "task": "scrapers.tasks.run_scraper",
             "schedule": crontab(minute=0, hour=6),
@@ -77,11 +93,13 @@ app.config_from_object({
             "task": "scrapers.tasks.run_backtest",
             "schedule": crontab(minute=30, hour=4),  # 4:30am UTC daily, after training
         },
-        "spotify-audio-enrich-daily": {
-            "task": "scrapers.tasks.run_scraper",
-            "schedule": crontab(minute=0, hour=5),
-            "args": ("spotify_audio",),
-        },
+        # spotify-audio-enrich-daily DISABLED 2026-04-15 — fallback
+        # chain routes through Chartmetric's audio-features endpoint.
+        # "spotify-audio-enrich-daily": {
+        #     "task": "scrapers.tasks.run_scraper",
+        #     "schedule": crontab(minute=0, hour=5),
+        #     "args": ("spotify_audio",),
+        # },
 
         # --- Phase 3 production pipeline autonomous sweeps ---
         "audio-qa-full-every-2h": {
