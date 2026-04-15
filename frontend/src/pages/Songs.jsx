@@ -7,7 +7,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useSongs, useSong, useMarkQaPassed, useSongStems, getBaseUrl,
-  useInstrumentalAnalysis, useNudgeVocalEntry,
+  useInstrumentalAnalysis, useNudgeVocalEntry, useUpdateInstrumentalMarkers,
 } from '../hooks/useSoundPulse'
 
 // Reuse the backend-relative → absolute URL helper
@@ -178,6 +178,7 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   const { data: analysisData } = useInstrumentalAnalysis(instrumentalId)
   const analysis = analysisData?.data
   const nudge = useNudgeVocalEntry()
+  const markerMut = useUpdateInstrumentalMarkers()
 
   const instrUrl = resolveAudioUrl(analysis?.public_url_path)
   const instrDur = Number(analysis?.duration_seconds) || 0
@@ -188,12 +189,18 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   const [instrStart, setInstrStart] = useState(0)
   const [instrEnd, setInstrEnd] = useState(0)
   const [voiceEntry, setVoiceEntry] = useState(0)
-  // Visual-only marker pins the CEO drops on the instrumental lane
-  // to annotate "verse 2 here", "chorus here", etc. Session-state
-  // only — nothing persisted yet, nothing wired to playback.
-  const [visualPins, setVisualPins] = useState([])  // seconds[]
   // What's currently playing. Drives the lane-level play/pause icons.
   const [playing, setPlaying] = useState('none')  // 'none' | 'instr' | 'voice' | 'together'
+
+  // Visual marker pins — derived directly from the analysis response
+  // so reload survives. Adds/removes go through useUpdateInstrumentalMarkers,
+  // which optimistically updates the react-query cache so the UI
+  // never flickers between click and server confirm.
+  const visualPins = Array.isArray(analysis?.analysis_json?.markers)
+    ? analysis.analysis_json.markers
+        .map((m) => Number(m))
+        .filter((m) => Number.isFinite(m))
+    : []
   // Bump this counter any time the user ENDS an interaction
   // (pointerup on a drag, or key press). The useEffect watches it
   // and (re)starts the preview playback — we don't auto-play on
@@ -475,22 +482,24 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   }
 
   // Visual marker pins — dropped by double-click on either lane.
-  // Rendered in both lanes so they form a visual line across the
-  // studio at that time. Click the little dot to remove.
+  // Persisted to instrumentals.analysis_json.markers via
+  // useUpdateInstrumentalMarkers. The `visualPins` array above is
+  // the canonical source; addVisualPin / removeVisualPin compute
+  // the new array and fire the optimistic mutation.
   function addVisualPin(event) {
     if (!laneRef.current || instrDur <= 0) return
     const rect = laneRef.current.getBoundingClientRect()
     const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
     const t = Number(((x / rect.width) * instrDur).toFixed(3))
     if (t < 0 || t > instrDur) return
-    setVisualPins(prev => {
-      // Dedupe: if within 0.2s of an existing pin, no-op
-      if (prev.some(p => Math.abs(p - t) < 0.2)) return prev
-      return [...prev, t].sort((a, b) => a - b)
-    })
+    // Dedupe: if within 0.2s of an existing pin, no-op
+    if (visualPins.some((p) => Math.abs(p - t) < 0.2)) return
+    const next = [...visualPins, t].sort((a, b) => a - b)
+    markerMut.mutate({ instrumentalId, markers: next })
   }
   function removeVisualPin(t) {
-    setVisualPins(prev => prev.filter(p => p !== t))
+    const next = visualPins.filter((p) => Math.abs(p - t) > 0.0001)
+    markerMut.mutate({ instrumentalId, markers: next })
   }
 
   function onVoiceKey(e) {

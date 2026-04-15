@@ -6579,6 +6579,67 @@ async def post_instrumental_analysis(
     }
 
 
+@router.patch("/api/v1/admin/instrumentals/{instrumental_id}/markers")
+async def patch_instrumental_markers(
+    instrumental_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Persist visual marker pins for the CEO's VocalEntryStudio. Body:
+        { "markers": [float, ...] }
+
+    Stored inside `instrumentals.analysis_json.markers` so every song
+    using this beat sees the same annotations. No DDL — JSONB column
+    already exists.
+
+    Accepts the full list each call (client sends the whole set on
+    every add/remove). Values are coerced to float, de-duped within
+    10 ms, sorted, and clamped to [0, 3600]. Empty list is valid and
+    means "remove all markers".
+    """
+    import uuid as _uuid
+    from api.models.instrumental import Instrumental
+    try:
+        iid = _uuid.UUID(instrumental_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid instrumental_id")
+
+    raw = body.get("markers")
+    if raw is None:
+        raise HTTPException(400, detail="markers required")
+    if not isinstance(raw, list):
+        raise HTTPException(400, detail="markers must be an array")
+    cleaned: list[float] = []
+    for m in raw:
+        try:
+            f = float(m)
+        except (TypeError, ValueError):
+            continue
+        if f < 0 or f > 3600:
+            continue
+        # Dedupe within 10 ms of an existing accepted value
+        if not any(abs(f - e) < 0.01 for e in cleaned):
+            cleaned.append(f)
+    cleaned.sort()
+
+    row = (await db.execute(
+        select(Instrumental).where(Instrumental.id == iid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail="instrumental not found")
+
+    aj = dict(row.analysis_json or {})
+    aj["markers"] = cleaned
+    row.analysis_json = aj
+    await db.commit()
+    return {
+        "instrumental_id": str(iid),
+        "markers": cleaned,
+    }
+
+
 @router.patch("/api/v1/admin/instrumentals/{instrumental_id}/vocal-entry")
 async def patch_instrumental_vocal_entry(
     instrumental_id: str,

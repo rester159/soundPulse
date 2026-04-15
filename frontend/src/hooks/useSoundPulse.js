@@ -704,6 +704,52 @@ export function useInstrumentalAnalysis(instrumentalId) {
 // vocals_only stem and only re-runs the ffmpeg mix — ~10 s instead of
 // 15 min. Use cases: (1) auto-detected entry is off by a bar, (2) CEO
 // wants to try a different section as the vocal drop.
+// Update the per-instrumental visual marker pins the CEO drops in
+// the VocalEntryStudio. Optimistic: writes to the analysis cache
+// immediately so the UI never flickers between add → server confirm.
+export function useUpdateInstrumentalMarkers() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ instrumentalId, markers }) =>
+      makeRequest(
+        'PATCH',
+        `/admin/instrumentals/${instrumentalId}/markers`,
+        {},
+        { markers },
+      ),
+    onMutate: async ({ instrumentalId, markers }) => {
+      const key = ['admin', 'instrumentals', instrumentalId, 'analysis']
+      await qc.cancelQueries({ queryKey: key })
+      const prev = qc.getQueryData(key)
+      qc.setQueryData(key, (old) => {
+        if (!old?.data) return old
+        return {
+          ...old,
+          data: {
+            ...old.data,
+            analysis_json: { ...(old.data.analysis_json || {}), markers },
+          },
+        }
+      })
+      return { prev }
+    },
+    onError: (_err, vars, ctx) => {
+      if (ctx?.prev) {
+        qc.setQueryData(
+          ['admin', 'instrumentals', vars.instrumentalId, 'analysis'],
+          ctx.prev,
+        )
+      }
+    },
+    onSettled: (_data, _err, vars) => {
+      qc.invalidateQueries({
+        queryKey: ['admin', 'instrumentals', vars.instrumentalId, 'analysis'],
+      })
+    },
+  })
+}
+
+
 export function useNudgeVocalEntry() {
   const qc = useQueryClient()
   return useMutation({
