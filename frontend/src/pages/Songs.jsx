@@ -693,6 +693,7 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     // Delete / Backspace removes the pin.
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault()
+      e.stopPropagation()
       setOrangePin(null)
       return
     }
@@ -703,6 +704,13 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
     else if (e.key === 'ArrowUp')    step = +1.0
     else return
     e.preventDefault()
+    // CRITICAL: stop the event from bubbling up to the green voice
+    // block's onKeyDown handler (onVoiceKey). The orange pin is a
+    // DOM child of the green block, so without stopPropagation both
+    // handlers would fire on the same arrow press and voiceEntry
+    // would move in lockstep with orangePin, making the pin look
+    // "stuck" to the block and uncontrollable.
+    e.stopPropagation()
     setOrangePin(v => {
       if (v == null) return v
       const next = Number((v + step).toFixed(3))
