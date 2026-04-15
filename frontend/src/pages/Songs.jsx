@@ -189,6 +189,12 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   const [instrStart, setInstrStart] = useState(0)
   const [instrEnd, setInstrEnd] = useState(0)
   const [voiceEntry, setVoiceEntry] = useState(0)
+  // Session-only scratch pin on the voice lane. `null` means no pin;
+  // number = seconds on the shared instrumental time axis. The CEO
+  // toggles it via the "+ orange pin" button, then drags or arrow-
+  // keys it to test alignments without touching the persisted
+  // vocal_entry_seconds.
+  const [orangePin, setOrangePin] = useState(null)
   // What's currently playing. Drives the lane-level play/pause icons.
   const [playing, setPlaying] = useState('none')  // 'none' | 'instr' | 'voice' | 'together'
 
@@ -470,6 +476,8 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         setInstrEnd(prev => Math.max(Math.min(instrDur, t), instrStart + 0.5))
       } else if (pinKind === 'voice') {
         setVoiceEntry(Math.max(0, Math.min(instrDur, Number(t.toFixed(3)))))
+      } else if (pinKind === 'orangePin') {
+        setOrangePin(Math.max(0, Math.min(instrDur, Number(t.toFixed(3)))))
       }
     }
     function onUp() {
@@ -516,6 +524,37 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
       return next
     })
     setPlayKey(k => k + 1)
+  }
+
+  function onOrangePinKey(e) {
+    if (orangePin == null) return
+    // Delete / Backspace removes the pin.
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault()
+      setOrangePin(null)
+      return
+    }
+    let step = 0
+    if (e.key === 'ArrowLeft')  step = -0.1
+    else if (e.key === 'ArrowRight') step = +0.1
+    else if (e.key === 'ArrowDown')  step = -1.0
+    else if (e.key === 'ArrowUp')    step = +1.0
+    else return
+    e.preventDefault()
+    setOrangePin(v => {
+      if (v == null) return v
+      return Math.max(0, Math.min(instrDur, Number((v + step).toFixed(3))))
+    })
+  }
+
+  function toggleOrangePin() {
+    if (orangePin == null) {
+      // Spawn it at the current voice entry so it starts somewhere
+      // meaningful. The CEO then drags / nudges it from there.
+      setOrangePin(voiceEntry)
+    } else {
+      setOrangePin(null)
+    }
   }
 
   function save() {
@@ -697,7 +736,9 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
             />
           </div>
         ))}
-        {/* Voice block positioned at voiceEntry, width = voiceDur */}
+        {/* Voice block positioned at voiceEntry, width = voiceDur.
+            Click to focus, arrow keys ±0.1s / ±1s. This is the one
+            that drives the persisted vocal_entry_seconds. */}
         <div
           tabIndex={0}
           onPointerDown={(e) => startDrag('voice', e)}
@@ -712,6 +753,27 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
             {voiceEntry.toFixed(2)}
           </div>
         </div>
+        {/* Orange scratch pin — session-only freeform marker sitting
+            on top of the green block. The CEO adds it via the button
+            in the footer, then drags it or nudges it with ←→ ±0.1s /
+            ↑↓ ±1s. Not wired to playback or the persisted vocal
+            entry; purely a reference/experiment marker. */}
+        {orangePin !== null && (
+          <div
+            tabIndex={0}
+            onPointerDown={(e) => startDrag('orangePin', e)}
+            onKeyDown={onOrangePinKey}
+            className="absolute top-0 bottom-0 cursor-ew-resize touch-none focus:outline-none z-20 group"
+            style={{ left: pct(orangePin), transform: 'translateX(-50%)', width: '14px' }}
+            title={`scratch pin ${orangePin.toFixed(3)}s (click to focus, ←→ ±0.1s, ↑↓ ±1s, Del to remove)`}
+          >
+            <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-orange-400 group-focus:bg-orange-300 group-focus:w-[3px] transition-all" />
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-orange-400 rounded-sm group-focus:bg-orange-300 group-focus:scale-125 group-focus:ring-2 group-focus:ring-orange-300/60 transition-all" />
+            <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-[9px] text-orange-300 font-mono whitespace-nowrap pointer-events-none">
+              {orangePin.toFixed(2)}
+            </div>
+          </div>
+        )}
         {/* Voice playhead — same visual as the instrumental one. The
             position is in the shared instrumental time axis (so when
             voice is playing, the bar slides through the green block). */}
@@ -756,6 +818,21 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
           <Square size={10} /> stop
         </button>
         <button
+          onClick={toggleOrangePin}
+          className={`px-2 py-1 rounded border flex items-center gap-1 transition-colors ${
+            orangePin !== null
+              ? 'bg-orange-500/20 border-orange-400 text-orange-200 hover:bg-orange-500/30'
+              : 'border-zinc-700 hover:border-orange-500 text-zinc-300'
+          }`}
+          title={
+            orangePin !== null
+              ? 'Remove the orange scratch pin'
+              : 'Add an orange scratch pin at the current voice entry'
+          }
+        >
+          {orangePin !== null ? '− orange pin' : '+ orange pin'}
+        </button>
+        <button
           onClick={save}
           disabled={!dirty || busy}
           className={`ml-auto px-2 py-1 rounded border flex items-center gap-1 ${
@@ -772,9 +849,12 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         Drag the violet instrumental pins to scope an audition region. Click the green
         voice block to focus it, then drag or use arrow keys (±0.1s / ±1s) to set
         the vocal entry point. Double-click either lane to drop an amber marker pin
-        (click the dot to remove). Yellow playhead shows the current playback position.
-        Save &amp; Remix re-mixes in ~10 s using the cached vocals stem — the value is
-        persisted on the instrumental so every song using this beat inherits the correction.
+        (click the dot to remove — markers persist per instrumental). Use "+ orange
+        pin" to drop a session-only scratch pin on the voice lane — drag it or focus
+        it (click) and nudge with ←→ ±0.1s / ↑↓ ±1s / Del to remove. Yellow playhead
+        shows the current playback position. Save &amp; Remix re-mixes in ~10 s using
+        the cached vocals stem — the value is persisted on the instrumental so every
+        song using this beat inherits the correction.
       </div>
 
       <audio
