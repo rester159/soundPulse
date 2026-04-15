@@ -715,9 +715,12 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
 
   function toggleOrangePin() {
     if (orangePin == null) {
-      // Spawn the pin AT the voice entry (offset = 0). The CEO
-      // then drags / nudges the offset from there.
-      setOrangePin(0)
+      // Spawn the pin in the MIDDLE of the voice duration so it's
+      // clearly visible and doesn't overlap the green block's left
+      // edge (which would make it hard to click). The CEO then drags
+      // or nudges the offset from there.
+      const midOffset = voiceDur > 0 ? voiceDur / 2 : 1.0
+      setOrangePin(Number(midOffset.toFixed(3)))
     } else {
       setOrangePin(null)
     }
@@ -949,32 +952,38 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
           </div>
         </div>
         {/* Orange scratch pin — session-only freeform marker sitting
-            on top of the green block. The CEO adds it via the button
-            in the footer, then drags it or nudges it with ←→ ±0.1s /
-            ↑↓ ±1s. Not wired to playback or the persisted vocal
-            entry; purely a reference/experiment marker. */}
-        {orangePin !== null && (() => {
-          // Absolute position on the instrumental axis = voice entry
-          // + the saved offset. This is what we render at and what
-          // we show in the hover/label.
-          const abs = voiceEntry + orangePin
-          return (
-            <div
-              tabIndex={0}
-              onPointerDown={(e) => startDrag('orangePin', e)}
-              onKeyDown={onOrangePinKey}
-              className="absolute top-0 bottom-0 cursor-ew-resize touch-none focus:outline-none z-20 group"
-              style={{ left: pct(abs), transform: 'translateX(-50%)', width: '14px' }}
-              title={`scratch pin ${abs.toFixed(3)}s (voice-relative +${orangePin.toFixed(3)}s; click to focus, ←→ ±0.1s, ↑↓ ±1s, Del to remove)`}
-            >
-              <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-orange-400 group-focus:bg-orange-300 group-focus:w-[3px] transition-all" />
-              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-orange-400 rounded-sm group-focus:bg-orange-300 group-focus:scale-125 group-focus:ring-2 group-focus:ring-orange-300/60 transition-all" />
-              <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-[9px] text-orange-300 font-mono whitespace-nowrap pointer-events-none">
-                {abs.toFixed(2)}
-              </div>
+            ON TOP of the green block. z-30 puts it above everything
+            in the voice lane (green block, canvas, playhead) for
+            both rendering AND pointer events. The knob is at the
+            TOP of the lane (inside the lane bounds so overflow-y
+            hidden on the scroll wrapper doesn't clip it) and is
+            big enough (16px) to click reliably. Click target is
+            28px wide for an easy mouse grab even at 1x zoom. */}
+        {orangePin !== null && (
+          <div
+            tabIndex={0}
+            onPointerDown={(e) => startDrag('orangePin', e)}
+            onKeyDown={onOrangePinKey}
+            className="absolute top-0 bottom-0 cursor-ew-resize touch-none focus:outline-none z-30 group"
+            style={{
+              left: pct(voiceEntry + orangePin),
+              transform: 'translateX(-50%)',
+              width: '28px',
+            }}
+            title={`scratch pin ${(voiceEntry + orangePin).toFixed(3)}s (voice-relative +${orangePin.toFixed(3)}s; click to focus, ←→ ±0.1s, ↑↓ ±1s, Del to remove)`}
+          >
+            {/* Vertical line spans the entire lane height */}
+            <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] bg-orange-400 group-focus:bg-orange-300 group-focus:w-[3px] transition-all shadow-[0_0_6px_rgba(251,146,60,0.8)]" />
+            {/* Knob at top of lane, 16px square, bordered so it
+                stays visible against any background color */}
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-4 h-4 bg-orange-400 rounded-sm border-2 border-orange-100 group-focus:bg-orange-300 group-focus:scale-125 group-focus:ring-2 group-focus:ring-orange-300/60 transition-all shadow-lg" />
+            {/* Seconds label at bottom of lane, with a dark background
+                pill so it's readable against the green block */}
+            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[9px] text-orange-200 font-mono whitespace-nowrap pointer-events-none bg-zinc-950/90 px-1 rounded">
+              {(voiceEntry + orangePin).toFixed(2)}
             </div>
-          )
-        })()}
+          </div>
+        )}
         {/* Voice playhead — same visual as the instrumental one. The
             position is in the shared instrumental time axis (so when
             voice is playing, the bar slides through the green block). */}
