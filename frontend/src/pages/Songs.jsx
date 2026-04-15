@@ -161,6 +161,71 @@ function StemAwareAudioPlayer({ song, masterUrl, masterMeta }) {
 }
 
 
+// ---- Waveform helpers (shared by both lanes) ---------------------
+//
+// computePeaks: fetch the audio, decode via the Web Audio API, and
+// downsample channel[0] to `numPeaks` max-amplitude buckets.
+// drawWaveform: paint the peaks as vertical bars on a <canvas>,
+// centered vertically, DPR-aware so it stays sharp on retina.
+// Both are pure utilities — no React, no component state.
+
+async function computeAudioPeaks(url, numPeaks = 1500) {
+  const resp = await fetch(url)
+  if (!resp.ok) throw new Error(`fetch ${url} → ${resp.status}`)
+  const buffer = await resp.arrayBuffer()
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext
+  if (!AudioContextClass) throw new Error('no AudioContext')
+  const ctx = new AudioContextClass()
+  try {
+    const audio = await ctx.decodeAudioData(buffer)
+    const channel = audio.getChannelData(0)
+    const stride = Math.max(1, Math.floor(channel.length / numPeaks))
+    const peaks = new Float32Array(numPeaks)
+    for (let i = 0; i < numPeaks; i++) {
+      let maxAbs = 0
+      const base = i * stride
+      const end = Math.min(channel.length, base + stride)
+      // Sub-sample inside the bucket for speed; 64-sample stride is
+      // enough for visual peak detection.
+      for (let j = base; j < end; j += 64) {
+        const v = Math.abs(channel[j])
+        if (v > maxAbs) maxAbs = v
+      }
+      peaks[i] = maxAbs
+    }
+    return peaks
+  } finally {
+    // Closing the context releases the decoded buffer; we only need
+    // the peaks float array after this.
+    if (ctx.close) ctx.close()
+  }
+}
+
+function drawWaveform(canvas, peaks, color) {
+  if (!canvas || !peaks) return
+  const rect = canvas.getBoundingClientRect()
+  if (rect.width === 0 || rect.height === 0) return
+  const dpr = window.devicePixelRatio || 1
+  canvas.width = Math.max(1, Math.floor(rect.width * dpr))
+  canvas.height = Math.max(1, Math.floor(rect.height * dpr))
+  const c = canvas.getContext('2d')
+  if (!c) return
+  c.setTransform(1, 0, 0, 1, 0, 0)
+  c.scale(dpr, dpr)
+  c.clearRect(0, 0, rect.width, rect.height)
+  c.fillStyle = color
+  const W = rect.width
+  const H = rect.height
+  const midY = H / 2
+  const barW = W / peaks.length
+  for (let i = 0; i < peaks.length; i++) {
+    const h = Math.max(1, peaks[i] * H * 0.85)
+    const x = i * barW
+    c.fillRect(x, midY - h / 2, Math.max(1, barW * 0.9), h)
+  }
+}
+
+
 // Two-track vocal-entry studio. The CEO gets an instrumental lane with
 // start+end pins (to scope an audition region), a voice lane with a
 // single draggable entry pin (mouse drag OR arrow-key ±0.1s), and
@@ -195,6 +260,14 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   // keys it to test alignments without touching the persisted
   // vocal_entry_seconds.
   const [orangePin, setOrangePin] = useState(null)
+  // Horizontal zoom level for the timeline lanes. 1x = the whole
+  // duration fits in the visible width; 3x / 5x widen the inner
+  // content and scroll horizontally so pins are easier to click and
+  // waveform peaks are actually legible.
+  const [zoomLevel, setZoomLevel] = useState(3)
+  // Decoded waveform peak arrays — one per track. Null while loading.
+  const [instrPeaks, setInstrPeaks] = useState(null)
+  const [voicePeaks, setVoicePeaks] = useState(null)
   // What's currently playing. Drives the lane-level play/pause icons.
   const [playing, setPlaying] = useState('none')  // 'none' | 'instr' | 'voice' | 'together'
 
@@ -224,7 +297,10 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
 
   const instrRef = useRef(null)
   const voiceRef = useRef(null)
-  const laneRef = useRef(null)
+  const laneRef = useRef(null)               // inner instrumental content div
+  const voiceLaneRef = useRef(null)           // inner voice content div
+  const instrCanvasRef = useRef(null)         // waveform canvas (instrumental)
+  const voiceCanvasRef = useRef(null)         // waveform canvas (voice)
   const playCtlRef = useRef({ voiceStartTimer: null, stopTimer: null })
   // Playhead DOM refs — bars + labels that slide across each lane
   // while that audio is playing. Direct-manipulated via rAF so we
@@ -455,15 +531,57 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   // Clean up audio + playhead rAF on unmount
   useEffect(() => () => { stopAll(); stopPlayheadLoop() }, [])
 
+  // Decode the instrumental into peaks once the URL is known.
+  // Debounced with a cancelled flag so unmount during fetch doesn't
+  // leak a setState onto an unmounted component.
+  useEffect(() => {
+    if (!instrUrl) return
+    let cancelled = false
+    setInstrPeaks(null)
+    computeAudioPeaks(instrUrl, 1500)
+      .then((p) => { if (!cancelled) setInstrPeaks(p) })
+      .catch((e) => console.warn('instr peaks failed:', e))
+    return () => { cancelled = true }
+  }, [instrUrl])
+
+  // Same for the vocals stem.
+  useEffect(() => {
+    if (!voiceUrl) return
+    let cancelled = false
+    setVoicePeaks(null)
+    computeAudioPeaks(voiceUrl, 1500)
+      .then((p) => { if (!cancelled) setVoicePeaks(p) })
+      .catch((e) => console.warn('voice peaks failed:', e))
+    return () => { cancelled = true }
+  }, [voiceUrl])
+
+  // (Re)draw each canvas whenever its peaks change OR the zoom level
+  // changes (the canvas resizes to match the new inner content width).
+  useEffect(() => {
+    if (instrPeaks && instrCanvasRef.current) {
+      drawWaveform(instrCanvasRef.current, instrPeaks, 'rgba(167, 139, 250, 0.35)')
+    }
+  }, [instrPeaks, zoomLevel])
+
+  useEffect(() => {
+    if (voicePeaks && voiceCanvasRef.current) {
+      drawWaveform(voiceCanvasRef.current, voicePeaks, 'rgba(52, 211, 153, 0.35)')
+    }
+  }, [voicePeaks, zoomLevel])
+
   // --- Drag handling -------------------------------------------------
   // We use window-level pointermove/pointerup so the drag continues
   // even when the cursor leaves the lane rect. On pointerup we bump
-  // playKey which triggers the preview auto-play effect above.
+  // playKey which triggers the preview auto-play effect above. The
+  // voice pins use the voice lane's inner rect (which has its own
+  // horizontal scroll) so the drag math is consistent regardless of
+  // how the user has scrolled each lane.
   function startDrag(pinKind, startEvent) {
     if (busy) return
     startEvent.preventDefault()
     startEvent.stopPropagation()
-    const laneEl = laneRef.current
+    const isVoiceSide = pinKind === 'voice' || pinKind === 'orangePin'
+    const laneEl = isVoiceSide ? voiceLaneRef.current : laneRef.current
     if (!laneEl || instrDur <= 0) return
     const rect = laneEl.getBoundingClientRect()
 
@@ -495,8 +613,13 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   // the canonical source; addVisualPin / removeVisualPin compute
   // the new array and fire the optimistic mutation.
   function addVisualPin(event) {
-    if (!laneRef.current || instrDur <= 0) return
-    const rect = laneRef.current.getBoundingClientRect()
+    // Use the lane node the event bubbled from (currentTarget), not
+    // always the instrumental lane, so double-clicks on the voice
+    // lane drop markers at the correct X coordinate when its
+    // independent scroll has been nudged.
+    const laneEl = event.currentTarget
+    if (!laneEl || instrDur <= 0) return
+    const rect = laneEl.getBoundingClientRect()
     const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
     const t = Number(((x / rect.width) * instrDur).toFixed(3))
     if (t < 0 || t > instrDur) return
@@ -508,6 +631,27 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
   function removeVisualPin(t) {
     const next = visualPins.filter((p) => Math.abs(p - t) > 0.0001)
     markerMut.mutate({ instrumentalId, markers: next })
+  }
+
+  // Click-to-focus + arrow-key nudge on the violet instrumental pins.
+  // Matches the voice-block behavior: click the pin to focus it, then
+  // ←/→ ±0.1 s, ↓/↑ ±1.0 s. After any nudge we bump playKey so the
+  // preview region auto-replays, same as a mouse drag would.
+  function onInstrPinKey(which, e) {
+    if (busy) return
+    let step = 0
+    if (e.key === 'ArrowLeft')  step = -0.1
+    else if (e.key === 'ArrowRight') step = +0.1
+    else if (e.key === 'ArrowDown')  step = -1.0
+    else if (e.key === 'ArrowUp')    step = +1.0
+    else return
+    e.preventDefault()
+    if (which === 'start') {
+      setInstrStart((v) => Math.max(0, Math.min(instrEnd - 0.5, Number((v + step).toFixed(3)))))
+    } else {
+      setInstrEnd((v) => Math.max(instrStart + 0.5, Math.min(instrDur, Number((v + step).toFixed(3)))))
+    }
+    setPlayKey((k) => k + 1)
   }
 
   function onVoiceKey(e) {
@@ -606,7 +750,7 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         )}
       </div>
 
-      {/* Instrumental lane */}
+      {/* Instrumental lane header */}
       <div className="flex items-center gap-2 mb-1">
         <button
           onClick={toggleInstr}
@@ -624,13 +768,26 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         <span className="ml-auto text-zinc-600 font-mono">
           region {instrStart.toFixed(2)}→{instrEnd.toFixed(2)}s
         </span>
+        <button
+          onClick={() => setZoomLevel(z => z === 1 ? 3 : z === 3 ? 5 : 1)}
+          className="px-1.5 py-0.5 rounded border border-zinc-700 hover:border-zinc-500 text-zinc-400 font-mono text-[9px]"
+          title="Cycle timeline zoom (1x / 3x / 5x)"
+        >
+          {zoomLevel}x
+        </button>
       </div>
+      <div className="overflow-x-auto overflow-y-hidden mb-3 rounded border border-zinc-800 bg-zinc-900">
       <div
         ref={laneRef}
         onDoubleClick={addVisualPin}
-        className="relative h-10 bg-zinc-900 border border-zinc-800 rounded mb-3 select-none"
+        className="relative h-14 select-none"
+        style={{ width: `${zoomLevel * 100}%`, minWidth: '100%' }}
         title="Double-click to drop a marker pin"
       >
+        <canvas
+          ref={instrCanvasRef}
+          className="absolute inset-0 w-full h-full pointer-events-none"
+        />
         {/* Region highlight (between pins) */}
         <div
           className="absolute top-0 bottom-0 bg-violet-500/15 border-x border-violet-500/30"
@@ -668,32 +825,37 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
             0.00s
           </div>
         </div>
-        {/* Start pin */}
+        {/* Start pin — click to focus, arrow keys ±0.1/±1 */}
         <div
+          tabIndex={0}
           onPointerDown={(e) => startDrag('start', e)}
-          className="absolute top-0 bottom-0 flex items-start cursor-ew-resize touch-none"
+          onKeyDown={(e) => onInstrPinKey('start', e)}
+          className="absolute top-0 bottom-0 flex items-start cursor-ew-resize touch-none focus:outline-none group"
           style={{ left: regionLeftPct, transform: 'translateX(-50%)', width: '14px' }}
-          title={`start ${instrStart.toFixed(3)}s`}
+          title={`start ${instrStart.toFixed(3)}s (click to focus, ←→ ±0.1s, ↑↓ ±1s)`}
         >
-          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-violet-400" />
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-violet-400 rounded-sm" />
+          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-violet-400 group-focus:bg-violet-200 group-focus:w-[3px] transition-all" />
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-violet-400 rounded-sm group-focus:bg-violet-200 group-focus:scale-125 group-focus:ring-2 group-focus:ring-violet-300/60 transition-all" />
           <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[9px] text-violet-300 font-mono whitespace-nowrap">
             {instrStart.toFixed(2)}
           </div>
         </div>
-        {/* End pin */}
+        {/* End pin — click to focus, arrow keys ±0.1/±1 */}
         <div
+          tabIndex={0}
           onPointerDown={(e) => startDrag('end', e)}
-          className="absolute top-0 bottom-0 flex items-start cursor-ew-resize touch-none"
+          onKeyDown={(e) => onInstrPinKey('end', e)}
+          className="absolute top-0 bottom-0 flex items-start cursor-ew-resize touch-none focus:outline-none group"
           style={{ left: pct(instrEnd), transform: 'translateX(-50%)', width: '14px' }}
-          title={`end ${instrEnd.toFixed(3)}s`}
+          title={`end ${instrEnd.toFixed(3)}s (click to focus, ←→ ±0.1s, ↑↓ ±1s)`}
         >
-          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-violet-400" />
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-violet-400 rounded-sm" />
+          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-violet-400 group-focus:bg-violet-200 group-focus:w-[3px] transition-all" />
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-violet-400 rounded-sm group-focus:bg-violet-200 group-focus:scale-125 group-focus:ring-2 group-focus:ring-violet-300/60 transition-all" />
           <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[9px] text-violet-300 font-mono whitespace-nowrap">
             {instrEnd.toFixed(2)}
           </div>
         </div>
+      </div>
       </div>
 
       {/* Voice lane */}
@@ -715,11 +877,18 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
         </span>
         <span className="ml-auto text-zinc-600 text-[9px]">click block · drag · ←→ ±0.1s · ↑↓ ±1s</span>
       </div>
+      <div className="overflow-x-auto overflow-y-hidden mb-3 rounded border border-zinc-800 bg-zinc-900">
       <div
+        ref={voiceLaneRef}
         onDoubleClick={addVisualPin}
-        className="relative h-10 bg-zinc-900 border border-zinc-800 rounded mb-3 select-none"
+        className="relative h-14 select-none"
+        style={{ width: `${zoomLevel * 100}%`, minWidth: '100%' }}
         title="Double-click to drop a marker pin"
       >
+        <canvas
+          ref={voiceCanvasRef}
+          className="absolute inset-0 w-full h-full pointer-events-none"
+        />
         {/* Visual marker pins — shared with the instrumental lane so
             the markers form a full vertical line across both tracks. */}
         {visualPins.map((t) => (
@@ -790,6 +959,7 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
             0.00s
           </div>
         </div>
+      </div>
       </div>
 
       {/* Playback + save controls. Per-lane play buttons are above;
