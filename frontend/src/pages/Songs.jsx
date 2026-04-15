@@ -712,12 +712,27 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
 
   function toggleOrangePin() {
     if (orangePin == null) {
-      // Spawn the pin in the MIDDLE of the voice duration so it's
-      // clearly visible and doesn't overlap the green block's left
-      // edge (which would make it hard to click). The CEO then drags
-      // or nudges the offset from there.
-      const midOffset = voiceDur > 0 ? voiceDur / 2 : 1.0
-      setOrangePin(Number(midOffset.toFixed(3)))
+      // Spawn near the START of the voice block (1s in) so it's
+      // visible at whatever scroll position the user is at — they're
+      // almost always looking at the left edge of the block where
+      // the voice-entry marker is. The user can then drag it wherever.
+      const startOffset = Math.min(1.0, Math.max(0.1, voiceDur * 0.05))
+      setOrangePin(Number(startOffset.toFixed(3)))
+      // Scroll the voice lane so the new pin is horizontally centered,
+      // guaranteeing the user sees it even at high zoom levels.
+      setTimeout(() => {
+        const lane = voiceLaneRef.current
+        if (!lane || instrDur <= 0) return
+        const pinAbs = voiceEntry + startOffset
+        const pinPx = (pinAbs / instrDur) * lane.scrollWidth
+        const scroller = lane.parentElement
+        if (scroller && scroller.scrollTo) {
+          scroller.scrollTo({
+            left: Math.max(0, pinPx - scroller.clientWidth / 2),
+            behavior: 'smooth',
+          })
+        }
+      }, 0)
     } else {
       setOrangePin(null)
     }
@@ -965,19 +980,26 @@ function VocalEntryStudio({ instrumentalId, songId, vocalsStem, jobStatus }) {
               tabIndex={0}
               onPointerDown={(e) => startDrag('orangePin', e)}
               onKeyDown={onOrangePinKey}
-              className="absolute -top-1 -bottom-1 cursor-ew-resize touch-none focus:outline-none group"
+              className="absolute top-0 bottom-0 z-50 cursor-ew-resize touch-none focus:outline-none group"
               style={{
                 left: `${(Math.max(0, Math.min(voiceDur, orangePin)) / Math.max(0.001, voiceDur)) * 100}%`,
                 transform: 'translateX(-50%)',
-                width: '28px',
-                zIndex: 40,
+                width: '32px',
               }}
               title={`scratch pin +${orangePin.toFixed(3)}s from voice entry (click to focus, ←→ ±0.1s, ↑↓ ±1s, Del to remove)`}
             >
-              <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] bg-orange-400 group-focus:bg-orange-300 group-focus:w-[3px] transition-all shadow-[0_0_6px_rgba(251,146,60,0.9)]" />
-              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-4 h-4 bg-orange-400 rounded-sm border-2 border-orange-50 group-focus:bg-orange-300 group-focus:scale-125 group-focus:ring-2 group-focus:ring-orange-300/60 transition-all shadow-lg" />
-              <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[9px] text-orange-100 font-mono whitespace-nowrap pointer-events-none bg-zinc-950/90 px-1 rounded">
-                +{orangePin.toFixed(2)}
+              {/* Thick orange line, full height of the block */}
+              <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[3px] bg-orange-400 group-focus:bg-orange-200 group-focus:w-[4px] transition-all shadow-[0_0_10px_rgba(251,146,60,1)]" />
+              {/* Big circular knob at the TOP of the block (inside the
+                  block's vertical bounds so overflow-y-hidden on the
+                  scroll wrapper doesn't clip it). 18px diameter with
+                  white border so it pops against the green. */}
+              <div className="absolute top-0.5 left-1/2 -translate-x-1/2 w-[18px] h-[18px] bg-orange-400 rounded-full border-[3px] border-white group-focus:bg-orange-200 group-focus:scale-110 group-focus:ring-2 group-focus:ring-orange-200 transition-all shadow-[0_0_12px_rgba(251,146,60,1)]" />
+              {/* Small indicator at bottom so it reads as a pin */}
+              <div className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-[8px] h-[8px] bg-orange-400 rounded-full border border-white shadow-lg" />
+              {/* Offset label */}
+              <div className="absolute -top-4 left-1/2 -translate-x-1/2 text-[10px] text-orange-200 font-mono font-bold whitespace-nowrap pointer-events-none bg-zinc-950/95 px-1 rounded border border-orange-400/40">
+                +{orangePin.toFixed(2)}s
               </div>
             </div>
           )}
