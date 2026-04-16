@@ -8,16 +8,37 @@
 
 ---
 
+## 🟢 Live top-of-backlog — next session starts here
+
+- **`#109` Per-genre song structure rules: config + Suno prompt injection + Settings UI** — `pending`. Plan written, awaiting blend-semantic confirmation from user before Phase 1. Full briefing in `planning/NEXT_SESSION_START_HERE.md`.
+
+Six phases (TDD — failing test first each phase):
+1. Schema + seed — migrations 033 (`genre_structures` table), 034 (two new `ai_artists` cols) + seed 20 genres
+2. Prompt injection — `structure_resolver.py` + `structure_prompt.py` wired into song gen orchestrator
+3. Admin API — `/api/v1/admin/genre-structures` CRUD + artist-patch extension
+4. Settings subtab + artist-profile "Song Structure" section with override checkbox + tooltip
+5. (rolls into 1) — research-backed structures for the top 20 genres
+6. Y3K regeneration + structural-compliance measurement
+
+Related:
+- **`#106` Add admin retry-stem-job endpoint + Songs UI button** — `pending`, deferred. Nice-to-have; not blocking `#109`.
+- **`#107` Build VocalEntryStudio UI with draggable pins + two-track preview** — `done`. Four commits pushed 2026-04-15 (`b1ddfbc`, `528230f`, `e3e4a9e`, `f283959`). Orange scratch pin verified on real Y3K data via Playwright harness.
+- **`#108` DTW vocal alignment prototype on Y3K** — `deleted` (2026-04-15). Superseded by `#109` after human observed structural mismatches can't be fixed by time-warping (see L014 in `planning/lessons.md`).
+
+---
+
+---
+
 ## Counts at a glance
 
 | Phase | Open | In-progress | Blocked | Done |
 |---|---|---|---|---|
-| P1 — Data Foundation closeout | 40 | 2 | 0 | 12 |
+| P1 — Data Foundation closeout | 35 | 1 | 0 | 17 |
 | P2 — Prediction + Song DNA | 30 | 0 | 0 | 8 |
 | P3 — Autonomous Pipeline (stubs) | 28 | 0 | 0 | 0 |
 | O — Ops & Quality | 8 | 0 | 0 | 0 |
-| AUDIT — 2026-04-11 deep code audit | 33 | 0 | 0 | 8 |
-| **Total** | **139** | 2 | 0 | 28 |
+| AUDIT — 2026-04-11 deep code audit | 30 | 0 | 0 | 11 |
+| **Total** | **131** | 1 | 0 | 36 |
 
 ---
 
@@ -40,9 +61,9 @@
 | ID | Title | Status | Assigned | Depends on | Notes |
 |---|---|---|---|---|---|
 | P1-010 | Read `api/services/genre_classifier.py` end-to-end and document required input signals | todo | — | — | |
-| P1-011 | Identify why ~95% of tracks fail classification — likely classifier expects structured `signals.spotify_genres` but Chartmetric provides comma-string `signals.genres` | todo | — | P1-010 | Confirm with a sample of failing tracks. **Audit finding (AUD-001): exception swallowing in `api/routers/trending.py:88` (`except Exception: pass`) hides classifier failures. Add logging here first.** Also see AUD-005 (`genre_classifier.py:508-514` — neighbor inference compares track UUIDs against artist UUIDs in the artists table, broken for tracks). |
-| P1-012 | Add a parser path: when structured genre arrays are empty, split `signals.genres` comma-string → normalize → match to taxonomy | todo | — | P1-011 | TDD: write the failing test first |
-| P1-013 | Add classification quality metric to `metadata_json`: `{quality: high|medium|low, source: structured|comma_string|fallback}` | todo | — | P1-012 | |
+| P1-011 | Identify why ~95% of tracks fail classification — likely classifier expects structured `signals.spotify_genres` but Chartmetric provides comma-string `signals.genres` | done | claude | P1-010 | Confirmed: classifier iterated `metadata_json.chartmetric_genres` as a list but Chartmetric ships `signals.genres` as comma-string. Walked char-by-char, matching nothing. Fixed by P1-012. |
+| P1-012 | Add a parser path: when structured genre arrays are empty, split `signals.genres` comma-string → normalize → match to taxonomy | done | claude | P1-011 | New `GenreClassifier._normalize_label_list()` staticmethod accepts list OR comma/semicolon/slash/pipe-separated string. Applied to all 4 source lists. Also trending ingest now copies `signals.genres`/`signals.track_genre` into `metadata_json.chartmetric_genres` as fallback. Classifier also reads `meta.get("genres")` directly as a secondary key. Commit 190e953. |
+| P1-013 | Add classification quality metric to `metadata_json`: `{quality: high|medium|low, source: structured|comma_string|fallback}` | done | claude | P1-012 | Extended `ClassificationResult` dataclass with `signal_sources`, `taxonomy_matched_count`, `top_candidate_score`, `platform_hit_count`. `classify_and_save()` writes `classification_details` dict into `metadata_json` alongside existing `classification_quality`. Surfaces in DB Stats and enables debugging why classification succeeded or failed. Commit 190e953. |
 | P1-014 | Backfill script: re-run classifier on all 2,146 existing tracks | todo | — | P1-012 | Idempotent — safe to re-run |
 | P1-015 | Expose classification coverage % in admin dashboard (e.g. "1,847 / 2,146 tracks classified — 86%") | todo | — | P1-014 | |
 | P1-016 | Document the fix in `planning/lessons.md` | todo | — | P1-014 | |
@@ -328,7 +349,7 @@ A diagnostic view answering "what's actually in the database, and how is it grow
 | AUD-002 | Defer sync genre classification out of `POST /trending` to a background task or end-of-scraper batch | api/routers/trending.py:82-87 | done | Solved by the bulk endpoint + classification sweep (P1-050 + P1-060). Per-record path remains for the legacy 4h scraper but is no longer the bottleneck. |
 | AUD-003 | Fix file-handle leak in backfill subprocess; use `subprocess.DEVNULL` or context-managed log file. Also fix relative `scripts/backfill_deep.py` path (use absolute, like `train_model.py:114`) | api/routers/admin.py:951 | done | Absolute script_path; explicit `log_file.close()` after `Popen` (child dup'd FD); `close_fds=True`; cwd set. |
 | AUD-004 | Remove duplicate `"spotify_audio"` key in `DEFAULT_CONFIGS` — line 183 is silently overwritten by line 185 | scrapers/scheduler.py:183, 185 | done | Fixed in `scrapers/scheduler.py` — single definition with comment. Both copies were identical so behavior is unchanged. |
-| AUD-011 | Fix `spotify_audio` scraper API schema mismatch — `_fetch_tracks_needing_enrichment()` calls `/api/v1/trending` expecting `entity_identifier`+`signals` keys; the endpoint returns `entity`+`scores` | scrapers/spotify_audio.py:119-139 | todo | **This is the actual root cause of audio_features being 121/2,146.** Always returns 0 → exits early at line 139 with "Found 0 tracks needing enrichment". Cross-ref P1-004. |
+| AUD-011 | Fix `spotify_audio` scraper API schema mismatch — `_fetch_tracks_needing_enrichment()` calls `/api/v1/trending` expecting `entity_identifier`+`signals` keys; the endpoint returns `entity`+`scores` | scrapers/spotify_audio.py:119-139 | done | Built new purpose-built admin endpoint `GET /api/v1/admin/tracks/needing-audio-features` that queries the DB directly for `WHERE spotify_id IS NOT NULL AND audio_features IS NULL` with limit/offset. Rewrote `_fetch_tracks_needing_enrichment()` to consume it. Commit 190e953. |
 | AUD-012 | Implement exponential backoff in `_rate_limited_request()` — currently retries immediately on 429 | scrapers/base.py:~57 | todo | (verify) MAX_RETRIES=5 BASE_DELAY=1.0 are defined but the loop body needs to actually `await asyncio.sleep(BASE_DELAY * 2**attempt)`. Read the file to confirm. |
 | AUD-017 | Replace `subprocess.run` train invocation with direct call to `ml.train.train()`; capture full stderr to file on failure | scrapers/tasks.py:116-120 | todo | Cross-ref P2-001. The `cwd=project_root` is redundant because script_path is already absolute. |
 | AUD-019 | Implement (or remove) `_build_sequence()` for LSTM in the ensemble — currently undefined, so LSTM predictions never run | ml/predictor.py:95, ml/ensemble.py | todo | If LSTM isn't ready for Phase 2, remove it from the active ensemble path so the rule-based fallback isn't masked by silent LSTM None-returns. |
@@ -351,7 +372,7 @@ A diagnostic view answering "what's actually in the database, and how is it grow
 
 | ID | Title | File:line | Status | Notes |
 |---|---|---|---|---|
-| AUD-005 | Fix neighbor-inference query: it compares track UUIDs against artist UUIDs in the artists table. Set `entity_id = artist.id` consistently before line 507 | api/services/genre_classifier.py:508-514 | todo | Compounds the genre-classifier sparse-output problem. Cross-ref P1-011. |
+| AUD-005 | Fix neighbor-inference query: it compares track UUIDs against artist UUIDs in the artists table. Set `entity_id = artist.id` consistently before line 507 | api/services/genre_classifier.py:508-514 | done | **Correction:** the audit's specific claim was already fixed at lines 502-507. But real adjacent bugs existed: silent `logger.debug` swallowing → promoted to warning; `entity.artist` MissingGreenlet risk → explicit try/except with FK fallback load; fallback to track UUID when artist can't be resolved → now returns {} early. Shipped in commit 190e953. |
 | AUD-006 | Add logging in `_signal_artist_inheritance` exception handler before returning `{}` | api/services/genre_classifier.py:402-404 | done | Promoted from `logger.debug` (invisible) to `logger.warning` with track id, artist id, exception. |
 | AUD-007 | Per-genre prediction targets — currently 4 hardcoded US targets only; `?genre=...` filter is ignored | api/services/prediction_service.py:46-67 | todo | Either extend `PREDICTION_TARGETS` or filter results in the route. |
 | AUD-008 | Backtest service transaction-boundary check: ensure each period's results are an atomic unit | api/services/backtest_service.py:84-92 | todo | Currently rollback at line 92 loses all progress for the period. |

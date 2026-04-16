@@ -45,3 +45,21 @@ can oyu run them from me? are these one off? I want the ingestion to be continuo
 ## 2026-04-11 12:01:16
 
 btw the DB is on neon, not local
+
+## 2026-04-15 — session 7224c6fe highlights
+
+- the voice delayer doesnt seem to work - everythign is snapped to zero. also, the automated snapping mechanism dows not work at all see Y3K track
+- the orange pin is still under the green bar, I cannot delete it and cannot move it and it' doesnt move with the bar. u didnt fix anything
+- nothing changed [screenshot] I still cannot select or move the orange pins
+- what are you t4esting on? i still see the old stuff on yk3. can u test on that
+- nothing has changed. did u test it yourself?
+- ive cleared site data now i see no songs at all — can you give me those values? i dont know where they are
+- i am back - I still see the stuff I saw belfore
+- synching voice and real instrumental is impossible, because the voice has been developed on a different made up instrumental, derived from the instrumental provided. I need the voice to be created and match the given human made instrumental exactly. how do we do that
+- didnt we try dtw and it didnt really work?
+- ok let's try on YK3
+- note that the instrumental has a longer intro than the vocal. that's a big issue - not sure dtw can fix it
+- can we set exact structures per genre as universal per genre rules that get injected consistently? I want structural consistently per genre. You can research what the right structure is per genre. This should be modifiable in settings
+- 1 primary genre / 2 db / 3 go with minimum / 4 do top 20 genres / drop dtw
+- 1 do a new subtab / 2 not for now / 3 artist templates should 'blend' with genres, unless there is a specific override request - lets add genre override as a checkbox on the artist. and have a mouseover with explenation of what it means
+- I am about to shut down this session. Can you save context, update PRD and save everything so I can point the next session to /planning folder and the model will know exactly where to start from

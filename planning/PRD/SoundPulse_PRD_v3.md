@@ -3510,3 +3510,162 @@ Items 1-12 were resolved in v3 first pass; items 13-16 were resolved in the cons
 - `planning/PRD/soundpulse_artist_release_marketing_spec.md`
 
 This v3 is the canonical executable spec. When in doubt, this document wins.
+
+---
+
+# §70 — Per-Genre Song Structure Rules (added 2026-04-15)
+
+## 70.1 — Problem
+
+When a human-supplied instrumental is combined with a Suno/Kie-generated vocal, the two audio files routinely have **structurally incompatible layouts**. Suno writes its own intro/verse/chorus/bridge lengths driven by the prompt, typically independent of the human instrumental's structure. The result: a 20-bar human intro aligned to a 4-bar Suno intro → the vocal enters at a section boundary that doesn't exist in the instrumental. Post-hoc alignment (DTW, phase-lock, BPM correction) cannot fix this — the two sequences don't contain the same content.
+
+Observed concretely on track Y3K (`song_id = 9df3ff71-47ec-4613-9693-c126d764e805`, `instrumental_id = a68c20f2-c970-48ca-9304-12438c12a1a7`) on 2026-04-15: the human instrumental is ~179s, the Suno vocal stem is ~174s, but the phrasing of the vocal doesn't line up with the structural boundaries of the instrumental at any offset.
+
+## 70.2 — Solution: constrain Suno's structure at the prompt
+
+Inject explicit section-tag structures into every song-generation prompt, keyed by the song's `primary_genre`. Every genre has an approved default structure; artists may override or blend. Users edit the structures live from a Settings subtab.
+
+### 70.2.1 — Data model
+
+**New table `genre_structures`** (Alembic migration `033_genre_structures.py`):
+```sql
+CREATE TABLE genre_structures (
+  primary_genre TEXT PRIMARY KEY,
+  structure JSONB NOT NULL,               -- list[{name, bars, vocals}]
+  notes TEXT,                             -- 1-line rationale
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by TEXT
+);
+```
+
+Where `structure` is a JSONB array of section objects:
+```json
+[
+  {"name": "Intro",      "bars": 8,  "vocals": false},
+  {"name": "Verse 1",    "bars": 16, "vocals": true},
+  {"name": "Pre-chorus", "bars": 4,  "vocals": true},
+  {"name": "Chorus",     "bars": 8,  "vocals": true},
+  {"name": "Verse 2",    "bars": 16, "vocals": true},
+  {"name": "Pre-chorus", "bars": 4,  "vocals": true},
+  {"name": "Chorus",     "bars": 8,  "vocals": true},
+  {"name": "Bridge",     "bars": 8,  "vocals": true},
+  {"name": "Chorus",     "bars": 16, "vocals": true},
+  {"name": "Outro",      "bars": 4,  "vocals": false}
+]
+```
+
+Validation (enforced at the API layer and at DB insert time):
+- `structure` must be a non-empty array
+- every element requires `name: string`, `bars: int > 0`, `vocals: bool`
+- `primary_genre` must be a canonical key from `shared/genre_taxonomy.py`
+
+**Two new columns on `ai_artists`** (Alembic migration `034_artist_structure_fields.py`):
+```sql
+ALTER TABLE ai_artists
+  ADD COLUMN structure_template JSONB,              -- null = no artist-specific structure
+  ADD COLUMN genre_structure_override BOOLEAN NOT NULL DEFAULT FALSE;
+```
+
+`structure_template` shape is identical to `genre_structures.structure`.
+`genre_structure_override = TRUE` means "use the artist template as-is, ignore the genre's blend".
+
+### 70.2.2 — Resolver logic
+
+Location: `services/song_gen/structure_resolver.py`
+
+```
+resolve_structure_for_song(artist, primary_genre):
+    genre_struct = lookup_genre_structure(primary_genre) or lookup_genre_structure("pop")
+    if artist.structure_template is None:
+        return genre_struct                                    # no artist preference → pure genre
+    if artist.genre_structure_override:
+        return artist.structure_template                       # checkbox ticked → artist wins outright
+    return blend(genre_struct, artist.structure_template)      # default → section-name merge
+```
+
+**Blend semantic (confirmed design, 2026-04-15):** for each section name (`Intro`, `Verse 1`, `Pre-chorus`, …), take the artist's `bars` and `vocals` values if the artist specified that section; otherwise keep the genre's. Artist-only sections (sections in `structure_template` but not in `genre_struct`) are inserted in the order they appear in the artist template. Genre-only sections (sections in `genre_struct` but not in `structure_template`) stay in their original position. **Rationale:** lets an artist shorten/lengthen any named section, drop a section they never use, or add a signature section without redefining the whole structure. Rejected alternative: weighted averages on bar counts — musically meaningless.
+
+**Note:** the blend rule is the one design decision requiring re-confirmation from the human before Phase 2 implementation. See `planning/NEXT_SESSION_START_HERE.md` §3.
+
+### 70.2.3 — Prompt injection
+
+Location: `services/song_gen/structure_prompt.py`
+
+```
+format_structure_for_suno(structure: list) -> str:
+    """Turn [{"name":"Intro","bars":8,"vocals":false}, ...] into a
+    Suno section tag block:
+        [Intro: 8 bars, instrumental]
+        [Verse 1: 16 bars]
+        [Pre-chorus: 4 bars]
+        [Chorus: 8 bars]
+        ...
+    """
+```
+
+Conventions:
+- Section name is used verbatim as the tag label.
+- `bars: N` is rendered as `N bars`.
+- `vocals: false` appends `, instrumental` to the tag; `vocals: true` is the default (no suffix).
+
+The song generation orchestrator (find via `grep -rn "generation_prompt" services/song_gen/`) calls the resolver and formatter, then **prepends** the tag block to the existing `generation_prompt` (does not replace). This means the human-authored prompt still flows to Suno, but under a structural scaffold.
+
+### 70.2.4 — Admin API
+
+New router `api/routers/admin_genre_structures.py`:
+- `GET    /api/v1/admin/genre-structures` — list all structures
+- `GET    /api/v1/admin/genre-structures/{primary_genre}` — one structure
+- `PUT    /api/v1/admin/genre-structures/{primary_genre}` — upsert (validates structure format)
+- `DELETE /api/v1/admin/genre-structures/{primary_genre}` — remove
+
+Artist update route (existing, extend): accept the two new fields `structure_template` and `genre_structure_override`.
+
+### 70.2.5 — Settings UI
+
+**New subtab under `/settings` — "Genre Structures":**
+- Table view: one row per genre, compact summary of sections (e.g. `Intro 8 → Verse 16 → Chorus 8 → Verse 16 → Chorus 8 → Bridge 8 → Chorus 16 → Outro 4`)
+- Click row → editor panel (inline or modal):
+  - ordered list of sections with add / remove / drag-reorder controls
+  - each section: `name` (text), `bars` (number), `vocals` (checkbox)
+  - save / cancel
+
+**Artist profile additions:**
+- New "Song Structure" section in the artist editor
+- Checkbox labelled **"Use artist template only (ignore genre blending)"** — bound to `genre_structure_override`
+- Tooltip on the checkbox (exact copy):
+  > When unchecked, this artist's song structure is blended with their primary genre's template — genre sets the skeleton, the artist can shorten/lengthen or add/remove named sections. When checked, the genre template is ignored entirely and the artist's custom structure is used as-is.
+- Structure editor for `structure_template` (reuses the component from the Settings subtab)
+
+## 70.3 — Initial coverage
+
+Seed 20 `primary_genre` rows in migration 033. Target set (cross-check against `shared/genre_taxonomy.py` canonical keys first and rename if any don't match):
+
+```
+pop, k-pop, hip-hop, rap, r&b, dance-pop, edm, house, techno, trap, drill,
+afrobeats, amapiano, latin-pop, reggaeton, indie-pop, rock, country,
+lo-fi, ambient
+```
+
+Each row carries a `notes` value with a one-line rationale for the chosen structure (e.g. `"trap: 4-bar intro, 16-bar verse, 8-bar hook — ATL / 808 Mafia template"`).
+
+## 70.4 — Out of scope for MVP
+
+- **Version history / change-log on structures.** Columns `updated_at` + `updated_by` are sufficient. Revisit once there's evidence we need A/B testing of structures.
+- **Per-song structure override.** Songs inherit from their artist + genre; no per-song knob. Add if creative need emerges.
+- **Subgenre granularity.** `primary_genre` only. A subgenre-aware resolver can layer on later without migrating data.
+- **Tempo / energy / key fields in the structure spec.** Minimum structure is `[{name, bars, vocals}]`. Tempo and energy curves are already handled by the blueprint / Suno style tags — no reason to duplicate.
+
+## 70.5 — Success gate
+
+Before promoting the new pipeline to the default path, re-run Y3K song generation with the structure injection enabled. Measure:
+
+1. **Structural compliance** — for each requested section, detect the actual section boundary in Suno's output via `librosa.beat` + duration math, and verify it lands within ±1 bar of the requested length.
+2. **A/B listen** — compare the new Y3K mix against the pre-change mix on a side-by-side listen.
+
+**Promote if:** compliance ≥ 70 % on Y3K AND the A/B listen is better. Otherwise: iterate on prompt phrasing (BPM pinning, numeric bar counts vs. relative phrases, explicit `[Drop]` / `[Build]` keywords, retry loop) before shipping.
+
+## 70.6 — Dependencies and references
+
+- **`planning/NEXT_SESSION_START_HERE.md`** — single entry point for implementing this feature, including the six-phase TDD plan and the one remaining open question (blend-semantic confirmation).
+- **L014 in `planning/lessons.md`** — why DTW doesn't fix structural mismatch and this feature does instead.
+- **`services/stem-extractor/worker.py:596-702`** — the existing post-hoc alignment pipeline. This feature replaces its structural role; the constant-offset pass can stay as a precision refinement once structures are enforced upstream.

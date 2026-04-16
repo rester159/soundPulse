@@ -24,8 +24,11 @@
 | 003 | — | `scraper_configs.last_record_count` column |
 | 004 | — | `tracks`: shazam_id, tiktok_sound_id, billboard_id, chartmetric_id columns + unique indexes (incl. apple_music_id which was previously not indexed) |
 | 005 | 2026-04-03 | `backtest_results` table |
+| … | … | (historical migrations 006–032 — see `alembic/versions/` for authoritative list) |
+| 033 | *planned* | `genre_structures` table — per-genre song structure templates for Suno prompt injection (PRD §70) |
+| 034 | *planned* | `ai_artists.structure_template` JSONB + `ai_artists.genre_structure_override` BOOLEAN — per-artist structure overrides (PRD §70) |
 
-Head: `005`
+Head: `005` (file out of date — real head is much further; update opportunistically)
 
 ---
 

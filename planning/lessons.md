@@ -361,3 +361,122 @@ that skips Demucs on re-mixes (~10 s instead of 15 min).
 3. **Spectral flatness is noisy on music with dense textures.** Don't use it
    alone for structural analysis.
 
+## L012 — Nested DOM children need explicit `stopPropagation` when a parent listens for the same keys (2026-04-15)
+
+**Discovery:** The VocalEntryStudio orange scratch pin lived as a DOM child of
+the green voice block. Both elements had `onKeyDown` handlers — the block
+caught ArrowLeft/Right to nudge `voiceEntry`, and the pin caught the same
+arrows to nudge `orangePin`. Without `e.stopPropagation()` on the pin's
+handler, a single ArrowRight press fired both handlers and advanced
+`orangePin` AND `voiceEntry` by 0.1s in lockstep. To the user, the pin
+appeared frozen relative to the block because it was moving at exactly the
+same screen-space rate as the block itself. Three different "fixes" to the
+rendering / z-index / DOM parentage failed to make the symptom go away
+because none of them addressed the event bubbling.
+
+**Root cause:** Synthetic events from React's delegated listener at the
+root bubble through every React-registered handler in the ancestor chain
+unless explicitly stopped. `preventDefault` blocks the browser's default
+action; it does NOT block React's other handlers.
+
+**Fix:** `e.stopPropagation()` in the orange pin's keydown for both the
+arrow-key and Delete/Backspace branches (commit `e3e4a9e`).
+
+**Lesson:** whenever two nested elements both respond to the same key,
+the inner handler MUST `stopPropagation` or you'll get silent double-fire
+bugs that look like "my state is frozen" but are really "both states are
+moving in sync".
+
+## L013 — Test selectors must be specific enough to survive state changes (2026-04-15)
+
+**Discovery:** Playwright test used `document.querySelector('[title*="scratch pin"]')`
+to check whether the orange pin element existed. After `setOrangePin(null)`
+the pin was correctly unmounted, but the test query kept returning a
+result — because the `"+ orange pin"` TOGGLE BUTTON's own `title` attribute
+contained the phrase `"Add an orange scratch pin"`. The substring match
+was satisfied by the button. I spent 20 minutes chasing a non-existent
+"Del doesn't remove the pin" bug before instrumenting the state directly
+via `useEffect` and confirming the state transition was in fact clean.
+
+**Fix:** prefer selectors that uniquely identify the element. For the pin
+the right selector is `[title^="scratch pin +"]` (prefix match on the pin's
+exact title format `scratch pin +N.Ns from voice entry`), not a substring
+match that collides with the button. Better: assign a stable
+`data-testid="orange-scratch-pin"` attribute to the element and key tests
+on that instead of implementation details of the title.
+
+**Lesson:** when a test is telling you a user-facing bug exists but
+instrumented state says everything is fine, the test is lying first.
+Check the selector before blaming the code. And prefer `data-testid` or
+structurally unique selectors over attribute substring matches.
+
+## L014 — DTW only fixes timing drift within shared content; structural mismatch needs source-level fix (2026-04-15)
+
+**Discovery:** Proposed DTW (dynamic time warping) as a way to sync Suno's
+vocal stem to a human-made instrumental. Human correctly pushed back: the
+Y3K human instrumental has a 20-second intro, but Suno's generated vocal
+only has 5 seconds of intro-equivalent silence. DTW assumes both
+sequences contain the same content with only timing differences. When
+one sequence has content the other doesn't have at all, DTW picks a
+best-effort alignment that stretches a single note across the missing
+section — sounds worse than no alignment.
+
+**Root cause of the Y3K sync issue wasn't drift; it was Suno writing a
+structurally different song from what the human instrumental is.** No
+post-hoc alignment technique fixes that — the vocals simply don't exist
+for the intro section.
+
+**Fix direction:** constrain Suno's song structure at the prompt level.
+Inject genre-specific section tags `[Intro: 8 bars, instrumental]
+[Verse 1: 16 bars] [Pre-chorus: 4 bars] [Chorus: 8 bars] ...` so Suno's
+output has a predictable structure that can be matched to the human
+instrumental's bar count. This is task `#109` (per-genre song structure
+rules) — see `planning/NEXT_SESSION_START_HERE.md`.
+
+**Lesson:** before reaching for a signal-processing fix, check whether
+the two sequences actually represent the same underlying content. If
+they don't, you're trying to align things that have nothing to align —
+fix the generation, not the output. DTW / time-warping / phase-lock are
+polish for drift-within-matching-content, not glue for structural
+mismatch.
+
+## L015 — Static HTML shells on Railway cache by browser heuristic; set `Cache-Control` meta tags on SPA entry point (2026-04-15)
+
+**Discovery:** Shipped three correct frontend fixes over the course of a
+session. Each build produced a new bundle hash (`index-XXXXXXXX.js`). The
+user kept reporting "I still see the old UI" after every push, even after
+hard-refreshing. Live bundle fetch from my CLI always showed the latest
+code, so the deploy was fine. The browser was the culprit: Railway served
+`index.html` with no `Cache-Control` header, which makes Chrome fall back
+to *heuristic freshness* (roughly: 10 % of the time since the `Last-Modified`
+date). For a file with no `Last-Modified`, it uses the etag-based path —
+and in practice Chrome was reusing the cached HTML for minutes-to-hours
+even across refreshes.
+
+The cached HTML still pointed to the OLD bundle hash. So the browser
+fetched the OLD bundle from cache (cached by hash → still valid forever)
+and rendered the OLD UI. The new bundle hash sat on disk, uncalled.
+
+**Fix (commit `f283959`):** add explicit `no-cache` meta tags to
+`frontend/index.html`:
+```html
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+```
+
+These force the HTML to always revalidate on load, which means the browser
+always gets the freshest bundle reference, which means the freshest JS
+bundle is always fetched. The JS bundle itself can still be cached
+aggressively (and should be — its hash is immutable).
+
+**Lesson:** SPAs ship with an entry HTML that's essentially a redirect to
+a hashed bundle. That entry HTML MUST be marked `no-cache` or the whole
+cache-busting-via-hash strategy silently falls apart. When an SPA
+redeploy "does nothing," cache the HTML shell first.
+
+**Prevention:** check `curl -I https://<host>/` response headers on every
+static-host setup. If there's no `Cache-Control` (or it allows caching),
+either add a header at the CDN/server layer or add the meta tags to the
+entry HTML. Do not rely on "the user will hard-refresh."
+

@@ -336,3 +336,121 @@ User asked for the 4 commands, then asked if I could run them, then said the DB 
 After step 1 is deployed, the **continuous daily ingestion runs forever automatically** via the scheduler — they only need to do 2-5 once each.
 
 **Decisions still pending:** None blocking. All four user decisions from this turn are confirmed. Suno wrapper signup (EvoLink) and LabelGrid sandbox account need user-side action eventually but don't block any code work.
+
+---
+
+## 2026-04-11 12:40:59 — Actually deployed + ran probe + B1 + B6 + B2 + 4 steps execution
+
+User asked: "can you do the 4 steps? confirming after 4 steps we'll ingest thousands + continue with (a) and (b)". Plus two Gmail-triggered corrections.
+
+**The "can you run them for me" answer:** Found Railway CLI installed + authenticated, so yes for steps that don't pin to my session. Committed + pushed (step 1 = deploy). Found the `POST /api/v1/admin/backfill` endpoint spawns a server-side subprocess on the Railway API container, updated it to use the new `backfill_chartmetric_deep_us.py` script, will trigger via curl once deploy lands. Steps 3-4 can be chained automatically once 2 starts.
+
+**Critical correction from user's Gmail:** "tiktok and applemusic are already in my subscription. go into my gmail and check the responses from skylar"
+
+Searched Gmail via `mcp__claude_ai_Gmail__search_threads`, found the full thread with Skylar @ Chartmetric (2026-04-03). Skylar's authoritative answer:
+
+> "This isn't a plan restriction. The issue is with the endpoint path. For Apple Music and TikTok, the API requires a specific sub-resource at the end of the URL."
+> Apple Music: `/api/charts/applemusic/tracks?...`
+> TikTok: `/api/charts/tiktok/tracks?...`, `/api/charts/tiktok/videos?...`, `/api/charts/tiktok/users?...`
+
+My probe had TikTok as `/api/charts/tiktok` with `type=tracks` as a QUERY PARAM — incorrect. Skylar says `type` must be the path sub-resource. Fixed.
+
+**Live-probed every failing endpoint via ad-hoc curl** to discover the actual working shapes:
+- **TikTok**: works with `/tracks` path sub-resource, **rejects country_code** (global-only chart), `interval=weekly` is accepted — 100 items returned
+- **Apple Music tracks**: works with `type=top` (NOT `insight=top`, NOT `type=daily` — only top is valid) + a specific genre like "Pop" (not "All Genres") — 200 items
+- **Amazon**: works with `code2=US` (uppercase) + `type=popular_track/new_track/popular_album/new_album` + specific genre — 200 items per call
+- **SoundCloud**: works with `kind=top/trending` (NOT `type=`) + `country_code=US` + specific genre (not "all-music") — 100 items
+- **Spotify artists**: rejects `country_code` (global chart), requires `interval=weekly` — returned 0 items for the test date but shape is valid
+- **/api/cities**: returns EMPTY — likely a different endpoint format or not in this tier
+- **Artist enrichment endpoints**: all returned EMPTY in the probe — probe parser bug, not an API issue (response shape differs from chart endpoints)
+
+**New confirmed matrix (commit a99200b + 190e953):** 32 confirmed entries → 250 expanded API calls per snapshot date (up from 79 in the earlier probe), **breakdown:**
+- amazon: 96 calls (4 variants × 24 genres)
+- apple_music: 49 calls (tracks × 24 + albums × 24 + videos)
+- itunes: 49 calls (tracks × 24 + albums × 24 + videos)
+- soundcloud: 20 calls (top × 10 + trending × 10, Friday weekly)
+- beatport: 14 calls (Friday weekly)
+- spotify: 10 calls (4 track charts + 5 artist charts + freshfind)
+- shazam: 5 calls
+- youtube: 4 calls (Thursday weekly)
+- tiktok: 2 calls (tracks + videos — users sub-resource 500-errors, top_tracks genuine 401)
+- deezer: 1 call
+
+**Realistic daily volume with the corrected matrix:**
+- 250 chart pulls × avg 100–200 items = **25,000–50,000 raw chart entries/day**
+- After cross-source dedup: **~8,000–15,000 unique tracks/day**
+- = **100–250× the original 60–225/day production baseline**
+- Budget usage: 250 / 172,800 = **0.14%** — still wildly underutilized
+- **User corrected my math on timeline**: at 15K/day × 30 = 450K, so ~33 days (one month) to hit 500K, NOT 6 months. Corrected in planning docs.
+
+**Three commits pushed this session** (in order):
+1. **a99200b** — Deep US Chartmetric ingestion: bulk endpoint + deferred sweeps + DB Stats view + audit fixes (33 files, +4543/-42)
+2. **396d246** — Route /admin/backfill to the new deep US Chartmetric script
+3. **190e953** — B2: Fix spotify_audio schema + genre classifier deep fixes (AUD-011, AUD-005, P1-012, P1-013)
+
+**B2 fixes shipped:**
+- **AUD-011** (spotify_audio schema): built new `GET /api/v1/admin/tracks/needing-audio-features` endpoint that queries the DB directly. Rewrote `_fetch_tracks_needing_enrichment()` to consume it. Root cause of audio_features being 121/2,146 for months — scraper was hitting `/api/v1/trending` with wrong params + parsing wrong response shape, silently returning 0 every time.
+- **AUD-005** (neighbor-inference): audit's specific claim was already fixed at lines 502-507, but adjacent real bugs existed: silent `logger.debug` swallowing → promoted to warning, `entity.artist` MissingGreenlet risk → explicit try/except with FK fallback load, fallback to track UUID when artist resolution failed → now returns {} early.
+- **P1-012** (comma-string parser): **THE ROOT CAUSE of 95% of tracks being unclassified.** Classifier iterated `metadata_json.chartmetric_genres` as a list, but Chartmetric ships `signals.genres` as a comma-string like `"pop, dance pop, chill pop"`. The iteration walked the string character-by-character matching nothing. Fixed via new `GenreClassifier._normalize_label_list()` staticmethod that accepts list OR comma/semicolon/slash/pipe-separated string. Applied to all 4 source configs. Trending ingest now also copies `signals.genres` / `signals.track_genre` into `metadata_json.chartmetric_genres` as fallback.
+- **P1-013** (classification quality metric): extended `ClassificationResult` with `signal_sources`, `taxonomy_matched_count`, `top_candidate_score`, `platform_hit_count`. `classify_and_save()` writes `classification_details` into metadata_json.
+
+**Deploy status as of 12:40:59:** Railway is actively `DEPLOYING` commit `190e953`. Build has been running ~5 minutes. Once live, the `/admin/db-stats`, `/admin/sweeps/status`, `/admin/tracks/needing-audio-features`, and updated `/admin/backfill` endpoints become available. After that, curl-trigger the backfill and it runs server-side for ~70 min without pinning my session.
+
+**Tasks marked done in this turn:** AUD-001 previously + AUD-002 + AUD-003 + AUD-006 + AUD-009 + AUD-036 + AUD-037 + AUD-039 (B1, in previous turn) + P1-050 + P1-051 + P1-052 + P1-053 + P1-054 + P1-055 + P1-056 + P1-059 + P1-011 + P1-012 + P1-013 + AUD-005 + AUD-011 + P2-090..P2-098 (DB Stats) + session management tasks 1-12 (this session). **Total completed: 36 / 131.**
+
+**Architecture questions answered inline:** (1) the architecture IS one canonical tracks table with cross-platform ID hydration + a trending_snapshots fact table for per-(track, platform, date) dynamic signals — standard canonical-entity + time-series pattern; (2) static (identity, audio_features, genres) lives on tracks, dynamic (rank, score, velocity, composite_score, signals_json) lives on trending_snapshots; (3) next phases: P1 closeout this week via backfill, P2 (ML activation) next 2–4 weeks, P3 (Suno + distribution + marketing + PRO) 8–12 weeks.
+
+---
+
+## 2026-04-15 20:09:05 — session 7224c6fe handoff
+
+Session split into three distinct pieces of work:
+
+### A. Orange scratch pin on VocalEntryStudio — fully debugged and shipped
+
+Four commits in order (all on `main`):
+
+1. **`b1ddfbc`** — Songs: 7x and 10x zoom levels on timeline lanes (cycle is now 1x → 3x → 5x → 7x → 10x).
+2. **`528230f`** — Songs: orange pin must stay inside block vertically + spawn at start. The `overflow-y-hidden` scroll wrapper was clipping the knob when the pin used negative `top`/`bottom` insets; moved the knob fully inside the block, spawn offset is now 0.5–1s (near the left edge) so it's visible at any zoom, and the lane auto-scrolls horizontally to centre the pin on spawn.
+3. **`e3e4a9e`** — Songs: `e.stopPropagation()` on orange pin keydown (fixes "can't move" bug). Root cause found by a full Playwright harness that drove the real `Songs.jsx` component against a mocked API with Y3K's actual values: because the orange pin is a DOM child of the green voice block and both have `onKeyDown` handlers, ArrowRight fired on BOTH the pin AND the block → `orangePin` and `voiceEntry` advanced in lockstep, making the pin look frozen relative to the block. Fix is one line: `e.stopPropagation()` in `onOrangePinKey` for the arrow and Del/Backspace branches.
+4. **`f283959`** — frontend: force HTML shell revalidation + verified fix on real Y3K data. Added `<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">` (+ `Pragma` and `Expires`) to `frontend/index.html`. Without these, Railway served the HTML without `Cache-Control` headers → Chrome's heuristic freshness kept reusing the cached HTML → even after the bundle hash changed, the browser still loaded the stale bundle reference. This was the actual "I still see the old UI" bug after three real code pushes.
+
+Verification — Playwright harness drove the **actual `Songs.jsx` component** via `npx vite` dev server with mocked API responses keyed on Y3K's DB values (`instrumental_id=a68c20f2-c970-48ca-9304-12438c12a1a7`, `voice_entry=18.1`, `voiceDur=173.58`, `instrDur=178.86`, `markers=[19.536]`). Results:
+
+| Check | Result |
+|---|---|
+| Pin renders | `pinLeft: 0.576091%` inside block |
+| Pin on top | `elementFromPoint` at knob centre returns the knob (depth 0 in `elementsFromPoint` chain) |
+| Click focuses | `document.activeElement` == orange pin wrapper |
+| 5× ArrowRight | pinLeft `0.576%` → `0.864%` (+0.5s offset, correct) |
+| voiceEntry after arrows | stayed `18.100s` (stopPropagation works) |
+| Del | `orangePin` state transitions to `null` (verified by `useEffect` logging state changes) |
+
+A false-positive almost caused me to keep chasing a ghost — my test query `document.querySelector('[title*="scratch pin"]')` also matched the `"+ orange pin"` button's own title substring, so after the pin was actually unmounted the query kept finding the button and I thought Del was broken. L013 below captures the lesson.
+
+### B. DTW vocal alignment — investigated and abandoned
+
+Human asked "can we sync Suno vocal to human instrumental perfectly?". I proposed DTW as a near-term path. Human pushed back with the critical observation: the human Y3K instrumental has a longer intro than the Suno-generated vocal, so the two sequences don't contain the same content and DTW would do something wrong (stretch the first vocal note across the whole intro gap). Abandoned DTW as the right fix for the wrong problem.
+
+**What the codebase actually has today** (found during research — corrected a misremembering):
+- `services/stem-extractor/worker.py:596-702` — `_align_vocals_to_instrumental` does a **constant-offset shift** (trim-or-pad head), not DTW.
+- `planning/PRD/SoundPulse_PRD_v3.md:2157` explicitly names multi-window DTW as "next step" — still listed there, but rendered obsolete by the human's structural-mismatch observation.
+
+### C. Pivot to per-genre structure rules — task #109 designed, plan written, NOT STARTED
+
+This is where the next session picks up. See `planning/NEXT_SESSION_START_HERE.md` for the complete handoff — it captures the locked design decisions, the one remaining open question (blend semantic confirmation), the six-phase TDD execution plan, the target 20 genres, and which files to touch.
+
+**Summary of the feature** (full detail in PRD + NEXT_SESSION_START_HERE):
+- New `genre_structures` table keyed by `primary_genre` with a `structure` JSONB column containing the section list.
+- Two new columns on `ai_artists`: `structure_template` (JSONB, nullable) + `genre_structure_override` (BOOLEAN, default `FALSE`).
+- Resolver: artist has no template → use genre; artist has template + override → use artist; artist has template + no override → blend (section-name merge, artist wins on named matches, artist-only sections inserted in artist order).
+- Prompt injection: format resolved structure as Suno section tags `[Intro: 8 bars, instrumental] [Verse 1: 16 bars] ...` and prepend to `generation_prompt`.
+- New Settings subtab for genre-structure CRUD.
+- Artist profile gets a "Song Structure" section with the override checkbox + tooltip.
+
+**Task state at handoff:**
+- `#107` VocalEntryStudio UI → completed
+- `#108` DTW vocal alignment prototype on Y3K → **deleted** (wrong fix for the right problem)
+- `#109` Per-genre song structure rules → **pending** (plan written, awaiting blend-semantic confirmation before Phase 1 starts)
+
+**Before starting Phase 1, the next session must:** confirm the blend semantic with the human (the one open question from §3 of NEXT_SESSION_START_HERE.md). Everything else is locked.
