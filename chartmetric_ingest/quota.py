@@ -31,6 +31,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.models.chartmetric_queue import ChartmetricQuotaState
+from chartmetric_ingest.global_bucket import GlobalChartmetricBucket
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,12 @@ class ChartmetricQuota:
     def __init__(self, session_factory: async_sessionmaker):
         self._session_factory = session_factory
         self._bucket = TokenBucket(BASE_RATE, BURST)
+        # Cross-replica token bucket (task #8 / migration 035). Each
+        # acquire() consumes from the global bucket FIRST, then the
+        # in-process bucket. The global enforces N-replicas-combined
+        # <= rate_per_sec; the local handles the per-replica adaptive
+        # multiplier on 429.
+        self._global = GlobalChartmetricBucket(session_factory)
         self._multiplier = 1.0
         self._last_429_at: datetime | None = None
         self._persisted_multiplier = 1.0
@@ -194,13 +201,18 @@ class ChartmetricQuota:
         )
 
     async def acquire(self) -> None:
-        """Recompute adaptive multiplier (lazy recovery) then block on bucket."""
+        """Recompute adaptive multiplier (lazy recovery), then block on
+        the cross-replica global bucket FIRST, then the in-process
+        bucket. The global enforces a strict N-replicas-combined ceiling
+        of `chartmetric_global_bucket.rate_per_sec`; the local layer
+        adds the per-replica adaptive multiplier on 429 events."""
         new_mult = compute_multiplier(self._last_429_at)
         if new_mult != self._multiplier:
             self._multiplier = new_mult
             self._bucket.set_rate(BASE_RATE * self._multiplier)
             if abs(self._multiplier - self._persisted_multiplier) >= PERSIST_EPSILON:
                 await self._persist()
+        await self._global.acquire()
         await self._bucket.acquire()
 
     async def on_429(self) -> None:
@@ -221,6 +233,15 @@ class ChartmetricQuota:
         # only slows future refills — any tokens accrued at the pre-clamp
         # rate fire immediately and trigger more 429s. See L004.
         self._bucket.drain()
+        # Also drain the cross-replica global bucket so OTHER replicas
+        # don't immediately fire their own queued requests at Chartmetric
+        # while this one is still backing off. The global rate stays
+        # at BASE_RATE (per-replica adaptive lives in `_multiplier`); the
+        # drain is what stops the cross-replica fan-out spike.
+        try:
+            await self._global.drain()
+        except Exception:
+            logger.exception("[cm-quota] global bucket drain failed (continuing)")
         await self._persist()
 
     async def _persist(self) -> None:

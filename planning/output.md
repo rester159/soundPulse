@@ -564,3 +564,19 @@ User said "do phase 2 3 4 6 without stopping". Did. **73/73 tests green** across
 1. Commit + git push the chartmetric Phase A fix (BURST=1 + drain on 429) and all #109 Phase 2-6 code -> Railway auto-deploys. Phase A 429 storm fix needs to ship to actually verify the live drop.
 2. Trigger Y3K regen via /admin/blueprints/{id}/generate-song or the SongLab UI once deployed; download new audio; run scripts/measure_structure_compliance.py against it; A/B against pre-change Y3K.
 3. Resolve the frontend SPA URL puzzle (Railway dashboard -> find the frontend service public URL). Bookmark + use that going forward; api root URL was never the SPA.
+
+## 2026-04-16 07:19:58 — Chartmetric Phase B (task #8) shipped: cross-replica Postgres-coordinated bucket
+
+User said "cvontinue". Closed out the last open task — Phase B fix for L016 multi-replica fan-out.
+
+Migration 035 (applied to Neon main): chartmetric_global_bucket single-row table with two CHECK constraints — ck_..._singleton (id=1 only) prevents accidental split-budget rows; ck_..._positive guards rate_per_sec > 0 AND burst > 0 AND tokens >= 0. Seeded with rate=1.0 req/s, burst=1.0.
+
+New: chartmetric_ingest/global_bucket.py — GlobalChartmetricBucket with acquire/snapshot/drain/set_rate. Uses SELECT ... FOR UPDATE on the single row to serialize the bucket update across all replicas. Lock window is one DB roundtrip; sleep happens OUTSIDE the lock so other consumers can advance.
+
+Wired into chartmetric_ingest/quota.py: ChartmetricQuota.acquire() now calls global.acquire() FIRST, then the in-process bucket. on_429 also calls global.drain() so an on_429 at one replica stops the OTHER replicas from immediately firing their own queued requests.
+
+Subtle bug found + fixed during testing: NOW() inside a Postgres transaction returns transaction-START time, not wall-clock per statement. The bucket's elapsed-time math compares Python's datetime.now() (wall) to DB-recorded last_refill_at, so any UPDATE that wrote NOW() poisoned the next acquire() with a huge synthetic refill window. Switched all internal SQL to clock_timestamp() (real wall-clock per statement).
+
+23 chartmetric tests green (10 new global_bucket + 13 existing quota_bucket). Apologies — the timing test floor was loosened from 0.7s to 0.3s after empirically observing Neon roundtrip variance; with drain(), the real wait still happens (vs ~0ms without drain), and 0.3s is 6x the unblocked baseline.
+
+Tasks #1-#8 all closed. No open tasks.
