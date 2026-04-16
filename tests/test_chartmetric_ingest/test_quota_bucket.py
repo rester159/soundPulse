@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from chartmetric_ingest.quota import (
+    BASE_RATE,
+    BURST,
     RECOVERY_SECONDS,
     THROTTLE_MULTIPLIER,
     TokenBucket,
@@ -95,3 +97,49 @@ def test_compute_multiplier_naive_datetime_assumed_utc():
     now = datetime(2026, 4, 14, 12, 0, 0, tzinfo=timezone.utc)
     naive = datetime(2026, 4, 14, 12, 0, 0)  # same instant, naive
     assert compute_multiplier(naive, now=now) == THROTTLE_MULTIPLIER
+
+
+# --- Phase A fix for L004 microburst storm (2026-04-15) -------------------
+# Live data showed sub-100ms gaps between requests at sustained 0.5 req/s
+# average — bucket was bursting up to 3 tokens immediately after an on_429
+# clamp because old tokens survived the rate change. Two guards:
+#   1. BURST must be 1 — no microbursts allowed at the in-process layer.
+#   2. drain() must zero remaining tokens so an on_429 clamp actually
+#      stops dispatch instead of leaking 3 stale requests.
+
+def test_module_burst_is_one():
+    """Regression guard: BURST > 1 reintroduces microbursts that
+    Chartmetric's per-burst enforcement 429s. See L004 in lessons.md."""
+    assert BURST == 1, (
+        "BURST must stay at 1 — bumping it back to 3 was the L004 microburst "
+        "anti-pattern that produced the 50% 429 storm on 2026-04-15. "
+        "If you're tempted to raise this, read planning/lessons.md L004 first."
+    )
+
+
+@pytest.mark.asyncio
+async def test_drain_empties_bucket():
+    """drain() zeroes available tokens so an on_429 clamp actually
+    stops the next dispatch instead of leaking burst tokens."""
+    b = TokenBucket(rate_per_sec=10.0, burst=3)
+    # Bucket starts full (3 tokens).
+    assert b.available_tokens == pytest.approx(3.0, abs=0.01)
+    b.drain()
+    assert b.available_tokens == pytest.approx(0.0, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_drain_then_acquire_waits_full_refill_interval():
+    """After drain(), the next acquire must wait the full 1/rate
+    interval — no leftover tokens. This simulates the on_429 contract."""
+    b = TokenBucket(rate_per_sec=2.0, burst=3)
+    # Pre-fill the bucket to its burst capacity, then drain to simulate
+    # the post-429 state.
+    b.drain()
+    start = time.monotonic()
+    await b.acquire()
+    elapsed = time.monotonic() - start
+    # 1 / 2.0 = 0.5s minimum wait; allow generous Windows scheduler slack.
+    assert 0.4 <= elapsed <= 0.8, (
+        f"expected ~0.5s wait after drain at rate=2.0, got {elapsed:.3f}s"
+    )

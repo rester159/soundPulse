@@ -480,3 +480,66 @@ static-host setup. If there's no `Cache-Control` (or it allows caching),
 either add a header at the CDN/server layer or add the meta tags to the
 entry HTML. Do not rely on "the user will hard-refresh."
 
+## L016 — Token-bucket `set_rate()` doesn't drain stale tokens; `BURST > 1` re-leaks them right after a clamp (2026-04-15)
+
+**Discovery:** Investigating "are we at 90% of Chartmetric's quota?" surfaced
+that the fetcher was nominally pacing at 1.0 req/s but Chartmetric was
+rejecting ~50% of requests with 429. Live diagnostic on
+`chartmetric_request_queue` (last 200 completions): avg gap **0.65s**,
+**10 sub-100ms gaps**, minimum gap **2.3 ms**. The in-process bucket said
+0.5 req/s (post-`on_429` clamp) but the wall-clock dispatch was 1.5 req/s.
+
+**Root cause (two compounding):**
+
+1. **`TokenBucket.set_rate()` lowers the refill rate but doesn't
+   drain existing tokens.** `ChartmetricQuota.on_429()` clamped the
+   multiplier to 0.5x and called `set_rate(0.5)`, but any tokens accrued
+   under the previous 1.0/s rate stayed in the bucket. With `BURST=3`,
+   that meant up to 3 immediate dispatches right after a 429 — exactly
+   the pattern Chartmetric's burst enforcement 429s. Each microburst
+   triggered another 429, which clamped again, which drained nothing,
+   which let 3 more microburst attempts fly. Self-sustaining.
+
+2. **Multi-replica fan-out** (separate, not fixed in this lesson):
+   each Railway container instantiates its own `ChartmetricQuota` →
+   own in-process `TokenBucket`. They share `last_429_at` via DB but
+   the bucket itself is per-process. N replicas × 0.5/s = N × 0.5/s
+   global dispatch. Phase B fix tracked as task #8.
+
+**Fix (commit pending):**
+
+- Added `TokenBucket.drain()` that zeros `_tokens` after consuming time
+  at the previous rate. `ChartmetricQuota.on_429()` calls `set_rate(...)`
+  then `drain()` so a clamp actually stops dispatch.
+- Set `BURST = 1` (was 3). No microbursts allowed at the in-process
+  layer. Strict 1-token, refill-then-acquire pacing per replica.
+- Added `test_module_burst_is_one` to
+  `tests/test_chartmetric_ingest/test_quota_bucket.py` as a regression
+  guard — failing-test enforcement of this lesson per L010.
+- Added `test_drain_empties_bucket` and
+  `test_drain_then_acquire_waits_full_refill_interval` for the new
+  `drain()` contract.
+
+**Prevention:**
+
+1. **Any rate-limiter "set rate" API must answer: what happens to tokens
+   already in the bucket?** Default in most implementations is to leave
+   them — that's almost always wrong when the rate is being lowered in
+   response to throttling. Lower rate + drain together, or expose them
+   as separate operations and document the order.
+2. **`BURST > 1` requires the upstream to tolerate bursts.** Chartmetric
+   doesn't — its documented "2 req/s" is enforced via a tighter token
+   bucket (L004). For any third-party API where the docs say "X req/s"
+   without specifying burst tolerance, assume burst=1 until proven
+   otherwise.
+3. **Diagnose with inter-request spacing, not just per-hour averages.**
+   The per-hour rate (~1 req/s) looked fine; the real story was in the
+   gap distribution. SQL pattern that caught it:
+   `LAG(completed_at) OVER (ORDER BY completed_at)` + count gaps under
+   100ms. Add this to any quota dashboard.
+4. **Multi-replica deployments invalidate in-process rate limiters.**
+   Either pin to one replica or move the limiter behind a shared
+   coordination primitive (Postgres advisory lock or Redis). The
+   `chartmetric_ingest` runner needs Phase B (task #8) to fix this
+   structurally.
+

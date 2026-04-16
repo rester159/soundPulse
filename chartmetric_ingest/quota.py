@@ -45,16 +45,23 @@ logger = logging.getLogger(__name__)
 #                     (~60% 429 rate sustained). adaptive multiplier
 #                     also stuck at 0.5x. Chartmetric's actual per-tier
 #                     ceiling seems to be well below the documented 2.
-#   1.0 req/s (50%) — current. Aiming BELOW the observed throttle-
-#                     bounce point so the multiplier can recover to
-#                     1.0 and STAY there. At 1.0 clean: 86,400 calls/day
-#                     = 50% of quota, deterministic, no waste.
-#
-# 50% sustained > 75% theoretical with throttle bounce. We can tick
-# back up toward 1.25/1.35 once the multiplier has held at 1.0 for
-# an hour. See L004 in planning/lessons.md.
+#   1.0 req/s (50%) — third attempt. Aimed below the observed throttle-
+#                     bounce point but STILL produced ~50% 429s and
+#                     sub-100ms inter-request gaps because BURST=3
+#                     leaked tokens immediately after on_429 clamps and
+#                     because Railway's multi-replica deploy meant each
+#                     container had its own in-process bucket. See L004
+#                     and the Phase A fix (BURST=1 + drain on 429).
+#   1.0 req/s + BURST=1 + drain-on-429 — current. No microbursts; an
+#                     on_429 actually stops dispatch instead of leaking
+#                     3 stale tokens. Multi-replica fan-out still
+#                     unaddressed at this layer (Phase B / task #8).
 BASE_RATE = 1.0
-BURST = 3
+# BURST=1 is load-bearing. See L004 + the comment above. test_module_burst_is_one
+# in tests/test_chartmetric_ingest/test_quota_bucket.py guards against
+# regression. Bumping it back to 3 reintroduces the 50% 429 storm that
+# happened on 2026-04-15.
+BURST = 1
 
 # How much the multiplier drops on a 429 event.
 THROTTLE_MULTIPLIER = 0.5
@@ -119,6 +126,15 @@ class TokenBucket:
         # time elapsed under the previous setting.
         self._refill()
         self._rate = float(rate_per_sec)
+
+    def drain(self) -> None:
+        """Zero available tokens immediately. Used by on_429 so a clamp
+        actually stops dispatch instead of leaking burst tokens accrued
+        under the pre-clamp rate. Without this, lowering the rate via
+        set_rate() leaves residual tokens that fire as a microburst —
+        which is exactly what produced the L004 429 storm."""
+        self._refill()  # consume time at the previous rate first
+        self._tokens = 0.0
 
     @property
     def current_rate(self) -> float:
@@ -201,6 +217,10 @@ class ChartmetricQuota:
         self._multiplier = THROTTLE_MULTIPLIER
         self._last_429_at = datetime.now(timezone.utc)
         self._bucket.set_rate(BASE_RATE * self._multiplier)
+        # Drain residual burst tokens. Without this, set_rate alone
+        # only slows future refills — any tokens accrued at the pre-clamp
+        # rate fire immediately and trigger more 429s. See L004.
+        self._bucket.drain()
         await self._persist()
 
     async def _persist(self) -> None:
