@@ -10,15 +10,20 @@
 
 ## 🟢 Live top-of-backlog — next session starts here
 
-- **`#109` Per-genre song structure rules: config + Suno prompt injection + Settings UI** — `pending`. Plan written, awaiting blend-semantic confirmation from user before Phase 1. Full briefing in `planning/NEXT_SESSION_START_HERE.md`.
+- **`#109` Per-genre song structure rules: config + Suno prompt injection + Settings UI** — `in_progress`. Blend rule confirmed by user 2026-04-15 22:28. Phase 1 code written + 8/14 tests green; remaining 6 tests are DB-bound and need the migration applied (Neon MCP path TBD). Full briefing in `planning/NEXT_SESSION_START_HERE.md`.
 
 Six phases (TDD — failing test first each phase):
-1. Schema + seed — migrations 033 (`genre_structures` table), 034 (two new `ai_artists` cols) + seed 20 genres
-2. Prompt injection — `structure_resolver.py` + `structure_prompt.py` wired into song gen orchestrator
-3. Admin API — `/api/v1/admin/genre-structures` CRUD + artist-patch extension
-4. Settings subtab + artist-profile "Song Structure" section with override checkbox + tooltip
-5. (rolls into 1) — research-backed structures for the top 20 genres
-6. Y3K regeneration + structural-compliance measurement
+1. Schema + seed — migrations 033 (`genre_structures` table + 20-genre seed), 034 (two new `ai_artists` cols) — **🟡 code written, awaiting migration apply for end-to-end test green**
+   - `alembic/versions/033_genre_structures.py` (new) + `alembic/versions/034_artist_structure_fields.py` (new)
+   - `api/models/genre_structure.py` (new), `api/models/ai_artist.py` (extended with 2 cols)
+   - `api/services/genre_structures_service.py` (new — `validate_structure`, `upsert_genre_structure`, `resolve_genre_structure` with dotted-chain + `pop` fallback)
+   - `tests/test_services/test_genre_structures_crud.py` (14 tests; 8 validation tests pass via `pytest -k validate_structure`)
+   - `planning/schema.md` updated with table specs
+2. Prompt injection — `structure_resolver.py` + `structure_prompt.py` wired into song gen orchestrator — `pending`
+3. Admin API — `/api/v1/admin/genre-structures` CRUD + artist-patch extension — `pending`
+4. Settings subtab + artist-profile "Song Structure" section with override checkbox + tooltip — `pending`
+5. (rolls into 1) — research-backed structures for the top 20 genres — `done` (in 033 seed)
+6. Y3K regeneration + structural-compliance measurement — `pending`
 
 Related:
 - **`#106` Add admin retry-stem-job endpoint + Songs UI button** — `pending`, deferred. Nice-to-have; not blocking `#109`.

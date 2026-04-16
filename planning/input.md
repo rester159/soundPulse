@@ -63,3 +63,43 @@ btw the DB is on neon, not local
 - 1 primary genre / 2 db / 3 go with minimum / 4 do top 20 genres / drop dtw
 - 1 do a new subtab / 2 not for now / 3 artist templates should 'blend' with genres, unless there is a specific override request - lets add genre override as a checkbox on the artist. and have a mouseover with explenation of what it means
 - I am about to shut down this session. Can you save context, update PRD and save everything so I can point the next session to /planning folder and the model will know exactly where to start from
+
+## 2026-04-15 21:36:28
+
+get intimately familiar with this code base and read all the document in /planning
+
+## 2026-04-15 21:43:08
+
+get intimately familiar with this code base and read all the document in /planning
+
+## 2026-04-15 22:27:44
+
+resume
+
+## 2026-04-15 22:28:00
+
+1
+
+## 2026-04-15 22:38:30
+
+neon
+
+## 2026-04-15 22:55:00
+
+merge to main
+
+## 2026-04-15 23:05:00
+
+fix chartmetrics
+
+## 2026-04-15 23:15:00
+
+proceed w your recommendation
+
+## 2026-04-15 23:35:00
+
+i didnt change anything -continue and do phase 2 3 4 6 without stopping
+
+## 2026-04-16 00:25:00
+
+finish and push

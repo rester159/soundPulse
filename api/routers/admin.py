@@ -5968,10 +5968,27 @@ async def generate_song_for_blueprint(
         "genre_id": blueprint.genre_id,
         "target_themes": blueprint.target_themes or [],
     }
+    # Task #109: resolve per-genre structure (with optional artist override
+    # / blend) and format as a [STRUCTURE] tag block prepended to the
+    # final prompt. Failure here is non-fatal — generation must still
+    # work even if the structure table is unreachable.
+    structure_block = ""
+    try:
+        from api.services.structure_resolver import resolve_structure_for_song
+        from api.services.structure_prompt import structure_block_for_prompt
+        resolved_structure = await resolve_structure_for_song(
+            db,
+            artist=artist,
+            primary_genre=blueprint.primary_genre or blueprint.genre_id or "pop",
+        )
+        structure_block = structure_block_for_prompt(resolved_structure)
+    except Exception:
+        logger.exception("[orchestrator] structure resolution failed; continuing without [STRUCTURE] block")
     final_prompt = assemble_generation_prompt(
         artist=artist_dict,
         blueprint=blueprint_dict,
         voice_state=voice_state_dict,
+        structure_block=structure_block,
     )
     title = body.title or derive_song_title(blueprint_dict, artist_dict)
 
@@ -6907,10 +6924,24 @@ async def _generate_song_with_instrumental_core(
             "target_themes": [],
         }
 
+    # Task #109: same structure injection as the blueprint-driven path.
+    structure_block = ""
+    try:
+        from api.services.structure_resolver import resolve_structure_for_song
+        from api.services.structure_prompt import structure_block_for_prompt
+        resolved_structure = await resolve_structure_for_song(
+            db,
+            artist=artist,
+            primary_genre=genre_for_prompt or "pop",
+        )
+        structure_block = structure_block_for_prompt(resolved_structure)
+    except Exception:
+        logger.exception("[instrumental-gen] structure resolution failed; continuing without [STRUCTURE] block")
     final_prompt = assemble_generation_prompt(
         artist=artist_dict,
         blueprint=blueprint_dict,
         voice_state=None,  # instrumental replaces voice reference
+        structure_block=structure_block,
     )
 
     # Build the public URL for Kie.ai to fetch

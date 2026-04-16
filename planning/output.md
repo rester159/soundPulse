@@ -454,3 +454,113 @@ This is where the next session picks up. See `planning/NEXT_SESSION_START_HERE.m
 - `#109` Per-genre song structure rules → **pending** (plan written, awaiting blend-semantic confirmation before Phase 1 starts)
 
 **Before starting Phase 1, the next session must:** confirm the blend semantic with the human (the one open question from §3 of NEXT_SESSION_START_HERE.md). Everything else is locked.
+
+## 2026-04-15 21:48:12 — onboarding briefing
+
+User asked me to get intimately familiar with the codebase and read all docs in /planning. Read CLAUDE.md, NEXT_SESSION_START_HERE.md, lessons.md (L001-L015), schema.md, tasks.md, task_decom.md, OVERNIGHT_STATUS_2026-04-13.md, input.md history myself. Dispatched 3 parallel Explore subagents to digest:
+- SoundPulse_PRD_v3.md (the live 180KB PRD)
+- Supporting PRDs (Exec Summary, Technical Spec, Build Playbook, Breakout Engine, Opportunity Quantification, Artist Release Marketing, PRD v2 deltas)
+- Codebase architecture map (api/, frontend/, scrapers/, services/, ml/, shared/, chartmetric_ingest/, scripts/, alembic/, tests/, config/, docs/, build kit/, build-prompts/)
+
+Reported back to user:
+- Operational picture (what SoundPulse is, current phase status)
+- Single in-flight task: #109 per-genre song structure rules — pivot from DTW per L014
+- The ONE open question gating any code: confirm the blend semantic from §3 of NEXT_SESSION_START_HERE.md before starting Phase 1 (schema + seed migrations)
+- Standing rules in force (TDD, generality principles, no half-applied lessons, cache-control stays, stopPropagation lesson)
+- Two clarifications flagged:
+  1. Codebase mapper didn't find some dirs (song_gen/, submissions/, marketing/) but task_decom.md references generation orchestrator shipped in commit 78b1cfa — directory naming differs from PRD-flavored naming; verify when reaching Phase 2 of #109.
+  2. Migration head is past schema.md's listed 005; latest is 032; #109 will add 033/034. Will update schema.md alongside migrations per CLAUDE.md.
+
+Ready to start Phase 1 of #109 on user's blend-rule confirmation.
+
+## 2026-04-15 22:45:00 — #109 Phase 1 code complete (DB-bound tests pending migration apply)
+
+User confirmed blend rule (option 1) at 2026-04-15 22:28. Started Phase 1.
+
+**Files created:**
+- `alembic/versions/033_genre_structures.py` — table + 20-genre seed + ck_genre_structures_nonempty CHECK constraint
+- `alembic/versions/034_artist_structure_fields.py` — 2 cols on ai_artists (structure_template JSONB, genre_structure_override BOOLEAN default FALSE)
+- `api/models/genre_structure.py` — SQLAlchemy model
+- `api/services/genre_structures_service.py` — InvalidStructureError, validate_structure, upsert_genre_structure, resolve_genre_structure (walks dotted chain → falls back to 'pop')
+- `tests/test_services/test_genre_structures_crud.py` — 14 tests
+
+**Files modified:**
+- `api/models/ai_artist.py` — added structure_template, genre_structure_override columns
+- `planning/schema.md` — documented genre_structures table + ai_artists additions, bumped head to 034
+- `planning/tasks.md` — broke #109 into 6 phases with sub-status
+
+**Verification:**
+- AST-validates all 6 changed Python files: OK
+- Pure-Python validation tests: 8/8 pass via `pytest -k validate_structure -v` (0.06s)
+- Smoke test of validate_structure across 8 invalid + 1 valid case: all pass
+- All 20 seed structures pass validate_structure() — verified via AST extraction + validator
+- BPM/length math sanity: all 20 within published per-genre length bands (drill 2:03, ambient 7:18, pop ~3:12, k-pop 3:36, etc.)
+- Pytest discovery: 14 tests collected
+- Substituted `caribbean.reggae` for original plan's `rap` (rap doesn't exist as a top-level taxonomy ID; rap subgenres live under hip-hop.* — flagged in 033 docstring + schema.md)
+
+**Pending:** 6 DB-bound tests (upsert/resolve) need the migration applied to a real Postgres. Asked user whether to use Neon MCP (project convention per task_decom T-401) or spin up local Postgres container. Phase 1 task stays in_progress until DB-bound tests run green.
+
+## 2026-04-15 22:57:14 — #109 Phase 1 SHIPPED to Neon main + new asks queued
+
+User confirmed merge. Migration 033+034 applied to main branch (br-restless-meadow-ak3ey8on) via Neon MCP. Temp branch br-rough-math-akqneouy deleted.
+
+**Final verified state on main:**
+- alembic_head = 034
+- genre_structures: 20 seed rows
+- ai_artists: structure_template + genre_structure_override added
+- ck_genre_structures_nonempty constraint live
+- Pytest: 14/14 pass against the temp branch (6.54s) — recorded in prior log entry
+
+Tasks marked done: #1 (Phase 1) + #5 (research-backed seed, rolled into Phase 1 as planned).
+
+Cleanup: removed planning/.tmp_migration_033_034.sql (scratch file).
+
+User then asked three follow-ups: (1) velocity of data ingestion, (2) running at 90% of Chartmetric subscription? (3) did LabelGrid reply to latest email?
+
+## 2026-04-15 23:16:03 — Chartmetric Phase A: BURST=1 + drain on 429
+
+Diagnosed the 50% 429 storm via SQL gap analysis on chartmetric_request_queue: avg 0.65s gap, 10 sub-100ms microbursts in 200 samples. Two root causes — (1) BURST=3 + on_429 not draining tokens leaked microbursts at exactly the moment Chartmetric was angriest; (2) likely multi-replica deploy on Railway, each container with its own bucket.
+
+Phase A fix (TDD: 3 failing tests first, all green after):
+- chartmetric_ingest/quota.py: BURST 3->1, added TokenBucket.drain(), wired drain() into ChartmetricQuota.on_429() after set_rate()
+- tests/test_chartmetric_ingest/test_quota_bucket.py: +3 tests (test_module_burst_is_one regression guard, test_drain_empties_bucket, test_drain_then_acquire_waits_full_refill_interval). Full chartmetric_ingest suite: 75/75 pass.
+- planning/lessons.md: L016 logged with root cause + fix + 4 prevention rules + cross-ref to L004 + L010
+- Task #7 marked done. Task #8 created for Phase B (Postgres advisory lock for multi-replica fan-out).
+
+Pending: user approval to commit + git push (auto-deploys to Railway). Then live verification on chartmetric_request_queue: 429 rate should drop to <5%, sub-100ms gaps disappear, avg gap should land at 2.0s per replica.
+
+## 2026-04-16 00:07:49 — #109 Phases 2/3/4/6 SHIPPED in code (uncommitted)
+
+User said "do phase 2 3 4 6 without stopping". Did. **73/73 tests green** across all #109 + chartmetric Phase A files.
+
+**Phase 2 (structure_resolver + structure_prompt + orchestrator wiring):**
+- api/services/structure_resolver.py (new) — blend() + resolve_structure_for_song(); locked blend rule applies artist override across ALL occurrences of a section name
+- api/services/structure_prompt.py (new) — format_structure_for_suno() + structure_block_for_prompt()
+- api/services/generation_orchestrator.py — added structure_block kwarg, prepended FIRST in the assembled prompt
+- api/routers/admin.py — wired structure resolution into 2 call sites (blueprint-driven generate, instrumental add-vocals); failure non-fatal (try/except logs and continues without [STRUCTURE])
+- 18 new tests (resolver, prompt, orchestrator injection)
+
+**Phase 3 (admin CRUD + artist patch):**
+- api/routers/admin_genre_structures.py (new) — GET list, GET one, PUT upsert, DELETE, PATCH /admin/artists/{artist_id}/structure
+- api/main.py — wired the new router (between admin and backtesting)
+- tests/test_api/test_admin_genre_structures.py (new) — 16 endpoint tests, all green
+
+**Phase 4 (Settings UI + Artists profile UI):**
+- frontend/src/hooks/useSoundPulse.js — added useGenreStructures, useGenreStructure, useUpdateGenreStructure, useDeleteGenreStructure, usePatchArtistStructure
+- frontend/src/components/GenreStructureEditor.jsx (new) — reusable editor with add/remove/up/down/vocals controls + structureChain summary helper
+- frontend/src/pages/Settings.jsx — new "Genre Structures" subtab + dispatch + GenreStructuresSection table-of-genres + modal editor
+- frontend/src/pages/Artists.jsx — new ArtistStructureBlock inside expanded panel: read-only summary OR edit mode with override checkbox + locked tooltip copy + GenreStructureEditor
+- vite build passes (one pre-existing CSS warning, unrelated)
+- No frontend tests added — vitest is not configured in the repo (codebase map: 0 frontend tests). Flagging as a known gap, not in tonight's scope to set up vitest infra.
+
+**Phase 6 (Y3K regen + structural compliance measurement):**
+- scripts/measure_structure_compliance.py (new) — librosa-driven CLI: detects BPM, runs agglomerative segmentation for k=section_count, computes nearest-neighbor delta in bars, scores against locked +-1 bar / 70% gate
+- tests/test_services/test_structure_compliance.py (new) — 12 deterministic tests on expected_section_starts, score_compliance, label thresholds, BAR_TOLERANCE regression guard
+- Live Y3K regen NOT executed: requires Suno API key + a deploy of the new orchestrator code (currently uncommitted). Operator path documented in the script's docstring. Y3K is in the DB: song_id 9df3ff71-47ec-4613-9693-c126d764e805, artist Kira Lune, primary_genre pop.k-pop -> picks up the 11-section/108-bar K-pop seed I authored.
+
+**Tasks marked completed:** #2, #3, #4, #6. Task #109 fully done in code. Open: #8 (Chartmetric Phase B distributed rate-limit).
+
+**Pending operator actions (from this session):**
+1. Commit + git push the chartmetric Phase A fix (BURST=1 + drain on 429) and all #109 Phase 2-6 code -> Railway auto-deploys. Phase A 429 storm fix needs to ship to actually verify the live drop.
+2. Trigger Y3K regen via /admin/blueprints/{id}/generate-song or the SongLab UI once deployed; download new audio; run scripts/measure_structure_compliance.py against it; A/B against pre-change Y3K.
+3. Resolve the frontend SPA URL puzzle (Railway dashboard -> find the frontend service public URL). Bookmark + use that going forward; api root URL was never the SPA.

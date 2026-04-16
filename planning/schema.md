@@ -25,10 +25,37 @@
 | 004 | — | `tracks`: shazam_id, tiktok_sound_id, billboard_id, chartmetric_id columns + unique indexes (incl. apple_music_id which was previously not indexed) |
 | 005 | 2026-04-03 | `backtest_results` table |
 | … | … | (historical migrations 006–032 — see `alembic/versions/` for authoritative list) |
-| 033 | *planned* | `genre_structures` table — per-genre song structure templates for Suno prompt injection (PRD §70) |
-| 034 | *planned* | `ai_artists.structure_template` JSONB + `ai_artists.genre_structure_override` BOOLEAN — per-artist structure overrides (PRD §70) |
+| 033 | 2026-04-15 | `genre_structures` table + 20-genre seed — per-genre song structure templates for Suno prompt injection (task #109, NEXT_SESSION_START_HERE.md §4) |
+| 034 | 2026-04-15 | `ai_artists.structure_template` JSONB + `ai_artists.genre_structure_override` BOOLEAN — per-artist structure overrides (task #109) |
 
-Head: `005` (file out of date — real head is much further; update opportunistically)
+Head: `034` (file describes 001–005 + 033–034 in detail — migrations 006–032 are authoritative in `alembic/versions/`. Update this file in the same commit when adding new tables.)
+
+---
+
+## `genre_structures` (migration 033) — task #109
+
+Per-genre song-form skeleton injected into Suno prompts as a `[Section: N bars{, instrumental}]` tag block. Resolved by `api/services/genre_structures_service.resolve_genre_structure()` which walks the dotted-genre chain (`pop.k-pop` → `pop`) before falling back to the `pop` row.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| primary_genre | `Text` | PK | Canonical taxonomy id (e.g. `pop.k-pop`). Cross-checked against `shared/genre_taxonomy.py`. |
+| structure | `JSONB` | NOT NULL | `list[{name: str, bars: int (>0), vocals: bool}]`. Validated app-side in `validate_structure()`; DB-side `ck_genre_structures_nonempty` checks `jsonb_array_length > 0`. |
+| notes | `Text` | NULL | One-line rationale per row (BPM hint + reference template). |
+| updated_at | `TIMESTAMPTZ` | NOT NULL, default NOW() | Bumped on every write. |
+| updated_by | `Text` | NULL | `seed_033` for migration seeds, `CEO` / agent name for later edits. |
+
+**Seeded keys (20):** `pop`, `pop.k-pop`, `pop.dance-pop`, `pop.indie-pop`, `pop.latin-pop`, `hip-hop`, `hip-hop.trap`, `hip-hop.trap.drill`, `r-and-b`, `electronic.edm`, `electronic.house`, `electronic.techno`, `electronic.lo-fi-electronic`, `electronic.ambient`, `african.afrobeats`, `african.amapiano`, `latin.reggaeton`, `rock`, `country`, `caribbean.reggae`. (Plan originally listed `rap`; substituted `caribbean.reggae` because `rap` isn't in the taxonomy — rap subgenres live under `hip-hop.*`.)
+
+---
+
+## `ai_artists` additions (migration 034) — task #109
+
+Two columns added so an artist can deviate from the per-genre default:
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| structure_template | `JSONB` | NULL | Same shape as `genre_structures.structure`. NULL = artist follows the genre row as-is. |
+| genre_structure_override | `Boolean` | NOT NULL, default FALSE | When TRUE, the artist's `structure_template` is used as-is and the genre row is ignored. When FALSE (default), the resolver blends the artist template with the genre row using the section-name merge rule from NEXT_SESSION_START_HERE.md §3 (artist wins on named matches; artist-only sections insert in artist-declared order; genre-only sections stay in place).
 
 ---
 

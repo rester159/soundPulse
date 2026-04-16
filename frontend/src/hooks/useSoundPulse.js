@@ -805,3 +805,60 @@ export function useVersion() {
     staleTime: 30_000,
   })
 }
+
+// -------- Genre structures (task #109) --------
+
+export function useGenreStructures() {
+  return useQuery({
+    queryKey: ['admin', 'genre-structures'],
+    queryFn: () => makeRequest('GET', '/admin/genre-structures'),
+    staleTime: 60_000,
+  })
+}
+
+export function useGenreStructure(primaryGenre) {
+  return useQuery({
+    queryKey: ['admin', 'genre-structures', primaryGenre],
+    queryFn: () => makeRequest('GET', `/admin/genre-structures/${encodeURIComponent(primaryGenre)}`),
+    enabled: Boolean(primaryGenre),
+    staleTime: 60_000,
+  })
+}
+
+export function useUpdateGenreStructure() {
+  return useMutation({
+    mutationFn: ({ primaryGenre, structure, notes, updatedBy }) =>
+      makeRequest(
+        'PUT',
+        `/admin/genre-structures/${encodeURIComponent(primaryGenre)}`,
+        {},
+        { structure, notes, updated_by: updatedBy },
+      ),
+  })
+}
+
+export function useDeleteGenreStructure() {
+  return useMutation({
+    mutationFn: ({ primaryGenre }) =>
+      makeRequest(
+        'DELETE',
+        `/admin/genre-structures/${encodeURIComponent(primaryGenre)}`,
+      ),
+  })
+}
+
+export function usePatchArtistStructure() {
+  return useMutation({
+    mutationFn: ({ artistId, structure_template, genre_structure_override }) => {
+      const body = {}
+      if (structure_template !== undefined) body.structure_template = structure_template
+      if (genre_structure_override !== undefined) body.genre_structure_override = genre_structure_override
+      return makeRequest(
+        'PATCH',
+        `/admin/artists/${artistId}/structure`,
+        {},
+        body,
+      )
+    },
+  })
+}

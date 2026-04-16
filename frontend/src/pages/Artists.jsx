@@ -2,6 +2,7 @@ import { useState } from 'react'
 import {
   Users, Loader2, ChevronDown, ChevronUp, Music2, CheckCircle2,
   Mic, Palette, BookOpen, Hash, Plus, X, RefreshCw, Camera, Edit3, AlertCircle,
+  Save, Info, Check,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -9,7 +10,9 @@ import {
   useRegenerateArtistPortrait, useArtistReferenceSheet,
   useGenerateReferenceSheet, usePreviewPersona,
   useCreateArtistFromPersona, useCreateArtistManual, getBaseUrl,
+  usePatchArtistStructure,
 } from '../hooks/useSoundPulse'
+import GenreStructureEditor, { structureChain } from '../components/GenreStructureEditor'
 
 const VIEW_LABELS = {
   front: 'Front',
@@ -289,6 +292,9 @@ function ArtistCard({ artist, expanded, onToggle }) {
             <DNABlock icon={Users}    title="Persona"      data={artist.persona_dna}  color="emerald" />
           </div>
 
+          {/* Song Structure (task #109) */}
+          <ArtistStructureBlock artist={artist} />
+
           {/* Recent songs */}
           <div className="space-y-1">
             <div className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-1">
@@ -301,6 +307,154 @@ function ArtistCard({ artist, expanded, onToggle }) {
     </div>
   )
 }
+
+// ─── Song Structure block (task #109 Phase 4) ────────────────────────────
+
+function ArtistStructureBlock({ artist }) {
+  const initialTemplate = artist.structure_template || null
+  const initialOverride = Boolean(artist.genre_structure_override)
+  const [template, setTemplate] = useState(initialTemplate)
+  const [override, setOverride] = useState(initialOverride)
+  const [editing, setEditing] = useState(false)
+  const patch = usePatchArtistStructure()
+  const qc = useQueryClient()
+  const [saved, setSaved] = useState(false)
+
+  const dirty =
+    JSON.stringify(template) !== JSON.stringify(initialTemplate) ||
+    override !== initialOverride
+
+  const handleSave = async () => {
+    await patch.mutateAsync({
+      artistId: artist.artist_id,
+      structure_template: template, // explicit null clears
+      genre_structure_override: override,
+    })
+    setSaved(true)
+    qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
+    setTimeout(() => setSaved(false), 2000)
+    setEditing(false)
+  }
+
+  const handleClear = async () => {
+    if (!window.confirm('Clear this artist\'s custom structure? They will follow the genre default afterward.')) return
+    setTemplate(null)
+    setOverride(false)
+    await patch.mutateAsync({
+      artistId: artist.artist_id,
+      structure_template: null,
+      genre_structure_override: false,
+    })
+    qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
+    setEditing(false)
+  }
+
+  return (
+    <div className="space-y-2 border border-zinc-800 rounded-lg p-3 bg-zinc-950/40">
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+          <Music2 size={10} /> Song Structure
+        </div>
+        {!editing && (
+          <button
+            onClick={() => setEditing(true)}
+            className="text-xs text-violet-300 hover:text-violet-200 flex items-center gap-1"
+          >
+            <Edit3 size={10} /> Edit
+          </button>
+        )}
+      </div>
+
+      {!editing && (
+        <div className="text-xs text-zinc-400 space-y-1">
+          {template ? (
+            <>
+              <div className="text-zinc-300">
+                {structureChain(template)}
+              </div>
+              <div className="text-[10px] text-zinc-500">
+                {override
+                  ? 'Override active — genre template ignored, this structure used as-is'
+                  : 'Blended with genre default — artist sections override matching genre sections by name'}
+              </div>
+            </>
+          ) : (
+            <div className="text-zinc-500 italic">
+              No artist override — generation uses the genre default for{' '}
+              <code className="text-zinc-400">{artist.primary_genre}</code>.
+            </div>
+          )}
+        </div>
+      )}
+
+      {editing && (
+        <div className="space-y-3">
+          <label className="flex items-start gap-2 text-xs text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={override}
+              onChange={(e) => setOverride(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span className="flex-1">
+              <span className="font-medium">Use artist template only (ignore genre blending)</span>
+              <span
+                className="inline-flex items-center justify-center ml-1.5 w-3.5 h-3.5 rounded-full bg-zinc-800 text-zinc-400 cursor-help"
+                title="When unchecked, this artist's song structure is blended with their primary genre's template — genre sets the skeleton, the artist can shorten/lengthen or add/remove named sections. When checked, the genre template is ignored entirely and the artist's custom structure is used as-is."
+              >
+                <Info size={9} />
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+              Custom structure {template === null && '(none — add sections to begin)'}
+            </div>
+            <GenreStructureEditor
+              value={template || []}
+              onChange={(next) => setTemplate(next.length === 0 ? null : next)}
+              disabled={patch.isPending}
+            />
+          </div>
+
+          {patch.isError && (
+            <div className="flex items-center gap-2 text-rose-300 text-xs bg-rose-500/10 border border-rose-500/30 rounded px-3 py-2">
+              <AlertCircle size={12} />
+              Save failed: {patch.error?.response?.data?.detail || patch.error?.message || 'unknown error'}
+            </div>
+          )}
+
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={handleClear}
+              disabled={patch.isPending}
+              className="px-3 py-1.5 text-xs text-zinc-500 hover:text-rose-300 disabled:opacity-50"
+            >
+              Clear
+            </button>
+            <button
+              onClick={() => { setTemplate(initialTemplate); setOverride(initialOverride); setEditing(false) }}
+              disabled={patch.isPending}
+              className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={patch.isPending || !dirty}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded text-xs font-medium"
+            >
+              {patch.isPending ? <Loader2 size={11} className="animate-spin" /> : saved ? <Check size={11} /> : <Save size={11} />}
+              {saved ? 'Saved' : 'Save'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 
 function CreateFromDescriptionForm({ onCreated, onCancel }) {
   // Two-step flow:

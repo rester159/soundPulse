@@ -78,17 +78,25 @@ def assemble_generation_prompt(
     artist: dict,
     blueprint: dict,
     voice_state: dict | None,
+    structure_block: str | None = None,
 ) -> str:
     """
     Build the final text prompt the music provider receives.
 
-    Contract (PRD §24):
+    Contract (PRD §24 + task #109):
       final_prompt =
+          structure_block +                 # task #109: prepended; empty if unset
           artist.voice_dna_summary +
           voice_state_reference_block +    # empty for first song
           song_blueprint.smart_prompt_text +
           production_constraints +
           policy_constraints
+
+    `structure_block` is the formatted [STRUCTURE]\\n[Section: N bars{,
+    instrumental}] block produced by `api.services.structure_prompt.
+    structure_block_for_prompt()`. It comes FIRST so Suno reads the
+    structural directive before the smart_prompt narrative — getting the
+    bar counts right is the load-bearing change for this feature.
     """
     artist_song_count = int(artist.get("song_count") or 0)
     voice_summary = _voice_dna_summary(artist.get("voice_dna"))
@@ -110,9 +118,14 @@ def assemble_generation_prompt(
         policy_constraints = ["[POLICY] Mild language OK, no slurs."]
     # explicit → no constraint injected
 
-    blocks = [voice_summary, voice_ref, smart_prompt,
-              "\n".join(production_constraints),
-              "\n".join(policy_constraints)]
+    blocks = [
+        (structure_block or "").strip(),
+        voice_summary,
+        voice_ref,
+        smart_prompt,
+        "\n".join(production_constraints),
+        "\n".join(policy_constraints),
+    ]
     final = "\n\n".join(b for b in blocks if b)
     return final
 

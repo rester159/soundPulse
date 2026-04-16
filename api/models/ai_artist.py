@@ -49,6 +49,14 @@ class AIArtist(Base):
     song_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Per-artist song structure overrides (task #109, migration 034). NULL
+    # template = artist follows the genre_structures row for primary_genre.
+    # override=True skips the blend and uses the template as-is.
+    structure_template: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    genre_structure_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+
     creation_trigger_blueprint_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
