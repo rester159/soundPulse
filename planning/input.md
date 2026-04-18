@@ -115,3 +115,7 @@ can you make sure the PRD has everything in pone place and is 100% updated with 
 ## 2026-04-17 14:55:00
 
 can you incorporate soundpulse_artist_release_marketing_spec in PRD_v3 and conenct all the dots so it feels like one spec
+
+## 2026-04-18 09:00:00
+
+can you assemble a version of the PRD which is fully integrated (so it dowsnt have updates sequentially, but presents the latest view in the core text, which means it needs to absorbe all of the upgrades) - streamlined and readable by a non technical person. save that as Ceasar_PRD_streamlined. This is NOT the new master, it's just a fork of the main PRD

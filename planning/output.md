@@ -631,3 +631,13 @@ User asked to fold soundpulse_artist_release_marketing_spec.md into PRD v3 so th
 **Status of soundpulse_artist_release_marketing_spec.md:** untouched. Still untracked. Now fully redundant with PRD v3 + schema.md. User can delete it locally or leave as a historical record. Not committed.
 
 Task #9 marked done.
+
+## 2026-04-18 13:20:41 — Created Ceasar_PRD_streamlined.md (non-technical fork)
+
+Wrote a fully-integrated, narrative version of the PRD at planning/PRD/Ceasar_PRD_streamlined.md. ~3500 words across 14 sections. No SQL, no migration numbers, no file paths, no commit hashes, no "added on date X" patches — just the latest authoritative view written for a non-technical reader (investor / board member / new hire / CEO doing a quick read).
+
+Sections: (1) what SoundPulse is, (2) the thesis, (3) end-to-end song lifecycle (12 steps in plain language), (4) the artists, (5) the opportunity engine (7 layers in prose), (6) the 14 agents (table with letter codes + plain-English description), (7) marketing motion (M0-M5 gates), (8) rights pipeline (ordered list with the dependency rationale), (9) where we are right now (done / pending / blocked, all in plain language), (10) unit economics, (11) non-negotiables, (12) risks worth naming, (13) success milestones at 6/12/24 months, (14) pointer to detail docs.
+
+Header explicitly notes: "This is a fork of the main PRD, not a replacement." Closing section reiterates: "When the master moves, this document drifts. Re-read the master for anything load-bearing."
+
+Spelling: 'Ceasar' as the user typed it (not 'Caesar'). Filename matches.
