@@ -1658,6 +1658,36 @@ song_blueprint
 
 **N=3 reference artists** is the default. Tunable per genre via `genre_config.reference_artist_count` (§17).
 
+### §18.1 Creation algorithm (8 steps)
+
+**Inputs:** `song_blueprint`, `reference_artist_profiles[3]`, target market, current roster state, portfolio strategy.
+
+**Process:**
+
+1. **Normalize reference fields** — coerce reference rows into the canonical shape (so the blender receives consistent structure across all 3 references).
+2. **Build field clusters** — group source fields into five blender-readable clusters:
+    - Identity cluster (age, gender, provenance, languages, nationality)
+    - Voice cluster (timbre, range, delivery style, accent, autotune, ad-libs)
+    - Fashion cluster (garments, palette, materials, signature accessories)
+    - Lyrical cluster (themes, perspective, vocabulary tier, recurring motifs)
+    - Social cluster (posting style, caption format, controversy stance)
+3. **Compute "copy risk"** — Jaccard / cosine similarity between the candidate and each reference across cluster signatures. **No generated artist may exceed 0.75 similarity to any single reference artist.** If exceeded, re-sample.
+4. **Generate blended artist candidate** — call the LLM persona blender with the clusters + blueprint + target market.
+5. **Run validation checks** (see below).
+6. **Generate alternative candidates A/B/C** — three independent persona variants so the CEO can pick.
+7. **Send to CEO Action Agent** (§23) when the critical-decision gate is enabled for the target genre (`genre_config.ceo_approval_required`, default TRUE).
+8. **Persist chosen artist** — insert into `ai_artists`, then enqueue the visual reference sheet generation (§20) and voice state bootstrap (§21).
+
+**Validation checks** (each candidate must pass before becoming an A/B/C alternative):
+
+- Coherent with the song blueprint (genre, tempo band, energy, vocal mode).
+- Differentiated from existing roster (no near-duplicate of an active artist).
+- No obvious one-to-one clone of any reference artist (per the 0.75 copy-risk ceiling).
+- Visual identity internally consistent (face description, body presentation, hair signature, color palette all align).
+- `voice_dna` is prompt-grade and usable (timbre + range + delivery style + accent + autotune profile all populated).
+- Legal name and stage name are unique within the roster.
+- Market-language coherence (e.g., a Spanish-language afrobeats artist needs Spanish in `languages` AND a primary market that consumes Spanish-language afrobeats).
+
 ---
 
 ## §19. Artist reference research pipeline
@@ -1867,10 +1897,14 @@ ceo_decision = request_ceo_decision(proposal, ...)
     },
     "context": "natural-language summary explaining the recommendation"
   },
+  "response_options": ["approve", "reject", "modify"],
+  "modifiable_fields": ["artist_choice", "artist_fields", "voice_dna", "visual_dna", "delay_release"],
   "sent_via": "telegram",
   "sent_at": "2026-04-12T22:00:00Z"
 }
 ```
+
+The `modifiable_fields` array tells the CEO UI / Telegram bot which keys are editable in the response payload. Modifications come back as a `modify` response with a partial update (e.g., `{"voice_dna": {"timbre_core": "warmer breathy alto"}}`) — the system applies the diff before persisting the artist row. Allowed CEO response types: `approve`, `reject`, `modify existing artist choice`, `request new artist`, `request parameter change`, `request more options`. All responses are persisted to `ceo_decisions.response_payload` for audit (see schema in `planning/schema.md`).
 
 ### Channels
 
@@ -2222,12 +2256,22 @@ The QA service uses **Essentia + Librosa** for DSP. **No reliance on Spotify's `
 
 ```sql
 song_qa_reports (
-    qa_report_id, song_id, asset_id,
-    tempo_match_score, key_match_score, energy_match_score,
-    silence_score, clipping_score, duplication_risk_score,
-    pass_fail BOOLEAN, report_json JSONB, created_at
+    qa_report_id   UUID PK,
+    song_id        UUID FK → songs_master.song_id,
+    asset_id       UUID FK → audio_assets.asset_id,
+    tempo_match_score      FLOAT,
+    key_match_score        FLOAT,
+    energy_match_score     FLOAT,
+    silence_score          FLOAT,
+    clipping_score         FLOAT,
+    duplication_risk_score FLOAT,
+    pass_fail              BOOLEAN,
+    report_json            JSONB,    -- full per-check result + reasons
+    created_at             TIMESTAMPTZ DEFAULT NOW()
 )
 ```
+
+Provider output (Suno/Kie/Udio/MusicGen) is normalized into `audio_assets` before QA runs. Audio assets carry the actual playable file references; `song_qa_reports` carries the verdict against that asset. Both schemas live in `planning/schema.md`.
 
 ---
 
@@ -2271,7 +2315,68 @@ ASCAP/BMI registration does NOT require lyrics text — only writer/publisher/co
 
 ### `songs_master` — full canonical schema
 
-(See §17 — defined verbatim from marketing spec §10. ~95 fields covering identity, classification, audio analysis, vocals, lyrics, rights, distribution, release planning, artwork, marketing, generation metadata, QA, ML predictions, and actuals.)
+See §17 for the DDL (~95 fields covering identity, classification, audio analysis, vocals, lyrics, rights, distribution, release planning, artwork, marketing, generation metadata, QA, ML predictions, and actuals). The columnar reference also lives in `planning/schema.md`.
+
+### Field-by-field metadata matrix
+
+This is the operational view of `songs_master` fields organized by source + purpose, useful for understanding which agent / pipeline stage populates each value:
+
+| Field | Type | Source | Purpose |
+|---|---|---|---|
+| title | TEXT | generated | Primary search |
+| alt_titles | TEXT[] | generated | Alternate discoverability |
+| artist_display_name | TEXT | artist | Display |
+| featured_artists | TEXT[] | generation | Display / search |
+| primary_genre | TEXT | blueprint | Classification (also keys into §70 `genre_structures`) |
+| subgenres | TEXT[] | blueprint + enrichment | Search / playlists |
+| mood_tags | TEXT[] | audio + marketing | Playlists |
+| theme_tags | TEXT[] | lyrics + marketing | Search / editorial |
+| instrumentation_tags | TEXT[] | audio analysis | Recommendation / editorial |
+| vocal_tags | TEXT[] | voice analysis | Search / editorial |
+| bpm | INTEGER | audio analysis | Recommendation |
+| key | TEXT | audio analysis | Recommendation |
+| mode | TEXT | audio analysis | Recommendation |
+| time_signature | INTEGER | audio analysis | Recommendation |
+| duration_seconds | INTEGER | audio asset | Compliance |
+| energy | FLOAT | audio analysis | Recommendation |
+| danceability | FLOAT | audio analysis | Recommendation |
+| valence | FLOAT | audio analysis | Recommendation |
+| acousticness | FLOAT | audio analysis | Recommendation |
+| instrumentalness | FLOAT | audio analysis | Recommendation |
+| liveness | FLOAT | audio analysis | Recommendation |
+| speechiness | FLOAT | audio analysis | Recommendation |
+| loudness_lufs | FLOAT | audio QA | Mastering / search context |
+| language_codes | TEXT[] | lyrics analysis | Market targeting |
+| explicit_flag | BOOLEAN | lyrics analysis / policy | Compliance |
+| clean_version_exists | BOOLEAN | release prep | Compliance |
+| release_date | DATE | release planning | Compliance |
+| original_release_date | DATE NULL | release planning | Catalog |
+| territory_rights | TEXT[] | rights | Compliance |
+| copyright_p_line | TEXT | label | Compliance |
+| copyright_c_line | TEXT | publisher / label | Compliance |
+| writers | JSONB | rights | Royalties |
+| composers | JSONB | rights | Royalties |
+| lyricists | JSONB | rights | Royalties |
+| publishers | JSONB | rights | Royalties |
+| producer_credits | JSONB | release prep | Credits |
+| contributor_roles | JSONB | release prep | Credits |
+| ISRC | TEXT | distributor | Identity |
+| UPC | TEXT | distributor | Identity |
+| catalog_number | TEXT | label system | Catalog |
+| distributor_release_id | TEXT | distributor | Linkage |
+| distributor_track_id | TEXT | distributor | Linkage |
+| artwork_asset_id | UUID | visual system | Release |
+| artwork_color_palette | TEXT[] | visual system | Marketing |
+| marketing_hook | TEXT | marketing layer | Social / editorial |
+| short_description | TEXT | marketing layer | Pitching |
+| long_description | TEXT | marketing layer | Pitching |
+| reference_track_descriptors | TEXT[] | blueprint | Context |
+| playlist_fit_tags | TEXT[] | marketing layer | Pitching |
+| tiktok_hook_start_sec | INTEGER | audio analysis | Social |
+| tiktok_hook_end_sec | INTEGER | audio analysis | Social |
+| lyric_snippet_candidates | TEXT[] | lyrics analysis | Social |
+| seo_keywords | TEXT[] | marketing layer | Web / discovery |
+| internal_confidence_report | JSONB | system | Audit |
 
 ### Audio enrichment stack
 
@@ -2775,76 +2880,133 @@ Do not start marketing until ALL of:
 
 All 14 agents are seeded in `agent_registry`. Default tool grants are seeded in `agent_tool_grants`. The Settings UI (§50) shows the live state and allows grant modifications.
 
+Each agent below uses the same canonical structure (Purpose / Instructions / Skills / Tools / Actions / Interdependencies). Tools listed are the default grants in `agent_tool_grants`; operators can grant or revoke from the Settings UI.
+
 ### A. Artist Identity Agent
-- **Purpose:** Maintain coherent artist brand across platforms
-- **Tools:** groq (LLM), flux_falai, stable_diffusion, instagram_graph, facebook_graph
-- **Actions:** Write bios, choose images, update social profiles, maintain canon
+
+- **Purpose:** Maintain coherent artist brand across platforms.
+- **Instructions:** Keep bios, visuals, lore, and social tone aligned. Update profile text/images based on campaign phase.
+- **Skills:** Branding, narrative consistency, profile optimization.
+- **Tools:** internal artist DB, image library, profile-management connectors, groq (LLM), flux_falai, stable_diffusion, instagram_graph, facebook_graph.
+- **Actions:** Write bios, choose images, update social profiles, maintain canon.
+- **Interdependencies:** Talks to Content Strategy Agent (B); talks to Social Posting Agent (E); receives from Artist Creation System (§18).
 
 ### B. Content Strategy Agent
-- **Purpose:** Decide what content gets made this week/day
-- **Tools:** groq, chartmetric (trend feeds)
-- **Actions:** Daily content brief, prioritize hooks, assign content jobs
+
+- **Purpose:** Decide what content gets made this week/day.
+- **Instructions:** Generate content calendar by phase; balance artist-lore, song-promo, trend-fit, and engagement posts.
+- **Skills:** Short-form content planning, trend mapping, experimentation design.
+- **Tools:** analytics DB, trend feeds, artist_dna, campaign phase state, groq, chartmetric (trend feeds).
+- **Actions:** Create daily content brief, prioritize hooks, assign content jobs.
+- **Interdependencies:** Instructs Video Generation Agent (C); instructs Copy Agent (D); reads from Analytics Agent (K).
 
 ### C. Video Generation Agent
-- **Purpose:** Produce short-form videos and visualizers
-- **Tools:** veo, flux_falai, stable_diffusion (for static frames)
-- **Actions:** Render clips, produce variants, export platform-specific formats
+
+- **Purpose:** Produce short-form videos and visualizers.
+- **Instructions:** Create multiple variants per hook; generate artist daily-life clips, performance clips, and lyric videos.
+- **Skills:** AI video prompting, editing structure, clip optimization.
+- **Tools:** veo (or equivalent video model), image reference sheet, audio snippets, subtitle renderer, flux_falai, stable_diffusion (for static frames).
+- **Actions:** Render clips, produce variants, export platform-specific formats.
+- **Interdependencies:** Receives from Content Strategy Agent (B); receives assets from Artist Identity Agent (A); sends outputs to Social Posting Agent (E).
 
 ### D. Copy / Caption Agent
-- **Purpose:** Write captions, hooks, CTAs, replies
-- **Tools:** groq
-- **Actions:** Captions, hashtags, hook overlays, response templates
+
+- **Purpose:** Write captions, hooks, CTA text, pinned comments, replies.
+- **Instructions:** Generate platform-native copy; avoid repetitive spam patterns; vary CTA by phase.
+- **Skills:** Social copywriting, tone matching, conversion phrasing.
+- **Tools:** groq (LLM), platform character rules, artist social_dna.
+- **Actions:** Captions, hashtags, hook overlays, response templates.
+- **Interdependencies:** Works with Social Posting Agent (E); informed by Analytics Agent (K).
 
 ### E. Social Posting Agent
-- **Purpose:** Publish, schedule, and manage posts
-- **Tools:** tiktok_content_posting, instagram_graph, facebook_graph, youtube_data_api, x_twitter_api, blacktip (for portal-only platforms)
-- **Actions:** Post, schedule, retry failures, collect post IDs
+
+- **Purpose:** Publish, schedule, and manage posts.
+- **Instructions:** Post according to platform windows and campaign phase; respect cooldowns and anti-spam rules.
+- **Skills:** Platform ops, scheduling, asset routing.
+- **Tools:** tiktok_content_posting, instagram_graph, facebook_graph, youtube_data_api, x_twitter_api, blacktip (for portal-only platforms), asset storage, calendar.
+- **Actions:** Post, schedule, retry failures, collect post IDs.
+- **Interdependencies:** Receives from Video Agent (C) / Copy Agent (D); sends IDs to Analytics Agent (K).
 
 ### F. Community Agent
-- **Purpose:** Respond to comments; create illusion of active artist
-- **Tools:** groq, instagram_graph, tiktok_content_posting
-- **Actions:** Reply to comments, pin comments, suggest follow-up videos
+
+- **Purpose:** Respond to comments and create the illusion of an active artist.
+- **Instructions:** Answer comments in artist voice; escalate sensitive comments; generate reply videos when indicated.
+- **Skills:** Persona-preserving dialogue, moderation, engagement tactics.
+- **Tools:** comment feeds, groq (LLM), moderation rules, instagram_graph, tiktok_content_posting.
+- **Actions:** Reply to comments, pin comments, suggest follow-up videos.
+- **Interdependencies:** Talks to Copy Agent (D); triggers Content Strategy Agent (B).
 
 ### G. Playlist Outreach Agent
-- **Purpose:** Pitch to independent curators
-- **Tools:** submithub, groover, email_smtp, blacktip
-- **Actions:** Find playlists, send pitches, log responses
+
+- **Purpose:** Pitch to independent curators and submission systems.
+- **Instructions:** Start with small curators; do not scale until track shows proof; keep outreach personalized.
+- **Skills:** Outreach writing, curation matching, CRM hygiene.
+- **Tools:** curator database, submithub, groover, email_smtp, blacktip, metadata master, performance proof snippets.
+- **Actions:** Find playlists, send pitches, log responses, update status.
+- **Interdependencies:** Uses metadata from Song DB; uses metrics from Analytics Agent (K).
 
 ### H. Micro-Influencer Seeding Agent
-- **Purpose:** Get small creators to use the sound
-- **Tools:** email_smtp, instagram_graph, tiktok_content_posting
-- **Actions:** Shortlist creators, send briefs, track adoption
+
+- **Purpose:** Get small creators to use the sound.
+- **Instructions:** Target creators whose style fits the song; begin at low-cost / gifting / outreach scale; increase only when conversion is proven.
+- **Skills:** Creator matching, outreach, incentive design.
+- **Tools:** creator database, email_smtp, instagram_graph, tiktok_content_posting, campaign CRM.
+- **Actions:** Shortlist creators, send offers / briefs, track creator adoption.
+- **Interdependencies:** Uses best clip from Analytics Agent (K); coordinates with UGC Trigger Agent (I).
 
 ### I. UGC Trigger Agent
-- **Purpose:** Increase use of track sound in creator content
-- **Tools:** tiktok_content_posting, groq
-- **Actions:** Create UGC prompts, generate creator briefs
+
+- **Purpose:** Increase use of track sound in creator content.
+- **Instructions:** Propose reusable formats, prompts, and meme frames; only activate once baseline usage exists.
+- **Skills:** Meme framing, trend adaptation, creator-brief design.
+- **Tools:** platform trend monitoring, sound usage analytics, tiktok_content_posting, groq.
+- **Actions:** Create UGC prompts, generate creator briefs, track usage lift.
+- **Interdependencies:** Fed by Micro-Influencer Seeding Agent (H) and Analytics Agent (K).
 
 ### J. Paid Growth Agent
-- **Purpose:** Amplify only proven creatives
-- **Tools:** meta_ads, linkfire, feature_fm
-- **Actions:** Launch ads, rotate creatives, report ROAS / stream lift
+
+- **Purpose:** Amplify only proven creatives.
+- **Instructions:** Never spend before identifying organic winner; allocate budget gradually; kill weak creatives quickly.
+- **Skills:** Ad ops, creative testing, CAC/LTV logic.
+- **Tools:** meta_ads, linkfire, feature_fm, ad platform APIs, analytics, budget controller.
+- **Actions:** Launch ads, rotate creatives, report ROAS / stream lift.
+- **Interdependencies:** Depends on Analytics Agent (K); uses assets from Video Agent (C). Spend approvals over operator-defined ceiling escalate via CEO Action Agent (M).
 
 ### K. Analytics Agent
-- **Purpose:** Central performance brain
-- **Tools:** chartmetric, songstats, spotify_web_api, youtube_data_api
-- **Actions:** Compute KPIs, emit alerts, trigger phase transitions
+
+- **Purpose:** Central performance brain.
+- **Instructions:** Ingest data from all social, DSP, playlist, and submission sources; compute gates / phase transitions; identify best creative and next action.
+- **Skills:** ETL, attribution heuristics, threshold monitoring.
+- **Tools:** chartmetric, songstats, spotify_web_api, youtube_data_api, platform analytics APIs, warehouse, BI calculations.
+- **Actions:** Compute KPIs, emit alerts, trigger state transitions.
+- **Interdependencies:** Talks to every marketing agent; talks to CEO Action Agent (M) when thresholds imply major decisions.
 
 ### L. Editorial / PR Agent
-- **Purpose:** Pitch higher-trust outlets
-- **Tools:** groq, email_smtp
-- **Actions:** Write press notes, send pitches, follow up
+
+- **Purpose:** Pitch higher-trust editorial / blog / tastemaker opportunities.
+- **Instructions:** Activate only once proof exists; package story + numbers + artist hook.
+- **Skills:** PR writing, outlet fit, relationship management.
+- **Tools:** media CRM, email_smtp, browser tooling, press kit assets, groq.
+- **Actions:** Write press notes, send pitches, follow up.
+- **Interdependencies:** Uses Artist Identity Agent (A) and Analytics Agent (K) inputs.
 
 ### M. CEO Action Agent
-- **Purpose:** Escalate to CEO for approvals
-- **Tools:** email_smtp, telegram_bot, slack_webhook
-- **Actions:** Send decision packet, pause workflow, record response
 
-### N. Submissions Agent (NEW)
-- **Purpose:** Orchestrate all song submissions across DSP, PRO, mechanical, neighboring, UGC, sync
-- **Tools:** labelgrid, revelator, sonosuite, fonzworth_ascap, bmi_portal, mlc_ddex, soundexchange, youtube_cms, blacktip, anthropic, email_smtp
-- **Actions:** Create release in distributor, poll for identifiers, submit to PROs, submit mechanicals, submit neighboring rights, register UGC, log every submission to song_submissions, escalate to CEO Action Agent on failure
-- **Dependencies:** Honors §29 ordering (DSP first, then identifier ingestion, then rights lanes)
+- **Purpose:** Ask the CEO for approval on critical decisions (artist assignment, paid spend, brand pivots, generation failures).
+- **Instructions:** Send concise proposal with data; await approve / reject / modify.
+- **Skills:** Summarization, escalation discipline.
+- **Tools:** email_smtp, telegram_bot, slack_webhook, decision state machine.
+- **Actions:** Send decision packet, pause workflow, record response.
+- **Interdependencies:** Called by Assignment Engine (§22), Paid Growth Agent (J), and the Content Strategy Agent (B) on brand-pivot triggers.
+
+### N. Submissions Agent (NEW, 2026-04-12)
+
+- **Purpose:** Orchestrate all song submissions across DSP, PRO, mechanical, neighboring, UGC, sync.
+- **Instructions:** Honor §29 ordering (DSP first, then identifier ingestion, then rights lanes); log every attempt to `song_submissions`; escalate to CEO Action Agent (M) on terminal failure.
+- **Skills:** Workflow orchestration, retry policy, idempotent escalation.
+- **Tools:** labelgrid, revelator, sonosuite, fonzworth_ascap, bmi_portal, mlc_ddex, soundexchange, youtube_cms, blacktip, anthropic, email_smtp.
+- **Actions:** Create release in distributor, poll for identifiers, submit to PROs, submit mechanicals, submit neighboring rights, register UGC, log every submission to `song_submissions`, escalate on failure.
+- **Interdependencies:** Reads from Audio QA reports (§25); writes to Analytics Agent (K) for marketing-phase gating once a song lands `live` on a DSP.
 
 ### Resolved vagueness
 

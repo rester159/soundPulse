@@ -611,3 +611,23 @@ User asked for the PRD to reflect production reality. Audit (via Explore agent) 
 - Fully rewritten as a forward-looking handoff. Sections: (1) what shipped this session, (2) operator action items, (3) what's next (priority list with task IDs), (4) standing rules in force (cross-refs to L004/L010/L012/L014/L015/L016 + CLAUDE.md generality principles), (5) read-on-arrival checklist.
 
 Task #9 marked done. PRD is now 100% reconciled with production state as of commit 50aec4f + Neon main head 035.
+
+## 2026-04-17 20:52:39 — Marketing spec merged into PRD v3
+
+User asked to fold soundpulse_artist_release_marketing_spec.md into PRD v3 so the PRD becomes the single source of truth. Delta analysis (Explore agent against both docs) showed ~85% of the marketing spec was already absorbed into PRD v3 across §15-23 / §27-45. Six specific gaps remained:
+
+**Edits applied:**
+- PRD §18 — added §18.1 'Creation algorithm (8 steps)' with Inputs / Process (8-step) / Validation checks (7 items). Was missing from B; folded from A§3.4.
+- PRD §23 — extended request_ceo_decision JSON with response_options + modifiable_fields fields. Added paragraph on CEO response types (approve / reject / modify / request new artist / etc.) + ceo_decisions persistence. Folded from A§4.3.
+- PRD §25 — replaced terse song_qa_reports schema stub with full column spec + cross-link to audio_assets. Folded from A§5.3.
+- PRD §27 — replaced 'see §17' pointer with full field-by-field metadata matrix (~56 rows) showing source + purpose for each songs_master field. Folded from A§9.2.
+- PRD §43 — replaced 14 one-liner agent descriptions with full Purpose / Instructions / Skills / Tools / Actions / Interdependencies structure. ~12 lines per agent. Cross-references between agents updated to use letter codes (A through N). Folded from A§12 + extended for agent N (Submissions).
+
+**schema.md additions:**
+- reference_artists (proposed) — 32-column table for the persona blender's enrichment input. Folded from A§3.2.
+- audio_assets (proposed) — provider-agnostic playable-file row. Folded from A§5.2.
+- song_qa_reports (proposed) — full column spec. Folded from A§5.3.
+
+**Status of soundpulse_artist_release_marketing_spec.md:** untouched. Still untracked. Now fully redundant with PRD v3 + schema.md. User can delete it locally or leave as a historical record. Not committed.
+
+Task #9 marked done.

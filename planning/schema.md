@@ -463,3 +463,87 @@ CLAUDE.md mandates that every LLM call is logged with model, tokens, cost, times
 | created_at | `TIMESTAMPTZ` default NOW() | |
 
 **Indexes:** `idx_llm_call_action_date (action_type, created_at DESC)`, `idx_llm_call_model_date (model, created_at DESC)`
+
+---
+
+## `reference_artists` (proposed — supports artist creation pipeline §19)
+
+Per-reference enrichment row written by the `reference_artist_lookup` service. Powers the persona blender (§18.1 step 4) by giving the LLM clean, structured fields per real-world reference artist. **Currently a planned table — code path exists in `api/services/reference_artist_lookup.py`; full DDL not yet shipped via alembic. Schema below is the target spec.**
+
+| Column | Type | Source | Notes |
+|---|---|---|---|
+| reference_artist_id | `UUID` PK | system | |
+| canonical_name | `Text` | Chartmetric / web | Stage name |
+| source_urls | `JSONB` | scraper | URLs used during enrichment |
+| age | `Integer` NULL | web | Exact if found |
+| age_confidence | `Float` | parser | 0-1 |
+| gender_presentation | `Text` NULL | web / inferred | Only if publicly stated or strongly represented |
+| nationality | `Text` NULL | web | |
+| provenance | `Text` NULL | web | City / region / origin |
+| early_life_summary | `Text` NULL | web summary | Concise |
+| relationship_status | `Text` NULL | web | Only if public + relevant |
+| languages | `Text[]` | web / lyrics data | |
+| genres | `Text[]` | Chartmetric + web | |
+| influences | `Text[]` | web | Explicit influences only |
+| aesthetic_summary | `Text` | vision + LLM | Short style descriptor |
+| fashion_style_summary | `Text` | vision + LLM | Key signature |
+| color_palette | `Text[]` | vision extraction | Hex or named colors |
+| textures_materials | `Text[]` | vision extraction | leather, denim, satin, etc. |
+| cultural_style_refs | `Text[]` | vision + LLM | e.g. Y2K, corridos streetwear |
+| face_description | `Text` | vision + LLM | For generation |
+| body_presentation | `Text` | vision | |
+| hair_signature | `Text` | vision | |
+| tattoos_piercings | `Text[]` | vision | |
+| voice_timbre_description | `Text` | audio / LLM | Crucial |
+| voice_range_guess | `Text` | audio / LLM | tenor / alto etc. |
+| delivery_style | `Text[]` | audio / LLM | e.g. whispery, clipped, melodic rap |
+| accent_pronunciation | `Text` | audio / LLM | |
+| autotune_processing | `Text` | audio / LLM | none / light / heavy |
+| adlib_signature | `Text[]` | audio / LLM | |
+| lyrical_perspective | `Text` | lyric analysis | First person, narrative, etc. |
+| lyrical_themes | `Text[]` | lyric analysis | |
+| social_voice | `Text` | web / social scrape | |
+| confidence_report | `JSONB` | system | Per-field confidence |
+| created_at | `TIMESTAMPTZ` default NOW() | system | |
+
+---
+
+## `audio_assets` (proposed — supports song generation §24)
+
+Provider-agnostic asset row produced when a Suno/Udio/MusicGen call lands a playable file. Normalizes provider-specific output shapes into one schema so downstream QA + storage is provider-blind. **Currently a planned table — referenced by §24 + §25 + the songs_master FKs but full DDL not yet shipped.**
+
+| Column | Type | Notes |
+|---|---|---|
+| asset_id | `UUID` PK | |
+| song_id | `UUID` FK → songs_master.song_id | |
+| provider | `Text` | `suno_evolink` / `suno_kie` / `udio` / `musicgen` |
+| provider_job_id | `Text` | Provider's task ID for traceability |
+| format | `Text` | `mp3` / `wav` / `flac` |
+| sample_rate | `Integer` NULL | Hz |
+| bitrate | `Integer` NULL | kbps |
+| duration_seconds | `Integer` | |
+| storage_url | `Text` | Object-storage or self-hosted URL |
+| checksum | `Text` | SHA-256 of file bytes |
+| is_master_candidate | `Boolean` | TRUE for the post-QA winner; provider may return multiple takes |
+| created_at | `TIMESTAMPTZ` default NOW() | |
+
+---
+
+## `song_qa_reports` (proposed — supports audio QA §25)
+
+QA verdict per `audio_assets` row. One row per QA pass. **Currently a planned table — referenced by §25 + songs_master.qa_report_id FK but full DDL not yet shipped.**
+
+| Column | Type | Notes |
+|---|---|---|
+| qa_report_id | `UUID` PK | |
+| song_id | `UUID` FK → songs_master.song_id | |
+| asset_id | `UUID` FK → audio_assets.asset_id | |
+| tempo_match_score | `Float` | 0-1, vs blueprint target |
+| key_match_score | `Float` | 0-1 |
+| energy_match_score | `Float` | 0-1 |
+| silence_score | `Float` | Fraction of non-silent audio |
+| clipping_score | `Float` | Fraction of peak-clipped samples |
+| duplication_risk_score | `Float` | Cosine similarity to nearest existing-catalog audio embedding (MFCC). >0.85 fails. |
+| pass_fail | `Boolean` | Aggregate verdict; FALSE triggers regen up to 3x then CEO escalation |
+| report_json | `JSONB` | Full per-check result with reasons (loudness LUFS, lyric intelligibility, vocal prominence, etc.) |
+| created_at | `TIMESTAMPTZ` default NOW() | |

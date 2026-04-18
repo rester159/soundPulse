@@ -111,3 +111,7 @@ cvontinue
 ## 2026-04-17 14:30:00
 
 can you make sure the PRD has everything in pone place and is 100% updated with the product latest thinking (and what's in production)?
+
+## 2026-04-17 14:55:00
+
+can you incorporate soundpulse_artist_release_marketing_spec in PRD_v3 and conenct all the dots so it feels like one spec
