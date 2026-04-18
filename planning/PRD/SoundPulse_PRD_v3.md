@@ -304,9 +304,10 @@ SoundPulse manages a roster of AI artists. Each artist is a persistent persona w
 - Submissions Agent (#14, see §43)
 - 1,090+ tracks with full audio features (and growing autonomously)
 
-### Phase 3 — Production Pipeline 🟢 **FRAMEWORK COMPLETE** (April 13, 2026)
+### Phase 3 — Production Pipeline 🟢 **FRAMEWORK COMPLETE** (April 13, 2026; structure injection added April 15)
 - **Artist creation system (§18-21)** — ✅ Shipped with ethnicity/gender/age + edge_profile fields, fashion-editorial portraits with genre-specific references (HYBE teaser for K-pop, Dazed Caribbean for reggae, Complex for hip-hop), 8-view reference sheets with face-locked /v1/images/edits.
 - **Song generation under artist (§24)** — ✅ Shipped. Blueprint → assignment engine (10 live dimensions) → CEO gate → orchestrator → suno_kie. Includes upload-instrumental + Suno add-vocals flow.
+- **Per-genre song structure injection (§70, task #109)** — ✅ Shipped 2026-04-15 (commit `690d0a3`). Migrations 033 + 034. Replaces the dropped DTW-alignment approach (L014) with [Section: N bars{, instrumental}] tag blocks prepended to every Suno prompt. 20 genres seeded; per-artist override + blend rule live; reusable Settings + Artist UI; librosa-based compliance script ready for Y3K A/B.
 - **Edgy Themes pipeline (§10 Layer 7)** — ✅ Shipped. Edge rules + earworm rules + HOOK ISOLATION + per-artist edge_profile + pop_culture_references scraper + genre_traits multi-dimensional profile.
 - **Fonzworth ASCAP service (§31, T-190..T-194)** — ⚠️ FRAMEWORK shipped. DB tracking + scraper skeleton + admin endpoints live. Playwright container image needs 3-line Dockerfile edit to enable live submissions.
 - **Other rights lanes (§32-36)** — ⚠️ FRAMEWORK shipped. external_submissions table + generic dispatcher + 20 seeded targets + dependency graph. DistroKid/TuneCore/BMI/MLC/SoundExchange/YouTube Content ID all registered as stub adapters — 1-function-body replacement to go live per target as credentials land.
@@ -444,7 +445,7 @@ The entire prediction stack exists to push hit rate from 20% toward 40%+. The br
 
 ### Chartmetric as the backbone
 
-Paid tier ($350/mo, 2 req/sec, **172,800 req/day budget**). Current usage: ~10% of quota. We have headroom for 9× more endpoints.
+Paid tier ($350/mo, 2 req/sec, **172,800 req/day budget**). Current usage: ~50% wall-clock (~87K completions / 24h observed) but only ~26% useful (200-OK) post-Phase A+B fixes. Pre-fix, ~50% of completions were 429-rate-limited (see §7.3). Headroom remains substantial; raising the floor toward 90% is a future tuning pass once the multiplier holds steady at 1.0 for an hour.
 
 **Critical correction from v2** (validated against the API): the following claims in older docs are wrong, do not implement:
 - Spotify `type=plays` parameter — does not exist
@@ -452,6 +453,34 @@ Paid tier ($350/mo, 2 req/sec, **172,800 req/day budget**). Current usage: ~10% 
 - Chart endpoints with a `limit` param — only `airplay`, `twitch`, `tiktok/top-tracks` accept `limit`; everything else uses `offset`
 - Amazon endpoints accept `country_code` — wrong, they want `code2` (uppercase ISO2)
 - Weekday-restricted endpoints: YouTube + FreshFind = Thursday only; SoundCloud + Beatport = Friday only
+
+### §7.3 Rate-limit governance (Phase A + Phase B, 2026-04-15/16)
+
+The Chartmetric ingest (`chartmetric_ingest/`) replaced the legacy APScheduler scrapers (disabled in migration 032). It is the canonical consumer of the Chartmetric API budget. Two rate-limiting layers:
+
+**Phase A — in-process bucket** (commit `da26f61`, 2026-04-15)
+- File: `chartmetric_ingest/quota.py` (`TokenBucket`, `ChartmetricQuota`).
+- `BASE_RATE = 1.0` req/s, `BURST = 1` (no microbursts).
+- Adaptive multiplier: 1.0 normally; clamps to 0.5 on 429; recovers linearly to 1.0 over 600s.
+- `on_429()` calls `bucket.drain()` after `set_rate()` so the clamp actually stops dispatch (without drain, residual burst tokens fired immediately, sustaining the 429 storm).
+- Regression guard: `tests/test_chartmetric_ingest/test_quota_bucket.py::test_module_burst_is_one` fails fast if `BURST` is bumped. Reason in L016.
+
+**Phase B — cross-replica Postgres-coordinated bucket** (commit `50aec4f`, 2026-04-16)
+- File: `chartmetric_ingest/global_bucket.py` (`GlobalChartmetricBucket`).
+- Migration `035_chartmetric_global_bucket.py`: single-row table (id=1 enforced via CHECK), columns `tokens / last_refill_at / rate_per_sec / burst`, seeded 1.0 / 1.0 / 1.0.
+- `acquire()` does `SELECT ... FOR UPDATE` on the singleton row. Lock window is one DB roundtrip; sleeps happen OUTSIDE the lock so other replicas advance.
+- All internal SQL uses `clock_timestamp()` (real wall time per statement), not `NOW()` (transaction-start) — the bucket's elapsed-time math compares Python `datetime.now()` to DB time, both must be wall-clock.
+- `ChartmetricQuota.acquire()` consumes from the global bucket FIRST, then the in-process bucket. `on_429()` also drains the global bucket so a 429 at one replica stops other replicas from immediately firing their queued requests.
+- Solves the L016 multi-replica fan-out: N replicas each at 1.0 req/s no longer combine to N req/s globally — combined rate is strictly bounded at the global `rate_per_sec`.
+
+### Verification checklist
+
+After deploying a Chartmetric scraper change or tier change:
+
+1. Run the probe: `python -m scripts.chartmetric_probe --key <CHARTMETRIC_API_KEY>`. Reports per-endpoint reachability + tier-blocks + 400-param errors.
+2. Cross-check against the endpoint list above. New TIER (401) endpoints → email `hi@chartmetric.com` to unlock. New 400-param errors → debug param shape against the live API.
+3. Inspect dispatch metrics on Neon: `SELECT count(*) FROM chartmetric_request_queue WHERE completed_at > now() - interval '5 minutes'` for current rate; combine with `response_status` filters for 200/429/error breakdown.
+4. If 429 rate > 5%, check the in-process multiplier (`chartmetric_quota_state.adaptive_multiplier`) — if stuck at 0.5x, dispatch is too aggressive and either Phase A's BURST setting or Phase B's `chartmetric_global_bucket.rate_per_sec` may need lowering. See L004 + L010 + L016 for prior rate-limiter incidents.
 
 ### Entity resolution
 
@@ -1109,6 +1138,8 @@ ceo_decision              → one    entity (any type)
 ## §17. Database schema (canonical, reconciled)
 
 Source-of-truth for the table layer. Order: existing tables (BUILT) → new tables for Phase 3+.
+
+> **Migration head as of 2026-04-16:** `035` on Neon main. Detailed table specs and migration timeline live in `planning/schema.md` — that file is the per-column reference; this section is the relationship map. Recent additions: `genre_structures` + `ai_artists.structure_template` / `genre_structure_override` (033/034, task #109, see §70); `chartmetric_global_bucket` (035, task #8 / Chartmetric Phase B, see §7.3).
 
 ### BUILT — Phase 1 + Phase 2 tables
 
@@ -2168,6 +2199,8 @@ Baseline: ~6-10 MB per song. With extras: ~12-16 MB. For a 1000-song catalog tha
 
 Before any audio is accepted, run QA checks. Result row written to `song_qa_reports`.
 
+> **Cross-reference:** Structural-misalignment problems (vocal phrasing not lining up with the human instrumental) are addressed UPSTREAM by §70 (per-genre song structure injection, task #109 shipped 2026-04-15). Audio QA + the §25.5 Vocal Stem Pipeline phase-lock are precision-refinement layers — not the primary fix. See L014 in `planning/lessons.md` for why DTW-style alignment can't fix structural mismatch on its own.
+
 ### Required checks
 
 | Check | Threshold | Action on fail |
@@ -2978,7 +3011,14 @@ Response received → write `response_payload` to `ceo_decisions` row → unbloc
 
 ## §50. Settings UI — Tools & Agents registry (BUILT)
 
-`/settings` page in the dashboard. Two sections:
+`/settings` page in the dashboard. Four subtabs (sidebar nav, dispatched in `frontend/src/pages/Settings.jsx`):
+
+1. **Pending Decisions** — CEO gate queue (see §49). Approve/reject + scoring breakdown.
+2. **CEO Profile** — Form for editing the singleton `ceo_profile` row.
+3. **Tools & Agents** — By-tool / by-agent pivot with grant/revoke + credential-presence indicators.
+4. **Genre Structures** — Table + modal editor for per-genre song-form skeletons (see §70). Added 2026-04-15 with task #109.
+
+A separate right-side drawer (`frontend/src/components/SettingsDrawer.jsx`) handles browser-local API client config (X-API-Key + base URL, both saved to `localStorage`). Not DB-backed — exists per browser session, not per CEO.
 
 ### CEO Profile section
 Form for editing the `ceo_profile` row.
@@ -3177,10 +3217,24 @@ GET  /admin/artists/with-chartmetric-id
 
 | Service | What |
 |---|---|
-| `soundPulse` | FastAPI API + APScheduler in-process |
-| `ui` | React frontend (Vite + nginx) |
-| `tunebat-crawler` | BlackTip + Xvfb crawler service (NEW) |
-| Neon (external) | Postgres serverless |
+| `soundPulse` | FastAPI API + APScheduler in-process + chartmetric_ingest fetcher |
+| `ui` | React SPA (Vite build, served via `serve -s dist -l 3000` per `frontend/Dockerfile`) |
+| `tunebat-crawler` | BlackTip + Xvfb crawler service |
+| `portal-worker` | Node.js BlackTip worker for browser-driven distributor / PRO portals (DistroKid, ASCAP, etc.) |
+| `stem-extractor` | Python Demucs worker for vocal stem isolation + add-vocals mixing |
+| Neon (external) | Postgres serverless. Alembic head = `035` as of 2026-04-16. Migrations applied via the Neon MCP `prepare/complete_database_migration` flow per task_decom T-401. |
+
+### §54.1 Frontend ↔ API URL resolution
+
+The API and the React SPA are **separate Railway services** with independent public URLs. `https://soundpulse-production-5266.up.railway.app/` is the API only — its root returns the JSON banner `{"service":"SoundPulse API",...}`, not the SPA. The SPA lives at the `ui` service's own Railway URL (or a custom domain if configured).
+
+The frontend resolves the API base URL via `frontend/src/hooks/useSoundPulse.js::getBaseUrl()`:
+
+1. `localStorage['soundpulse_base_url']` (set via the Settings drawer — overrides everything)
+2. `import.meta.env.VITE_API_BASE_URL` (build-time env var on the `ui` service)
+3. fallback `'/api/v1'` (only works when frontend and API share an origin — true in local docker-compose, false on Railway)
+
+CORS on the API must allow the frontend origin. Recurrent operator gotcha: bookmarking the API URL and expecting the SPA to load — it never has, regardless of session state. To find the actual SPA URL, open the Railway dashboard, project → `ui` service → public URL panel.
 
 ### Phase 3 additions
 
@@ -3368,7 +3422,7 @@ Promotion only fires on songs that pass the Phase M3 gate (proven organic signal
 
 ## §59. What's already built (✅)
 
-All of the following are deployed and verified in production at https://soundpulse-production-5266.up.railway.app:
+All of the following are deployed and verified in production at https://soundpulse-production-5266.up.railway.app (API; the React SPA is a separate Railway service — see §54.1 for URL resolution):
 
 - **Data layer:** 15+ scrapers, 23k+ snapshots, 1,732 artists with chartmetric_id, 1,727 with classified genres
 - **Tunebat crawler:** Standalone Railway service running BlackTip + Xvfb, autonomously enriching audio features for ~1,090+ tracks (and growing)
@@ -3376,9 +3430,12 @@ All of the following are deployed and verified in production at https://soundpul
 - **Opportunity Quantification:** $ + stream projections + 6-component confidence model. Cached daily.
 - **Smart Prompt v2:** LLM-powered, parallel for top-N, 5-min cache, real rationale, average ~2 sec for 5 prompts.
 - **SongLab UI:** 10-card grid, copy-to-clipboard, model picker, sort options, surfaced dates, quantification block.
-- **Settings UI:** CEO profile + Tools/Agents registry with by-tool/by-agent pivots, inline grant/revoke, credential-presence detection.
+- **Settings UI:** Four subtabs — Pending Decisions, CEO Profile, Tools & Agents, Genre Structures (added 2026-04-15 with task #109).
+- **Per-genre song structure rules (§70, task #109)** ✅ shipped 2026-04-15 commit `690d0a3` — migrations 033 + 034 (`genre_structures` table with 20-row seed + `ai_artists.structure_template` / `genre_structure_override`); resolver with dotted-chain fallback + locked blend rule; orchestrator injection (try/except so generation never blocks on this layer); admin CRUD + per-artist PATCH endpoints; Settings subtab + Artist profile override block; librosa-based compliance script (`scripts/measure_structure_compliance.py`) for Y3K A/B verification.
+- **Chartmetric Phase A — 429 storm fix (2026-04-15 commit `da26f61`)** ✅ — `BURST: 3 → 1` and `on_429()` now drains the bucket; eliminated the in-process microburst that had ~50% of requests returning 429.
+- **Chartmetric Phase B — cross-replica Postgres-coordinated bucket (2026-04-16 commit `50aec4f`)** ✅ — migration 035 + `GlobalChartmetricBucket`; combined dispatch across all Railway replicas now strictly bounded at 1.0 req/s. Closes the L016 multi-replica fan-out gap.
 - **Submissions Agent (#14):** Registered with all submission tools granted. Implementation TODO.
-- **Stale-scraper reaper, Spotify rate-limit governor, classification sweep with track_rollup signal, scraper registry refactor, LLM provider abstraction, 11 alembic migrations.**
+- **Stale-scraper reaper, Spotify rate-limit governor, classification sweep with track_rollup signal, scraper registry refactor, LLM provider abstraction, 35 alembic migrations on Neon main (head=035 as of 2026-04-16).**
 
 ---
 
@@ -3387,15 +3444,18 @@ All of the following are deployed and verified in production at https://soundpul
 | Item | Why blocked | Workaround |
 |---|---|---|
 | **Spotify `/v1/audio-features`** | App created after 2024-11-27 | ✅ Tunebat crawler via BlackTip (BUILT) |
-| **DistroKid/TuneCore/CD Baby distribution** | No public APIs | Use LabelGrid (TODO MVP-1) |
-| **ASCAP/BMI registration** | No public APIs | Fonzworth browser service (TODO MVP-2) |
+| **DistroKid/TuneCore/CD Baby distribution** | No public APIs | Use LabelGrid (TODO MVP-1, sandbox account setup pending) |
+| **ASCAP/BMI registration** | No public APIs | Fonzworth browser service (TODO MVP-2, framework shipped, needs Dockerfile Playwright unlock + selector tuning against live portal) |
 | **SoundExchange registration** | No public API | Browser pattern, Fonzworth-style (TODO MVP-2) |
-| **YouTube Content ID** | Partnership required | Skip Phase 4 until partnership; manual claim/dispute fallback |
+| **YouTube Content ID** | Partnership required | Skip Phase 4 until partnership; manual claim/dispute fallback. YouTube Data API v3 path for artist-channel uploads works without partnership. |
 | **Spotify for Artists / Apple for Artists analytics** | No public APIs | Use Chartmetric + Songstats |
 | **TikTok auto-publish** | App audit required | Use sandbox/draft mode + manual review until audit complete |
 | **Instagram/Facebook publishing** | App review required | Apply for `instagram_content_publish` scope review |
 | **Genius lyrics** | Needs `GENIUS_API_KEY` env var (free signup at genius.com/api-clients) | User action: 5 min to sign up + add env var |
 | **Suno commercial rights** | Evolving legal area; perpetual commercial license via Warner deal but US Copyright Office doesn't recognize raw AI audio as copyrightable | Accept legal risk, document in artist contracts |
+| **ML hit predictor training (Phase 4)** | Needs ~6 weeks of resolved `breakout_events` for XGBoost to be viable. Earliest first-train-attempt: late May 2026. | Rule-based prediction fallback already in place; structure injection (§70, shipped 2026-04-15) should improve generated-audio feature richness, which downstream improves training data quality. |
+| **Y3K compliance A/B (gate for promoting structure injection to default path)** | Operator action: trigger Y3K regen via SongLab, download new audio, run `scripts/measure_structure_compliance.py`. | Code shipped 2026-04-15 commit `690d0a3`; gate at ≥70% compliance. Blocker is execution, not code. See §70.8. |
+| **Frontend SPA URL bookmark mismatch** | Operators sometimes bookmark the API URL (`...up.railway.app`) and expect the SPA. The API root has always returned the JSON banner. | Find the `ui` service URL in the Railway dashboard; bookmark THAT. Or set a custom domain. See §54.1. |
 
 ---
 
@@ -3585,7 +3645,7 @@ resolve_structure_for_song(artist, primary_genre):
 
 **Blend semantic (confirmed design, 2026-04-15):** for each section name (`Intro`, `Verse 1`, `Pre-chorus`, …), take the artist's `bars` and `vocals` values if the artist specified that section; otherwise keep the genre's. Artist-only sections (sections in `structure_template` but not in `genre_struct`) are inserted in the order they appear in the artist template. Genre-only sections (sections in `genre_struct` but not in `structure_template`) stay in their original position. **Rationale:** lets an artist shorten/lengthen any named section, drop a section they never use, or add a signature section without redefining the whole structure. Rejected alternative: weighted averages on bar counts — musically meaningless.
 
-**Note:** the blend rule is the one design decision requiring re-confirmation from the human before Phase 2 implementation. See `planning/NEXT_SESSION_START_HERE.md` §3.
+**Note:** the blend rule was confirmed by the human on 2026-04-15 22:28 (locked option 1 from the proposal in `planning/NEXT_SESSION_START_HERE.md` §3). Phase 2 implementation shipped against this rule in commit `690d0a3`. See §70.7 for status.
 
 ### 70.2.3 — Prompt injection
 
@@ -3666,6 +3726,54 @@ Before promoting the new pipeline to the default path, re-run Y3K song generatio
 
 ## 70.6 — Dependencies and references
 
-- **`planning/NEXT_SESSION_START_HERE.md`** — single entry point for implementing this feature, including the six-phase TDD plan and the one remaining open question (blend-semantic confirmation).
+- **`planning/NEXT_SESSION_START_HERE.md`** — historical entry point that drove the implementation. The six-phase TDD plan documented there is now fully shipped; the file is preserved as a record of the locked decisions.
 - **L014 in `planning/lessons.md`** — why DTW doesn't fix structural mismatch and this feature does instead.
+
+## 70.7 — Implementation status (SHIPPED 2026-04-15 / 04-16)
+
+**All six phases complete.** Commit `690d0a3` shipped Phases 1-6 in code; chartmetric Phase A (commit `da26f61`) and Phase B (commit `50aec4f`) shipped alongside.
+
+Files (all on `main`):
+- `alembic/versions/033_genre_structures.py` — table + 20-row research-backed seed (BPM/length math validated: drill 2:03, k-pop 3:36 with mandatory dance break, techno 6:30, ambient 7:18, etc.).
+- `alembic/versions/034_artist_structure_fields.py` — `ai_artists.structure_template` + `genre_structure_override`.
+- `api/models/genre_structure.py` — SQLAlchemy model.
+- `api/services/genre_structures_service.py` — `validate_structure`, `upsert_genre_structure`, `resolve_genre_structure` (dotted-chain walk → `pop` fallback).
+- `api/services/structure_resolver.py` — `blend(genre_struct, artist_template)` per the locked rule + `resolve_structure_for_song(db, artist, primary_genre)`.
+- `api/services/structure_prompt.py` — `format_structure_for_suno(structure)` + `structure_block_for_prompt(structure)` (returns `""` gracefully on empty).
+- `api/services/generation_orchestrator.py` — `assemble_generation_prompt(..., structure_block=...)` prepends the [STRUCTURE] block FIRST.
+- `api/routers/admin.py` — 2 call sites (blueprint-driven generate + instrumental add-vocals) wired to resolve + format + pass; both wrapped in try/except so generation never blocks on the structure layer.
+- `api/routers/admin_genre_structures.py` — admin CRUD + `PATCH /api/v1/admin/artists/{artist_id}/structure`.
+- `frontend/src/hooks/useSoundPulse.js` — 5 new hooks (`useGenreStructures`, `useGenreStructure`, `useUpdateGenreStructure`, `useDeleteGenreStructure`, `usePatchArtistStructure`).
+- `frontend/src/components/GenreStructureEditor.jsx` — reusable editor (add/remove/up/down/vocals + structureChain summary helper).
+- `frontend/src/pages/Settings.jsx` — new "Genre Structures" subtab with table + modal editor.
+- `frontend/src/pages/Artists.jsx` — `ArtistStructureBlock` in expanded panel: read-only summary OR edit mode with override checkbox + locked tooltip copy.
+- `scripts/measure_structure_compliance.py` — librosa-based compliance CLI for Phase 6 A/B.
+- 6 new test files: `tests/test_services/test_genre_structures_crud.py`, `test_structure_resolver.py`, `test_structure_prompt.py`, `test_orchestrator_structure_injection.py`, `test_structure_compliance.py`, `tests/test_api/test_admin_genre_structures.py`. **73 tests green.**
+
+Locked design decisions (all settled before code shipped):
+1. Genre granularity: primary genre only.
+2. Storage: DB table (editable from UI without redeploy).
+3. Structure spec per entry: minimum `[{name, bars, vocals}]`.
+4. Coverage: top 20 genres seeded; `caribbean.reggae` substituted for the originally-proposed `rap` since `rap` doesn't exist in `shared/genre_taxonomy.py` (rap subgenres live under `hip-hop.*`).
+5. Settings UI placement: new dedicated subtab (not shoehorned).
+6. Version history: not for MVP — `updated_at` + `updated_by` only.
+7. Artist template interaction: blend by default; override checkbox skips blend.
+8. Blend rule: artist's `bars`/`vocals` win for matching section names (applied to ALL occurrences of the same name in the genre row); artist-only sections insert in artist-declared order; genre-only sections stay in place.
+
+## 70.8 — Y3K compliance status (template — fill in after operator runs the script)
+
+The script lives at `scripts/measure_structure_compliance.py`. Run with:
+
+```
+python -m scripts.measure_structure_compliance \
+    --audio /path/to/regenerated_y3k.mp3 \
+    --structure-json '<json of expected structure>' \
+    --bpm-hint 120
+```
+
+Y3K maps to `song_id 9df3ff71-47ec-4613-9693-c126d764e805` (artist Kira Lune, primary_genre `pop.k-pop` → picks up the 11-section / 108-bar K-pop seed). Run once after deploy completes and the orchestrator has had a chance to regenerate Y3K through the now-injected pipeline.
+
+**Promote-to-default gate:** ≥70% sections within ±1 bar of expected boundary AND A/B listen judged better than the pre-change mix. Below 70% → iterate per §70.5 remediation list (BPM pinning, explicit `[Drop]` / `[Build]` keywords, retry loop) before promoting.
+
+**Status as of 2026-04-16:** code shipped; live A/B pending operator-triggered regen + audio download.
 - **`services/stem-extractor/worker.py:596-702`** — the existing post-hoc alignment pipeline. This feature replaces its structural role; the constant-offset pass can stay as a precision refinement once structures are enforced upstream.

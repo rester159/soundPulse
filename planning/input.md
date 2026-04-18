@@ -107,3 +107,7 @@ finish and push
 ## 2026-04-16 00:35:00
 
 cvontinue
+
+## 2026-04-17 14:30:00
+
+can you make sure the PRD has everything in pone place and is 100% updated with the product latest thinking (and what's in production)?

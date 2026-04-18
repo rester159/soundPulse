@@ -580,3 +580,34 @@ Subtle bug found + fixed during testing: NOW() inside a Postgres transaction ret
 23 chartmetric tests green (10 new global_bucket + 13 existing quota_bucket). Apologies — the timing test floor was loosened from 0.7s to 0.3s after empirically observing Neon roundtrip variance; with drain(), the real wait still happens (vs ~0ms without drain), and 0.3s is 6x the unblocked baseline.
 
 Tasks #1-#8 all closed. No open tasks.
+
+## 2026-04-17 17:49:25 — PRD comprehensive refresh
+
+User asked for the PRD to reflect production reality. Audit (via Explore agent) surfaced 17 specific gaps + stale items. Applied targeted edits:
+
+**PRD v3 (planning/PRD/SoundPulse_PRD_v3.md):**
+- §4 Phase 3 status — added per-genre structure injection (#109) line under Phase 3 with commit ref + April 15 ship date.
+- §7.2 Chartmetric backbone — corrected the stale "~10% of quota" claim to "~50% wall-clock / ~26% useful (200-OK)" with reference to Phase A+B fixes.
+- §7.3 NEW — Rate-limit governance subsection covering Phase A (in-process BURST=1 + drain) + Phase B (cross-replica Postgres-coordinated bucket) + verification checklist.
+- §17 — added migration-head-as-of-2026-04-16 note pointing to recent additions.
+- §25 Audio QA — cross-reference to §70 as primary fix for structural misalignment (Audio QA + §25.5 phase-lock are precision-refinement layers, not the primary fix). L014 cited.
+- §50 Settings UI — listed all four subtabs (Pending Decisions / CEO Profile / Tools & Agents / Genre Structures) instead of just two; called out SettingsDrawer is browser-local config (not the same thing).
+- §54 NEW §54.1 — Frontend ↔ API URL resolution. Documents the API-vs-SPA-URL gotcha that bit operator tonight.
+- §59 What's already built — added #109 + Chartmetric Phase A + Chartmetric Phase B; bumped migration count to 35; pointed to §54.1 for SPA URL.
+- §60 What's blocked — added 3 new rows: ML hit predictor (data-bound), Y3K compliance A/B (operator action), SPA URL bookmark gotcha.
+- §70.2.2 — replaced stale "requires re-confirmation" note with "confirmed 2026-04-15, shipped in 690d0a3, see §70.7".
+- §70.6 — updated NEXT_SESSION_START_HERE reference to "historical entry point preserved as a record".
+- §70.7 NEW — Implementation status (SHIPPED): full file inventory + locked design decisions list.
+- §70.8 NEW — Y3K compliance status template + script invocation example + promote-to-default gate definition.
+
+**planning/schema.md:**
+- Migration timeline — added 035 chartmetric_global_bucket row; head bumped from 034 to 035.
+- NEW chartmetric_global_bucket section — column-by-column spec + check constraints + clock_timestamp() rationale + reference to wrapper class.
+
+**planning/tasks.md:**
+- Top-of-backlog rewritten: documented this-session shipped (#109 + Chartmetric A+B); operator action items pending; next-session pick list (LabelGrid > Fonzworth ASCAP go-live > MLC DDEX > YouTube Data API > P1 backfill > P2 ML training > admin tunables).
+
+**planning/NEXT_SESSION_START_HERE.md:**
+- Fully rewritten as a forward-looking handoff. Sections: (1) what shipped this session, (2) operator action items, (3) what's next (priority list with task IDs), (4) standing rules in force (cross-refs to L004/L010/L012/L014/L015/L016 + CLAUDE.md generality principles), (5) read-on-arrival checklist.
+
+Task #9 marked done. PRD is now 100% reconciled with production state as of commit 50aec4f + Neon main head 035.

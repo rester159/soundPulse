@@ -25,10 +25,11 @@
 | 004 | — | `tracks`: shazam_id, tiktok_sound_id, billboard_id, chartmetric_id columns + unique indexes (incl. apple_music_id which was previously not indexed) |
 | 005 | 2026-04-03 | `backtest_results` table |
 | … | … | (historical migrations 006–032 — see `alembic/versions/` for authoritative list) |
-| 033 | 2026-04-15 | `genre_structures` table + 20-genre seed — per-genre song structure templates for Suno prompt injection (task #109, NEXT_SESSION_START_HERE.md §4) |
+| 033 | 2026-04-15 | `genre_structures` table + 20-genre seed — per-genre song structure templates for Suno prompt injection (task #109, PRD §70) |
 | 034 | 2026-04-15 | `ai_artists.structure_template` JSONB + `ai_artists.genre_structure_override` BOOLEAN — per-artist structure overrides (task #109) |
+| 035 | 2026-04-16 | `chartmetric_global_bucket` singleton table — Postgres-coordinated cross-replica rate-limit governor (task #8 / Chartmetric Phase B fix for L016 multi-replica fan-out, PRD §7.3) |
 
-Head: `034` (file describes 001–005 + 033–034 in detail — migrations 006–032 are authoritative in `alembic/versions/`. Update this file in the same commit when adding new tables.)
+Head: `035` (file describes 001–005 + 033–035 in detail — migrations 006–032 are authoritative in `alembic/versions/`. Update this file in the same commit when adding new tables.)
 
 ---
 
@@ -56,6 +57,25 @@ Two columns added so an artist can deviate from the per-genre default:
 |---|---|---|---|
 | structure_template | `JSONB` | NULL | Same shape as `genre_structures.structure`. NULL = artist follows the genre row as-is. |
 | genre_structure_override | `Boolean` | NOT NULL, default FALSE | When TRUE, the artist's `structure_template` is used as-is and the genre row is ignored. When FALSE (default), the resolver blends the artist template with the genre row using the section-name merge rule from NEXT_SESSION_START_HERE.md §3 (artist wins on named matches; artist-only sections insert in artist-declared order; genre-only sections stay in place).
+
+---
+
+## `chartmetric_global_bucket` (migration 035) — task #8 / Chartmetric Phase B
+
+Singleton row table coordinating dispatch rate across all Railway replicas. Replaces the in-process `TokenBucket` as the authoritative budget. `ChartmetricQuota.acquire()` consumes from this row FIRST (via `SELECT ... FOR UPDATE`), then the in-process bucket. Solves the L016 multi-replica fan-out gap (N replicas × 1.0 req/s no longer combine to N req/s globally).
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `Integer` | PK | Pinned to 1 via `ck_chartmetric_global_bucket_singleton CHECK (id = 1)` so accidental second rows fail at the DB. |
+| tokens | `Float` | NOT NULL | Current bucket level. Mutated per acquire(). |
+| last_refill_at | `TIMESTAMPTZ` | NOT NULL, default NOW() | Anchor for elapsed-time refill math. Always written via `clock_timestamp()` (real wall time per statement) — using `NOW()` would return transaction-start time and poison the math. |
+| rate_per_sec | `Float` | NOT NULL | Refill rate. Seeded 1.0 (matches Phase A's BASE_RATE). |
+| burst | `Float` | NOT NULL | Bucket capacity. Seeded 1.0 (no microbursts allowed; mirrors Phase A's BURST=1 — see L016). |
+| updated_at | `TIMESTAMPTZ` | NOT NULL, default NOW() | Bumped on every write. |
+
+`ck_chartmetric_global_bucket_positive` enforces `rate_per_sec > 0 AND burst > 0 AND tokens >= 0`.
+
+Wrapper class: `chartmetric_ingest/global_bucket.py::GlobalChartmetricBucket` with `acquire`, `snapshot`, `drain`, `set_rate`. Lock window is one DB roundtrip; sleeps happen OUTSIDE the lock so other replicas advance.
 
 ---
 

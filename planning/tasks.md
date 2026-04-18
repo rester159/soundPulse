@@ -10,25 +10,30 @@
 
 ## 🟢 Live top-of-backlog — next session starts here
 
-- **`#109` Per-genre song structure rules: config + Suno prompt injection + Settings UI** — `in_progress`. Blend rule confirmed by user 2026-04-15 22:28. Phase 1 code written + 8/14 tests green; remaining 6 tests are DB-bound and need the migration applied (Neon MCP path TBD). Full briefing in `planning/NEXT_SESSION_START_HERE.md`.
+**Last session shipped (2026-04-15 / 04-16):**
+- ✅ `#109` Per-genre song structure rules — all six phases done in commit `690d0a3`. Migrations 033/034 on Neon main. 73 tests green. PRD §70.7 has the full implementation status.
+- ✅ Chartmetric Phase A (commit `da26f61`) — `BURST=3 → 1` + `on_429()` drains the in-process bucket. Eliminated the in-process microburst storm.
+- ✅ Chartmetric Phase B (commit `50aec4f`) — migration 035 + `GlobalChartmetricBucket`. Postgres-coordinated cross-replica rate limit. Closes the L016 multi-replica fan-out gap.
 
-Six phases (TDD — failing test first each phase):
-1. Schema + seed — migrations 033 (`genre_structures` table + 20-genre seed), 034 (two new `ai_artists` cols) — **🟡 code written, awaiting migration apply for end-to-end test green**
-   - `alembic/versions/033_genre_structures.py` (new) + `alembic/versions/034_artist_structure_fields.py` (new)
-   - `api/models/genre_structure.py` (new), `api/models/ai_artist.py` (extended with 2 cols)
-   - `api/services/genre_structures_service.py` (new — `validate_structure`, `upsert_genre_structure`, `resolve_genre_structure` with dotted-chain + `pop` fallback)
-   - `tests/test_services/test_genre_structures_crud.py` (14 tests; 8 validation tests pass via `pytest -k validate_structure`)
-   - `planning/schema.md` updated with table specs
-2. Prompt injection — `structure_resolver.py` + `structure_prompt.py` wired into song gen orchestrator — `pending`
-3. Admin API — `/api/v1/admin/genre-structures` CRUD + artist-patch extension — `pending`
-4. Settings subtab + artist-profile "Song Structure" section with override checkbox + tooltip — `pending`
-5. (rolls into 1) — research-backed structures for the top 20 genres — `done` (in 033 seed)
-6. Y3K regeneration + structural-compliance measurement — `pending`
+**Operator action items pending (do not need code work):**
+- **Run Y3K compliance A/B** — `python -m scripts.measure_structure_compliance --audio <path> --structure-json <expected>`. Gate at ≥70%. See PRD §70.8.
+- **Find the SPA URL** — Railway dashboard → `ui` service → public URL panel. The API URL was never the SPA.
+- **Verify the Chartmetric 429 rate dropped** — once Railway finishes rebuilding `50aec4f`, query `chartmetric_request_queue` for last-5min `response_status` breakdown. Should be <5% 429 globally.
+- **Decide on `planning/PRD/soundpulse_artist_release_marketing_spec.md`** (untracked, predates current session).
 
-Related:
-- **`#106` Add admin retry-stem-job endpoint + Songs UI button** — `pending`, deferred. Nice-to-have; not blocking `#109`.
+**Next session should pick from:**
+1. **(P1 closeout, 1-2 weeks)** Run remaining 90-day Chartmetric backfill chunks via `scripts/backfill_chartmetric_deep_us.py --confirmed-only --days 90`, chunked.
+2. **(P2 unblock, ~6 weeks)** ML hit predictor training (XGBoost on resolved breakouts). Blocked on data depth — see PRD §60.
+3. **(MVP-1 distribution)** LabelGrid sandbox setup + `services/distribution/labelgrid.py` adapter (T-182).
+4. **(MVP-2 rights)** Fonzworth ASCAP go-live: 3-line Dockerfile edit + selector tuning against the live portal (T-190 → T-192).
+5. **(MVP-2 mechanical)** MLC DDEX XML feed builder (T-201).
+6. **(observability)** Promote BURST/rate tunables to admin UI so operator can tune the chartmetric_global_bucket without a redeploy.
+
+Older context still relevant:
+- **`#106` Add admin retry-stem-job endpoint + Songs UI button** — `pending`, deferred. Nice-to-have; not blocking anything.
 - **`#107` Build VocalEntryStudio UI with draggable pins + two-track preview** — `done`. Four commits pushed 2026-04-15 (`b1ddfbc`, `528230f`, `e3e4a9e`, `f283959`). Orange scratch pin verified on real Y3K data via Playwright harness.
 - **`#108` DTW vocal alignment prototype on Y3K** — `deleted` (2026-04-15). Superseded by `#109` after human observed structural mismatches can't be fixed by time-warping (see L014 in `planning/lessons.md`).
+- **`#109` Per-genre song structure rules** — `done` (2026-04-15). Full status in PRD §70.7.
 
 ---
 
