@@ -641,3 +641,13 @@ Sections: (1) what SoundPulse is, (2) the thesis, (3) end-to-end song lifecycle 
 Header explicitly notes: "This is a fork of the main PRD, not a replacement." Closing section reiterates: "When the master moves, this document drifts. Re-read the master for anything load-bearing."
 
 Spelling: 'Ceasar' as the user typed it (not 'Caesar'). Filename matches.
+
+## 2026-04-18 13:29:13 — Added end-to-end diagram in two formats
+
+User asked for a diagram of the song creation/marketing lifecycle in layman terms. Built two artifacts:
+
+1. **Mermaid flowchart embedded in Ceasar_PRD_streamlined.md** as new §3 "The end-to-end map" (between thesis and detailed lifecycle prose). Uses subgraph blocks for the 6 phases (Discovery / Decision / Production / Release / Growth / Earnings) with color-coded classDef, decision diamond, CEO node, and dotted feedback arrows for outcome→prediction and revenue→next-cycle. Renders on GitHub natively.
+
+2. **Standalone HTML companion at Ceasar_PRD_streamlined_diagram.html.** Single self-contained file (no external CSS/JS/CDN — works offline in any browser). 6 color-coded phase sections with cards for each sub-piece (named in layman terms: 'Inspector' for Audio QA, 'Distributor' for LabelGrid, 'Brain' for Analytics Agent, etc.). Each card shows WHO/WHAT/DETAIL. Includes feedback-loop callout box and agent legend with all 14 agents (A-N). Print-friendly with @media print rules; mobile-responsive at 640px breakpoint.
+
+PRD §3 now points to the HTML file: "For a richer visual, open the companion file Ceasar_PRD_streamlined_diagram.html in any browser — it's a single self-contained page (no installs, no internet)."

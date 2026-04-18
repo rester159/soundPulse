@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SoundPulse — End-to-End Song Lifecycle</title>
+<style>
+  :root {
+    --discovery-bg:  #e0f2fe;  --discovery-bd:  #0369a1;  --discovery-tx:  #0c4a6e;
+    --decision-bg:   #fef3c7;  --decision-bd:   #b45309;  --decision-tx:   #78350f;
+    --production-bg: #ede9fe;  --production-bd: #6d28d9;  --production-tx: #3730a3;
+    --release-bg:    #dcfce7;  --release-bd:    #15803d;  --release-tx:    #14532d;
+    --growth-bg:     #fce7f3;  --growth-bd:     #be185d;  --growth-tx:     #831843;
+    --earnings-bg:   #fef9c3;  --earnings-bd:   #a16207;  --earnings-tx:   #713f12;
+    --neutral-bg:    #f8fafc;  --neutral-bd:    #cbd5e1;  --neutral-tx:    #1e293b;
+    --ink:           #0f172a;  --muted:         #64748b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--neutral-bg); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif; line-height: 1.5; }
+  body { padding: 32px 24px 64px; max-width: 1100px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 40px; padding-bottom: 24px; border-bottom: 1px solid #e2e8f0; }
+  header h1 { font-size: 36px; font-weight: 800; letter-spacing: -0.02em; color: var(--ink); }
+  header p.tagline { font-size: 17px; color: var(--muted); margin-top: 6px; }
+  header p.note { font-size: 13px; color: var(--muted); margin-top: 14px; max-width: 720px; margin-left: auto; margin-right: auto; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 32px; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .legend-item .dot { width: 10px; height: 10px; border-radius: 50%; }
+
+  .flow { display: flex; flex-direction: column; align-items: center; gap: 0; }
+
+  .phase {
+    width: 100%;
+    border-radius: 16px;
+    padding: 20px 24px;
+    border: 2px solid;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.04), 0 4px 12px rgba(15,23,42,0.04);
+  }
+  .phase-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .phase-num { font-size: 12px; font-weight: 800; letter-spacing: 0.1em; opacity: 0.7; }
+  .phase-title { font-size: 21px; font-weight: 700; }
+  .phase-emoji { font-size: 24px; }
+  .phase-desc { font-size: 14px; opacity: 0.85; margin-bottom: 14px; }
+
+  .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .card { background: white; border: 1px solid rgba(0,0,0,0.08); border-radius: 10px; padding: 12px 14px; }
+  .card .who { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.7; margin-bottom: 4px; }
+  .card .what { font-size: 14px; font-weight: 600; line-height: 1.35; }
+  .card .detail { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+
+  .gate {
+    background: white;
+    border: 2px dashed #475569;
+    border-radius: 999px;
+    padding: 8px 18px;
+    margin: 14px auto;
+    font-size: 13px;
+    font-weight: 700;
+    color: #1e293b;
+    display: inline-block;
+  }
+
+  .arrow { font-size: 28px; color: var(--muted); margin: 8px 0; line-height: 1; }
+  .arrow-label { font-size: 11px; color: var(--muted); font-style: italic; margin-top: -4px; margin-bottom: 4px; }
+
+  .phase-discovery  { background: var(--discovery-bg);  border-color: var(--discovery-bd);  color: var(--discovery-tx); }
+  .phase-decision   { background: var(--decision-bg);   border-color: var(--decision-bd);   color: var(--decision-tx); }
+  .phase-production { background: var(--production-bg); border-color: var(--production-bd); color: var(--production-tx); }
+  .phase-release    { background: var(--release-bg);    border-color: var(--release-bd);    color: var(--release-tx); }
+  .phase-growth     { background: var(--growth-bg);     border-color: var(--growth-bd);     color: var(--growth-tx); }
+  .phase-earnings   { background: var(--earnings-bg);   border-color: var(--earnings-bd);   color: var(--earnings-tx); }
+
+  .legend-discovery .dot  { background: var(--discovery-bd); }
+  .legend-decision .dot   { background: var(--decision-bd); }
+  .legend-production .dot { background: var(--production-bd); }
+  .legend-release .dot    { background: var(--release-bd); }
+  .legend-growth .dot     { background: var(--growth-bd); }
+  .legend-earnings .dot   { background: var(--earnings-bd); }
+
+  .feedback {
+    margin-top: 36px;
+    padding: 20px 24px;
+    border: 1px dashed var(--muted);
+    border-radius: 12px;
+    background: #fff;
+  }
+  .feedback h3 { font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 8px; }
+  .feedback ul { list-style: none; padding: 0; }
+  .feedback li { padding: 6px 0; font-size: 14px; color: var(--ink); display: flex; gap: 10px; }
+  .feedback li .icon { font-size: 16px; }
+
+  .agents {
+    margin-top: 36px;
+    padding: 20px 24px;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    background: #fff;
+  }
+  .agents h3 { font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; }
+  .agents-grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .agent { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; font-size: 13px; }
+  .agent .letter { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; background: #1e293b; color: white; font-weight: 700; font-size: 11px; flex-shrink: 0; }
+  .agent .name { font-weight: 600; color: var(--ink); }
+  .agent .role { color: var(--muted); }
+
+  footer { text-align: center; margin-top: 48px; padding-top: 24px; border-top: 1px solid #e2e8f0; font-size: 12px; color: var(--muted); }
+  footer code { background: #f1f5f9; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+
+  @media print {
+    body { padding: 16px; max-width: none; }
+    .phase { break-inside: avoid; }
+    .agents, .feedback { break-inside: avoid; }
+  }
+  @media (max-width: 640px) {
+    body { padding: 16px 12px; }
+    header h1 { font-size: 28px; }
+    .phase { padding: 16px; }
+    .cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>SoundPulse</h1>
+  <p class="tagline">From spotting a trend to collecting royalties — the end-to-end song lifecycle</p>
+  <p class="note">A fully autonomous record label. One human (the CEO) approves a few critical decisions a week. Software does the rest. This page shows what happens to a single song from the moment an opportunity is spotted to the moment royalties land in the per-song ledger.</p>
+</header>
+
+<div class="legend">
+  <span class="legend-item legend-discovery"><span class="dot"></span>Discovery</span>
+  <span class="legend-item legend-decision"><span class="dot"></span>Decision</span>
+  <span class="legend-item legend-production"><span class="dot"></span>Production</span>
+  <span class="legend-item legend-release"><span class="dot"></span>Release</span>
+  <span class="legend-item legend-growth"><span class="dot"></span>Growth</span>
+  <span class="legend-item legend-earnings"><span class="dot"></span>Earnings</span>
+</div>
+
+<div class="flow">
+
+  <!-- PHASE 1: DISCOVERY -->
+  <section class="phase phase-discovery">
+    <div class="phase-header">
+      <span class="phase-emoji">🔍</span>
+      <span class="phase-num">PHASE 1</span>
+      <span class="phase-title">Discovery — what should we make?</span>
+    </div>
+    <p class="phase-desc">Watch the streaming charts 24/7, spot what's growing fastest, figure out why, and write a recipe for a song that fits the moment.</p>
+    <div class="cards">
+      <div class="card">
+        <div class="who">Live data</div>
+        <div class="what">Streaming feeds</div>
+        <div class="detail">Chartmetric (paid charts), Spotify catalog, Tunebat (audio features), MusicBrainz, Genius lyrics, Kworb &amp; radio.</div>
+      </div>
+      <div class="card">
+        <div class="who">Detector</div>
+        <div class="what">Breakout Engine</div>
+        <div class="detail">Flags any track growing more than 2× its genre's median. Currently spots ~1,000 breakouts per sweep.</div>
+      </div>
+      <div class="card">
+        <div class="who">Estimator</div>
+        <div class="what">Opportunity Quantifier</div>
+        <div class="detail">For each opportunity, estimates dollar revenue (low/median/high) plus a confidence score.</div>
+      </div>
+      <div class="card">
+        <div class="who">Writer</div>
+        <div class="what">Smart Prompt</div>
+        <div class="detail">Turns the data into a song recipe: BPM, key, mood, themes, voice type, length, listener target — plus this week's slang and pop-culture references.</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="arrow">↓</div>
+
+  <!-- PHASE 2: DECISION -->
+  <section class="phase phase-decision">
+    <div class="phase-header">
+      <span class="phase-emoji">✅</span>
+      <span class="phase-num">PHASE 2</span>
+      <span class="phase-title">Decision — who sings it?</span>
+    </div>
+    <p class="phase-desc">Existing artists in the roster get scored. If a strong fit exists, the song goes to them. Otherwise, three new persona alternatives are generated and the CEO picks.</p>
+    <div class="cards">
+      <div class="card">
+        <div class="who">Scorer</div>
+        <div class="what">Assignment Engine</div>
+        <div class="detail">Scores every existing artist across 10 dimensions: genre match, voice fit, lyrical fit, audience overlap, release cadence, momentum, brand stretch, cannibalization risk, diversification, and visual-brand fit.</div>
+      </div>
+      <div class="card">
+        <div class="who">Threshold</div>
+        <div class="what">0.68 reuse bar</div>
+        <div class="detail">If the best fit scores ≥ 0.68 → reuse. Otherwise, the LLM persona blender produces three new artist alternatives (A, B, C).</div>
+      </div>
+      <div class="card">
+        <div class="who">Human gate</div>
+        <div class="what">CEO via Telegram</div>
+        <div class="detail">CEO sees the proposal, scoring breakdown, and (if create-new) the three persona alternatives. Approves, rejects, or modifies. Quiet hours respected.</div>
+      </div>
+    </div>
+    <div style="text-align:center;"><span class="gate">CEO approval gate</span></div>
+  </section>
+
+  <div class="arrow">↓</div>
+
+  <!-- PHASE 3: PRODUCTION -->
+  <section class="phase phase-production">
+    <div class="phase-header">
+      <span class="phase-emoji">🎵</span>
+      <span class="phase-num">PHASE 3</span>
+      <span class="phase-title">Production — make the song</span>
+    </div>
+    <p class="phase-desc">Build the final prompt around the artist's voice, inject the per-genre song structure, send to Suno, run quality checks. Regenerate up to 3 times if QA fails.</p>
+    <div class="cards">
+      <div class="card">
+        <div class="who">Assembler</div>
+        <div class="what">Song Orchestrator</div>
+        <div class="detail">Combines artist DNA (voice timbre, accent, ad-libs, prior-song reference) + per-genre structure (e.g., K-pop dance break, drill 4-bar intro) + smart-prompt content + production constraints.</div>
+      </div>
+      <div class="card">
+        <div class="who">Generator</div>
+        <div class="what">Suno via EvoLink</div>
+        <div class="detail">Returns audio + lyrics in 30–60 seconds. ~$0.11–0.15 per attempt.</div>
+      </div>
+      <div class="card">
+        <div class="who">Inspector</div>
+        <div class="what">Audio QA</div>
+        <div class="detail">10 checks: duration, tempo match, key match, energy match, silence, clipping, loudness normalization, lyric intelligibility, vocal prominence, duplication risk vs. catalog.</div>
+      </div>
+      <div class="card">
+        <div class="who">Failure path</div>
+        <div class="what">Regenerate ≤ 3×</div>
+        <div class="detail">Up to 3 regeneration attempts; persistent failure escalates to the CEO. Songs that pass move to Release.</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="arrow">↓</div>
+
+  <!-- PHASE 4: RELEASE -->
+  <section class="phase phase-release">
+    <div class="phase-header">
+      <span class="phase-emoji">🚀</span>
+      <span class="phase-num">PHASE 4</span>
+      <span class="phase-title">Release — get on stores + register every right</span>
+    </div>
+    <p class="phase-desc">Distributor publishes to every DSP. The Submissions Agent then registers the song with every collecting body in the right order — distributor first (returns ISRC/UPC), then PROs, then mechanical, then neighboring rights, then UGC.</p>
+    <div class="cards">
+      <div class="card">
+        <div class="who">Distributor</div>
+        <div class="what">LabelGrid</div>
+        <div class="detail">Publishes to Spotify, Apple Music, YouTube Music, Amazon, Tidal, &amp; ~150 other stores. Returns ISRC + UPC identifiers.</div>
+      </div>
+      <div class="card">
+        <div class="who">Orchestrator</div>
+        <div class="what">Submissions Agent</div>
+        <div class="detail">Walks the dependency graph in order: distributor → identifier ingestion → PRO lanes → mechanical → neighboring → UGC → sync. Logs every attempt with status + external ID.</div>
+      </div>
+      <div class="card">
+        <div class="who">Performance rights</div>
+        <div class="what">ASCAP &amp; BMI</div>
+        <div class="detail">Browser-automated submission via the Fonzworth service. Returns ISWC. Setup is per-label, not per-song.</div>
+      </div>
+      <div class="card">
+        <div class="who">Mechanical rights</div>
+        <div class="what">MLC via DDEX</div>
+        <div class="detail">Real API path — XML-formatted submission, no browser needed. Free for members.</div>
+      </div>
+      <div class="card">
+        <div class="who">Neighboring rights</div>
+        <div class="what">SoundExchange</div>
+        <div class="detail">Royalties for terrestrial and satellite radio plays. Browser-automated.</div>
+      </div>
+      <div class="card">
+        <div class="who">UGC monetization</div>
+        <div class="what">YouTube Content ID</div>
+        <div class="detail">Partnership-gated. Until partnership lands, songs upload to the artist's own YouTube channel via the public Data API.</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="arrow">↓</div>
+
+  <!-- PHASE 5: GROWTH -->
+  <section class="phase phase-growth">
+    <div class="phase-header">
+      <span class="phase-emoji">📈</span>
+      <span class="phase-num">PHASE 5</span>
+      <span class="phase-title">Growth — six marketing phases, fourteen agents</span>
+    </div>
+    <p class="phase-desc">Marketing is metric-gated, not time-based. A song moves between phases when it hits the threshold the system requires. Paid spend is only unlocked after an organic winner is identified.</p>
+    <div class="cards">
+      <div class="card">
+        <div class="who">M0 → M1</div>
+        <div class="what">Asset readiness → Identity seeding</div>
+        <div class="detail">Cover art, hook clips, smart links. Then 1–2 daily posts establishing the artist as a real person. <strong>Gate to M2:</strong> 10 posts, 15%+ watch-through, 100 followers or 1K organic views.</div>
+      </div>
+      <div class="card">
+        <div class="who">M2 → M3</div>
+        <div class="what">Song anchoring → Early amplification</div>
+        <div class="detail">Hook clips, lyric overlays, indie curator pitching. Then micro-influencer seeding + small paid spend on the best clip. <strong>Gate to M4:</strong> 25K clip views, or 20 creator videos, or 5K streams in 30 days, or 15 playlist adds.</div>
+      </div>
+      <div class="card">
+        <div class="who">M4 → M5</div>
+        <div class="what">Breakout acceleration → Catalog compounding</div>
+        <div class="detail">Concentrate budget on winning creatives, push UGC prompts, editorial pitch. Then leverage the win to set up the next single. <strong>Gate to M5:</strong> 100K+ views, or 50+ creator uses, or 25K+ streams/month, or algorithmic playlist pickup.</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="arrow">↓</div>
+
+  <!-- PHASE 6: EARNINGS -->
+  <section class="phase phase-earnings">
+    <div class="phase-header">
+      <span class="phase-emoji">💰</span>
+      <span class="phase-num">PHASE 6</span>
+      <span class="phase-title">Earnings — collect, learn, reinvest</span>
+    </div>
+    <p class="phase-desc">Royalties flow back from every collector into a single per-song ledger. Outcomes feed the prediction model. Profit gets reinvested into the next cycle.</p>
+    <div class="cards">
+      <div class="card">
+        <div class="who">Inflows</div>
+        <div class="what">Royalty events</div>
+        <div class="detail">From the distributor, MLC, ASCAP, BMI, SoundExchange, YouTube. Streaming, mechanical, performance, sync, and Content ID royalties all reconciled.</div>
+      </div>
+      <div class="card">
+        <div class="who">Ledger</div>
+        <div class="what">Per-song reconciliation</div>
+        <div class="detail">Every payout is matched to the song that earned it, with currency normalization and dedup across overlapping reports.</div>
+      </div>
+      <div class="card">
+        <div class="who">Outcome</div>
+        <div class="what">30-day resolution</div>
+        <div class="detail">Each predicted breakout gets a hit / moderate / fizzle label at 30 days post-detection. This is what the ML hit predictor trains on.</div>
+      </div>
+      <div class="card">
+        <div class="who">Reinvestment</div>
+        <div class="what">40 / 30 / 20 / 10</div>
+        <div class="detail">Profit allocated: 40% generation, 30% marketing, 20% infrastructure, 10% reserve. Funds the next cycle.</div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<!-- Feedback loops -->
+<div class="feedback">
+  <h3>Two feedback loops that compound over time</h3>
+  <ul>
+    <li><span class="icon">🔁</span><div><strong>Outcomes → predictions.</strong> Every resolved breakout (hit / moderate / fizzle) feeds the ML hit predictor. Better predictions = better blueprints = better songs. Effective once ~6 weeks of resolved breakouts exist (~late spring 2026).</div></li>
+    <li><span class="icon">💵</span><div><strong>Revenue → next cycle.</strong> 40% of profit funds the next round of generations, 30% the next round of marketing. The catalog compounds.</div></li>
+  </ul>
+</div>
+
+<!-- Agent legend -->
+<div class="agents">
+  <h3>The 14 agents that do the work (one human in the loop)</h3>
+  <div class="agents-grid">
+    <div class="agent"><span class="letter">A</span><div><span class="name">Artist Identity</span> <span class="role">— keeps bios, visuals, lore aligned</span></div></div>
+    <div class="agent"><span class="letter">B</span><div><span class="name">Content Strategy</span> <span class="role">— decides what content gets made this week</span></div></div>
+    <div class="agent"><span class="letter">C</span><div><span class="name">Video Generation</span> <span class="role">— produces TikTok / Reels / Shorts clips</span></div></div>
+    <div class="agent"><span class="letter">D</span><div><span class="name">Copy / Caption</span> <span class="role">— writes captions, hashtags, hooks, replies</span></div></div>
+    <div class="agent"><span class="letter">E</span><div><span class="name">Social Posting</span> <span class="role">— publishes &amp; schedules across all platforms</span></div></div>
+    <div class="agent"><span class="letter">F</span><div><span class="name">Community</span> <span class="role">— replies to comments in artist voice</span></div></div>
+    <div class="agent"><span class="letter">G</span><div><span class="name">Playlist Outreach</span> <span class="role">— pitches independent curators</span></div></div>
+    <div class="agent"><span class="letter">H</span><div><span class="name">Micro-Influencer Seeding</span> <span class="role">— gets small creators to use the song</span></div></div>
+    <div class="agent"><span class="letter">I</span><div><span class="name">UGC Trigger</span> <span class="role">— designs reusable formats once usage exists</span></div></div>
+    <div class="agent"><span class="letter">J</span><div><span class="name">Paid Growth</span> <span class="role">— amplifies only proven creatives</span></div></div>
+    <div class="agent"><span class="letter">K</span><div><span class="name">Analytics</span> <span class="role">— the brain; computes phase gates &amp; identifies winners</span></div></div>
+    <div class="agent"><span class="letter">L</span><div><span class="name">Editorial / PR</span> <span class="role">— pitches higher-trust outlets after proof points</span></div></div>
+    <div class="agent"><span class="letter">M</span><div><span class="name">CEO Action</span> <span class="role">— escalates to CEO for approvals</span></div></div>
+    <div class="agent"><span class="letter">N</span><div><span class="name">Submissions</span> <span class="role">— orchestrates DSP / PRO / mechanical / sync submissions</span></div></div>
+  </div>
+</div>
+
+<footer>
+  <p>This is a fork of <code>SoundPulse_PRD_v3.md</code>. Source of truth on schemas, formulas, and load-bearing details lives in the master PRD + <code>schema.md</code>. This page drifts as the master moves.</p>
+</footer>
+
+</body>
+</html>

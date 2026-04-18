@@ -119,3 +119,7 @@ can you incorporate soundpulse_artist_release_marketing_spec in PRD_v3 and conen
 ## 2026-04-18 09:00:00
 
 can you assemble a version of the PRD which is fully integrated (so it dowsnt have updates sequentially, but presents the latest view in the core text, which means it needs to absorbe all of the upgrades) - streamlined and readable by a non technical person. save that as Ceasar_PRD_streamlined. This is NOT the new master, it's just a fork of the main PRD
+
+## 2026-04-18 09:30:00
+
+can this contain a full diagram of the e2d process for the creation and marketing of a song, with the main pieces (services, etc) expressed in layman terms. or build it in html if easier

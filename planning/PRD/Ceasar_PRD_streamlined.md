@@ -32,7 +32,97 @@ The economics work because each song costs roughly **a dollar** to produce end-t
 
 ---
 
-## 3. How a song happens, end to end
+## 3. The end-to-end map
+
+For a richer visual, open the companion file `Ceasar_PRD_streamlined_diagram.html` in any browser — it's a single self-contained page (no installs, no internet). The mermaid diagram below renders on GitHub and most modern markdown viewers as a flowchart fallback.
+
+```mermaid
+flowchart TD
+    classDef discovery fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef decision fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef production fill:#ede9fe,stroke:#6d28d9,color:#3730a3
+    classDef release fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef growth fill:#fce7f3,stroke:#be185d,color:#831843
+    classDef earnings fill:#fef9c3,stroke:#a16207,color:#713f12
+    classDef gate fill:#fff,stroke:#000,color:#000
+
+    Start([What's about to win this week?])
+
+    subgraph DISCOVERY ["🔍 DISCOVERY — what should we make?"]
+        D1[Live streaming data<br/>Chartmetric + Spotify + Tunebat audio features]
+        D2[Breakout Engine<br/>spots tracks growing 2× faster than peers]
+        D3[Opportunity Quantifier<br/>estimates $ revenue with confidence band]
+        D4[Smart Prompt<br/>turns the opportunity into a song recipe]
+    end
+
+    subgraph DECISION ["✅ DECISION — who sings it?"]
+        DC1[Assignment Engine<br/>scores existing artists across 10 dimensions]
+        DC2{Best fit ≥ 0.68?}
+        DC3[Assign to existing artist]
+        DC4[Generate 3 new persona alternatives]
+        CEO[👤 CEO approves via Telegram]
+    end
+
+    subgraph PRODUCTION ["🎵 PRODUCTION — make the song"]
+        P1[Song Orchestrator<br/>assembles prompt:<br/>artist voice + per-genre structure + cultural refs]
+        P2[Suno via EvoLink<br/>generates audio + lyrics]
+        P3[Audio QA — 10 checks<br/>tempo, key, energy, silence, clipping, duplicate risk...]
+        P4{Passes?}
+    end
+
+    subgraph RELEASE ["🚀 RELEASE — get on stores + register rights"]
+        R1[LabelGrid distributor<br/>→ Spotify, Apple, YouTube, Amazon, Tidal]
+        R2[Submissions Agent<br/>orchestrates rights pipeline in dependency order]
+        R3[ASCAP / BMI<br/>performance rights via Fonzworth browser service]
+        R4[MLC<br/>mechanical rights via DDEX XML]
+        R5[SoundExchange<br/>neighboring rights]
+        R6[YouTube Content ID<br/>partnership-gated]
+    end
+
+    subgraph GROWTH ["📈 GROWTH — 14 marketing agents, M0 to M5"]
+        G1[M0 Asset readiness → M1 Identity seeding<br/>Artist Identity + Content Strategy + Video Generation + Copy + Social Posting]
+        G2[M2 Song anchoring → M3 Early amplification<br/>Playlist Outreach + Micro-Influencer Seeding + Community + Analytics]
+        G3[M4 Breakout acceleration → M5 Catalog compounding<br/>Paid Growth + Editorial / PR<br/>metric-gated; paid spend only after organic winner found]
+    end
+
+    subgraph EARNINGS ["💰 EARNINGS — collect, learn, reinvest"]
+        E1[Royalty events from every collector]
+        E2[Per-song reconciliation ledger]
+        E3[Outcome resolution at 30 days<br/>hit / moderate / fizzle]
+        E4[Reinvest<br/>40% generation / 30% marketing / 20% infra / 10% reserve]
+    end
+
+    Start --> D1 --> D2 --> D3 --> D4 --> DC1
+    DC1 --> DC2
+    DC2 -->|reuse| DC3
+    DC2 -->|create new| DC4
+    DC3 --> CEO
+    DC4 --> CEO
+    CEO -->|approves| P1
+    P1 --> P2 --> P3 --> P4
+    P4 -->|fail — up to 3 retries, then escalate| P2
+    P4 -->|pass| R1 --> R2
+    R2 --> R3
+    R2 --> R4
+    R2 --> R5
+    R2 --> R6
+    R6 --> G1 --> G2 --> G3 --> E1 --> E2 --> E3 --> E4
+    E3 -.improves predictions.-> D2
+    E4 -.funds next cycle.-> Start
+
+    class D1,D2,D3,D4 discovery
+    class DC1,DC3,DC4,CEO decision
+    class DC2 gate
+    class P1,P2,P3 production
+    class P4 gate
+    class R1,R2,R3,R4,R5,R6 release
+    class G1,G2,G3 growth
+    class E1,E2,E3,E4 earnings
+```
+
+**The two dotted feedback arrows are why the system gets better over time:** outcomes from each song improve the prediction model that picks the next opportunity, and reinvested revenue funds the next batch of generations.
+
+## 4. How a song happens, end to end
 
 This is the loop the system runs continuously:
 
