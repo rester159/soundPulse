@@ -123,3 +123,7 @@ can you assemble a version of the PRD which is fully integrated (so it dowsnt ha
 ## 2026-04-18 09:30:00
 
 can this contain a full diagram of the e2d process for the creation and marketing of a song, with the main pieces (services, etc) expressed in layman terms. or build it in html if easier
+
+## 2026-04-18 10:00:00
+
+can you write the streamlined PRD as a .doc document?

@@ -122,9 +122,9 @@ flowchart TD
 
 **The two dotted feedback arrows are why the system gets better over time:** outcomes from each song improve the prediction model that picks the next opportunity, and reinvested revenue funds the next batch of generations.
 
-## 4. How a song happens, end to end
+## 4. The lifecycle in detail
 
-This is the loop the system runs continuously:
+This is the loop the system runs continuously, expanded from the diagram above:
 
 **1. Detect what's about to win.** A "breakout engine" watches the streaming charts and flags tracks that are growing more than twice as fast as their genre's median. It then looks at what those breakouts have in common — tempo, mood, lyrical theme, the cultural references they invoke — and surfaces "opportunity zones": specific sounds where demand is climbing but supply is thin.
 
@@ -152,7 +152,7 @@ This is the loop the system runs continuously:
 
 ---
 
-## 4. The artists
+## 5. The artists
 
 Each AI artist is a persistent identity that grows a discography over time, not a one-off generation. That matters because:
 
@@ -173,7 +173,7 @@ Multiple artists can occupy the same genre. The system explicitly does not fall 
 
 ---
 
-## 5. The opportunity engine
+## 6. The opportunity engine
 
 Every other piece of SoundPulse depends on this one's accuracy. It runs in seven layers:
 
@@ -189,7 +189,7 @@ Per-genre song structure is part of this too: every genre has an approved skelet
 
 ---
 
-## 6. The agents
+## 7. The agents
 
 Fourteen agents, one mandatory human (the CEO). Each agent has a defined purpose, a list of tools it can call, and clear handoffs to other agents. The CEO can grant or revoke any tool from any agent in the Settings UI without redeploying anything.
 
@@ -214,7 +214,7 @@ The agents are not tightly coupled. They communicate by writing to shared state 
 
 ---
 
-## 7. The marketing motion
+## 8. The marketing motion
 
 Marketing is metric-gated. A song doesn't move from "phase M1" to "phase M2" because a week passed — it moves because it hit the threshold the system requires at that stage. This avoids spending paid budget on songs that haven't earned it organically.
 
@@ -231,7 +231,7 @@ One real risk worth naming: SubmitHub claims **98.5% accuracy at detecting AI-ge
 
 ---
 
-## 8. The rights pipeline
+## 9. The rights pipeline
 
 Songs only earn money if every right is registered with every collecting body. The order matters: we need the distributor to return ISRC and UPC identifiers before any other body will accept a registration. The full sequence:
 
@@ -246,7 +246,7 @@ Every submission is logged with status (queued / submitted / accepted / rejected
 
 ---
 
-## 9. Where we are right now
+## 10. Where we are right now
 
 **Done and running in production:**
 
@@ -283,7 +283,7 @@ Every submission is logged with status (queued / submitted / accepted / rejected
 
 ---
 
-## 10. The unit economics
+## 11. The unit economics
 
 Per-song:
 
@@ -305,7 +305,7 @@ Portfolio math: 500 songs × 3,000 streams/month average × $0.005 blended payou
 
 ---
 
-## 11. The non-negotiables
+## 12. The non-negotiables
 
 These are the rules SoundPulse never bends:
 
@@ -320,7 +320,7 @@ These are the rules SoundPulse never bends:
 
 ---
 
-## 12. Risks worth naming
+## 13. Risks worth naming
 
 - **Suno commercial rights are an evolving legal area.** A perpetual commercial license exists via the Warner deal, but the US Copyright Office does not currently recognize raw AI-generated audio as copyrightable. We accept the legal risk and document it in artist contracts.
 - **Three platforms (TikTok, Instagram, Facebook) require app-review unlock for auto-publish.** Until that's done, those channels post via sandbox/draft and the operator approves.
@@ -330,7 +330,7 @@ These are the rules SoundPulse never bends:
 
 ---
 
-## 13. What success looks like
+## 14. What success looks like
 
 In six months: 200 songs in catalog, $7,500–10,000/month in tracked royalty revenue, three live distribution lanes (DSP, ASCAP, MLC), three live marketing channels (TikTok, Instagram, YouTube), the ML hit predictor producing scored opportunities. The CEO touches the system roughly twice a day to approve gates.
 
@@ -340,7 +340,7 @@ In twenty-four months: a real label catalog earning real money, with a measurabl
 
 ---
 
-## 14. Where to go for detail
+## 15. Where to go for detail
 
 This document is the narrative version. For implementation specifics:
 

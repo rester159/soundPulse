@@ -651,3 +651,15 @@ User asked for a diagram of the song creation/marketing lifecycle in layman term
 2. **Standalone HTML companion at Ceasar_PRD_streamlined_diagram.html.** Single self-contained file (no external CSS/JS/CDN — works offline in any browser). 6 color-coded phase sections with cards for each sub-piece (named in layman terms: 'Inspector' for Audio QA, 'Distributor' for LabelGrid, 'Brain' for Analytics Agent, etc.). Each card shows WHO/WHAT/DETAIL. Includes feedback-loop callout box and agent legend with all 14 agents (A-N). Print-friendly with @media print rules; mobile-responsive at 640px breakpoint.
 
 PRD §3 now points to the HTML file: "For a richer visual, open the companion file Ceasar_PRD_streamlined_diagram.html in any browser — it's a single self-contained page (no installs, no internet)."
+
+## 2026-04-18 15:02:30 — Created Ceasar_PRD_streamlined.docx + converter script
+
+Pandoc not installed; used python-docx instead (pip install --user python-docx, pure Python, low-risk).
+
+Wrote a one-shot converter at scripts/md_to_docx_streamlined_prd.py — reads the streamlined PRD, emits the .docx. Hand-rolled markdown parser handles H1/H2/H3 headings, paragraphs, bold/italic/code/link inline runs, ordered + unordered lists, simple tables (uses Light Grid Accent 1 style), code blocks, blockquotes. Mermaid blocks are intentionally skipped (Word can't render them) — replaced with a small italic note pointing to the HTML companion for the visual.
+
+Output: planning/PRD/Ceasar_PRD_streamlined.docx (47KB, 147 paragraphs, 14 numbered headings, 1 table for the 14-agent listing). Includes a centered title block + diagram-callout note at the top.
+
+Caught a numbering duplicate when verifying — when I added the diagram as new §3, the rest of the sections weren't renumbered. Fixed: renumbered §4-§15. Regenerated docx.
+
+Re-runnable: python -m scripts.md_to_docx_streamlined_prd whenever the source MD changes.
