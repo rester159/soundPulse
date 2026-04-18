@@ -127,3 +127,7 @@ can this contain a full diagram of the e2d process for the creation and marketin
 ## 2026-04-18 10:00:00
 
 can you write the streamlined PRD as a .doc document?
+
+## 2026-04-18 10:30:00
+
+add an edit button on each artist page - going back to the editing screen that appears when creating an artist manually. Everything needs to be prepopulated

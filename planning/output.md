@@ -663,3 +663,13 @@ Output: planning/PRD/Ceasar_PRD_streamlined.docx (47KB, 147 paragraphs, 14 numbe
 Caught a numbering duplicate when verifying — when I added the diagram as new §3, the rest of the sections weren't renumbered. Fixed: renumbered §4-§15. Regenerated docx.
 
 Re-runnable: python -m scripts.md_to_docx_streamlined_prd whenever the source MD changes.
+
+## 2026-04-18 16:58:12 — Edit button on artist cards
+
+Backend: added PATCH /api/v1/admin/artists/{artist_id} in api/routers/admin.py. Partial update — only fields present in body get written. Whitelisted to scalar/array/JSONB field families used by the manual-create form. Validates edge_profile and content_rating against allowed sets. Refuses to clear stage_name/primary_genre (identity fields) or voice_dna/visual_dna (NOT NULL on the model). Returns updated_at + fields_updated list. Portrait regen NOT triggered — operator uses the dedicated POST /admin/artists/{id}/regenerate-portrait when wanted.
+
+Frontend hook: useUpdateArtistManual in useSoundPulse.js — mirrors useCreateArtistManual signature but PATCHes.
+
+Modal refactor: AddArtistModal accepts existingArtist prop. When provided, all 30+ form fields prefill from voice_dna / visual_dna / fashion_dna / lyrical_dna / persona_dna blobs (with defensive null-handling on JSONB sub-keys + array-to-CSV conversion for textareas). Header switches to 'Edit artist — {stage_name}'. Submit button switches to 'Save changes' icon Save. Portrait checkbox hidden in edit mode. Success banner says 'Saved' instead of 'Created' and lists fields_updated.
+
+Edit buttons in two places on ArtistCard: (1) compact text+icon button in collapsed header row right of song count, (2) richer button in expanded panel grouped with Regen-portrait button on portrait overlay. Both stopPropagation so opening the modal doesn't toggle the card.

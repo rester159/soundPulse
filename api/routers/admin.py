@@ -4755,6 +4755,155 @@ async def create_artist_manual(
     }
 
 
+@router.patch("/api/v1/admin/artists/{artist_id}")
+async def update_artist_manual(
+    artist_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """
+    Edit an existing AI artist via the same field shape used by
+    create-manual. Partial update — only fields present in the body
+    are written. Send a key as null to explicitly clear it.
+
+    Accepted fields (all optional):
+      stage_name, legal_name, primary_genre,
+      adjacent_genres, influences, anti_influences, audience_tags,
+      age, gender_presentation, ethnicity_heritage,
+      edge_profile, content_rating,
+      voice_dna, visual_dna, fashion_dna, lyrical_dna,
+      persona_dna, social_dna
+
+    Portrait regeneration is intentionally NOT triggered here — operators
+    use the dedicated POST /admin/artists/{id}/regenerate-portrait
+    endpoint when they want a new image. Editing the artist's text
+    fields shouldn't burn $0.17 + 15s per save.
+    """
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+
+    try:
+        aid = _uuid.UUID(artist_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid artist_id (must be UUID)")
+
+    artist = (await db.execute(
+        select(AIArtist).where(AIArtist.artist_id == aid)
+    )).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(404, detail="artist not found")
+
+    # Whitelist of fields the manual form / edit modal owns. Stage name,
+    # legal name, and primary genre stay required-non-empty when present
+    # so an accidental empty submit can't break the row's identity.
+    SCALAR_FIELDS = {
+        "stage_name", "legal_name", "primary_genre",
+        "age", "gender_presentation", "ethnicity_heritage",
+        "edge_profile", "content_rating",
+    }
+    ARRAY_FIELDS = {
+        "adjacent_genres", "influences", "anti_influences", "audience_tags",
+    }
+    JSONB_FIELDS = {
+        "voice_dna", "visual_dna", "fashion_dna",
+        "lyrical_dna", "persona_dna", "social_dna",
+    }
+
+    REQUIRED_NON_EMPTY = {"stage_name", "primary_genre"}
+    EDGE_VALID = {"clean_edge", "flirty_edge", "savage_edge"}
+    RATING_VALID = {"clean", "mild", "explicit"}
+
+    fields_set: list[str] = []
+
+    for key in SCALAR_FIELDS:
+        if key not in body:
+            continue
+        value = body[key]
+        if key == "age":
+            if value is None or value == "":
+                artist.age = None
+            else:
+                try:
+                    artist.age = int(value)
+                except (TypeError, ValueError):
+                    raise HTTPException(400, detail=f"age must be an integer, got {value!r}")
+            fields_set.append(key)
+            continue
+        # String fields
+        if value is None:
+            if key in REQUIRED_NON_EMPTY:
+                raise HTTPException(400, detail=f"{key} cannot be cleared")
+            setattr(artist, key, None)
+            fields_set.append(key)
+            continue
+        s = str(value).strip()
+        if not s and key in REQUIRED_NON_EMPTY:
+            raise HTTPException(400, detail=f"{key} cannot be empty")
+        if key == "edge_profile" and s and s not in EDGE_VALID:
+            raise HTTPException(
+                400, detail=f"edge_profile must be one of {sorted(EDGE_VALID)}",
+            )
+        if key == "content_rating" and s and s not in RATING_VALID:
+            raise HTTPException(
+                400, detail=f"content_rating must be one of {sorted(RATING_VALID)}",
+            )
+        setattr(artist, key, s if s else None)
+        fields_set.append(key)
+
+    for key in ARRAY_FIELDS:
+        if key not in body:
+            continue
+        value = body[key]
+        if value is None:
+            setattr(artist, key, None)
+        elif isinstance(value, list):
+            cleaned = [str(v).strip() for v in value if str(v).strip()]
+            setattr(artist, key, cleaned or None)
+        else:
+            raise HTTPException(400, detail=f"{key} must be an array or null")
+        fields_set.append(key)
+
+    for key in JSONB_FIELDS:
+        if key not in body:
+            continue
+        value = body[key]
+        if value is None:
+            # voice_dna and visual_dna are NOT NULL on the model; refuse
+            # to clear them here so a partial save doesn't break a row
+            # the orchestrator depends on.
+            if key in ("voice_dna", "visual_dna"):
+                raise HTTPException(400, detail=f"{key} cannot be cleared (NOT NULL on the row)")
+            setattr(artist, key, None)
+        elif isinstance(value, dict):
+            setattr(artist, key, value)
+        else:
+            raise HTTPException(400, detail=f"{key} must be an object or null")
+        fields_set.append(key)
+
+    if not fields_set:
+        raise HTTPException(400, detail="no editable fields in body")
+
+    try:
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        # Most likely a stage_name uniqueness collision
+        raise HTTPException(409, detail=f"update failed: {exc}")
+    await db.refresh(artist)
+
+    return {
+        "artist_id": str(artist.artist_id),
+        "stage_name": artist.stage_name,
+        "legal_name": artist.legal_name,
+        "primary_genre": artist.primary_genre,
+        "edge_profile": artist.edge_profile,
+        "fields_updated": sorted(set(fields_set)),
+        "updated_at": artist.updated_at.isoformat() if artist.updated_at else None,
+    }
+
+
+
 @router.post("/api/v1/admin/artists/create-from-persona")
 async def create_artist_from_persona(
     body: ArtistCreateFromPersonaRequest,

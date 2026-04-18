@@ -559,6 +559,16 @@ export function useCreateArtistManual() {
   })
 }
 
+export function useUpdateArtistManual() {
+  // Partial update — only fields present in body get written. Mirrors
+  // the create-manual body shape so the same form component can drive
+  // both create + edit modes.
+  return useMutation({
+    mutationFn: ({ artistId, body }) =>
+      makeRequest('PATCH', `/admin/artists/${artistId}`, {}, body),
+  })
+}
+
 // -------- Submissions (task #86..#92) --------
 
 export function useSubmissionTargets() {

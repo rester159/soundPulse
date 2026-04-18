@@ -9,8 +9,8 @@ import {
   useAIArtists, useSongs, useCreateArtistFromDescription,
   useRegenerateArtistPortrait, useArtistReferenceSheet,
   useGenerateReferenceSheet, usePreviewPersona,
-  useCreateArtistFromPersona, useCreateArtistManual, getBaseUrl,
-  usePatchArtistStructure,
+  useCreateArtistFromPersona, useCreateArtistManual, useUpdateArtistManual,
+  getBaseUrl, usePatchArtistStructure,
 } from '../hooks/useSoundPulse'
 import GenreStructureEditor, { structureChain } from '../components/GenreStructureEditor'
 
@@ -190,11 +190,17 @@ function ArtistSongsList({ artistId }) {
 function ArtistCard({ artist, expanded, onToggle }) {
   const regenerate = useRegenerateArtistPortrait()
   const qc = useQueryClient()
+  const [editing, setEditing] = useState(false)
 
   const handleRegenerate = async (e) => {
     e.stopPropagation()
     await regenerate.mutateAsync({ artistId: artist.artist_id })
     qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
+  }
+
+  const handleEdit = (e) => {
+    e.stopPropagation()
+    setEditing(true)
   }
 
   const approvedBadge = artist.ceo_approved ? (
@@ -243,8 +249,26 @@ function ArtistCard({ artist, expanded, onToggle }) {
           <div className="text-xs font-semibold text-zinc-200 tabular-nums">{artist.song_count} {artist.song_count === 1 ? 'song' : 'songs'}</div>
           <div className="text-[9px] text-zinc-600">artist_id {artist.artist_id.slice(0, 8)}</div>
         </div>
+        <button
+          onClick={handleEdit}
+          title="Edit artist"
+          className="flex items-center gap-1 px-2 py-1 text-zinc-400 hover:text-violet-300 hover:bg-violet-500/10 rounded text-xs flex-shrink-0"
+        >
+          <Edit3 size={12} /> Edit
+        </button>
         {expanded ? <ChevronUp size={14} className="text-zinc-500" /> : <ChevronDown size={14} className="text-zinc-500" />}
       </button>
+
+      {editing && (
+        <AddArtistModal
+          existingArtist={artist}
+          onClose={() => setEditing(false)}
+          onCreated={() => {
+            qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
+            setEditing(false)
+          }}
+        />
+      )}
 
       {expanded && (
         <div className="border-t border-zinc-800 p-4 space-y-3 bg-zinc-950/40">
@@ -255,19 +279,28 @@ function ArtistCard({ artist, expanded, onToggle }) {
                 alt={artist.stage_name}
                 className="w-64 h-64 rounded-lg object-cover border border-zinc-700"
               />
-              <button
-                onClick={handleRegenerate}
-                disabled={regenerate.isPending}
-                className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 bg-zinc-900/80 hover:bg-violet-600/40 border border-zinc-700 text-zinc-300 text-[10px] rounded backdrop-blur transition-colors disabled:opacity-40"
-                title="Regenerate portrait"
-              >
-                {regenerate.isPending ? (
-                  <Loader2 size={11} className="animate-spin" />
-                ) : (
-                  <Camera size={11} />
-                )}
-                Regen
-              </button>
+              <div className="absolute top-2 right-2 flex items-center gap-1">
+                <button
+                  onClick={handleEdit}
+                  className="flex items-center gap-1 px-2 py-1 bg-zinc-900/80 hover:bg-violet-600/40 border border-zinc-700 text-zinc-300 text-[10px] rounded backdrop-blur transition-colors"
+                  title="Edit artist details"
+                >
+                  <Edit3 size={11} /> Edit
+                </button>
+                <button
+                  onClick={handleRegenerate}
+                  disabled={regenerate.isPending}
+                  className="flex items-center gap-1 px-2 py-1 bg-zinc-900/80 hover:bg-violet-600/40 border border-zinc-700 text-zinc-300 text-[10px] rounded backdrop-blur transition-colors disabled:opacity-40"
+                  title="Regenerate portrait"
+                >
+                  {regenerate.isPending ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <Camera size={11} />
+                  )}
+                  Regen
+                </button>
+              </div>
             </div>
           )}
           {/* Audience tags */}
@@ -676,59 +709,85 @@ function csvSplit(s) {
   return String(s).split(',').map(x => x.trim()).filter(Boolean)
 }
 
-function AddArtistModal({ onClose, onCreated }) {
+// Both create + edit flows live in this modal. When `existingArtist` is
+// passed, the form prefills from that artist's row + submits via PATCH;
+// otherwise it's the original create-manual flow. The form fields are
+// identical in both modes — that's the point of having one component.
+function AddArtistModal({ onClose, onCreated, existingArtist = null }) {
   const create = useCreateArtistManual()
+  const update = useUpdateArtistManual()
   const qc = useQueryClient()
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
 
+  const isEdit = Boolean(existingArtist)
+
+  // Helpers to read prefill from a JSONB DNA blob without crashing on
+  // null subfields. Arrays come back as comma-joined strings for the
+  // textarea inputs (csvSplit is the inverse on submit).
+  const arr = (v) => (Array.isArray(v) ? v.join(', ') : (v || ''))
+  const dnaStr = (blob, key) => (blob && typeof blob === 'object' ? (blob[key] ?? '') : '')
+  const dnaArr = (blob, key) => arr(blob?.[key])
+
+  const v = existingArtist?.voice_dna || {}
+  const vis = existingArtist?.visual_dna || {}
+  const fa = existingArtist?.fashion_dna || {}
+  const ly = existingArtist?.lyrical_dna || {}
+  const pe = existingArtist?.persona_dna || {}
+
   // Basics
-  const [stageName, setStageName] = useState('')
-  const [legalName, setLegalName] = useState('')
-  const [primaryGenre, setPrimaryGenre] = useState('')
-  const [adjacentGenres, setAdjacentGenres] = useState('')
-  const [age, setAge] = useState('')
-  const [gender, setGender] = useState('')
-  const [ethnicity, setEthnicity] = useState('')
-  const [edgeProfile, setEdgeProfile] = useState('flirty_edge')
-  const [contentRating, setContentRating] = useState('mild')
+  const [stageName, setStageName] = useState(existingArtist?.stage_name || '')
+  const [legalName, setLegalName] = useState(existingArtist?.legal_name || '')
+  const [primaryGenre, setPrimaryGenre] = useState(existingArtist?.primary_genre || '')
+  const [adjacentGenres, setAdjacentGenres] = useState(arr(existingArtist?.adjacent_genres))
+  const [age, setAge] = useState(existingArtist?.age != null ? String(existingArtist.age) : '')
+  const [gender, setGender] = useState(existingArtist?.gender_presentation || '')
+  const [ethnicity, setEthnicity] = useState(existingArtist?.ethnicity_heritage || '')
+  const [edgeProfile, setEdgeProfile] = useState(existingArtist?.edge_profile || 'flirty_edge')
+  const [contentRating, setContentRating] = useState(existingArtist?.content_rating || 'mild')
 
   // Influences / audience
-  const [influences, setInfluences] = useState('')
-  const [antiInfluences, setAntiInfluences] = useState('')
-  const [audienceTags, setAudienceTags] = useState('')
+  const [influences, setInfluences] = useState(arr(existingArtist?.influences))
+  const [antiInfluences, setAntiInfluences] = useState(arr(existingArtist?.anti_influences))
+  const [audienceTags, setAudienceTags] = useState(arr(existingArtist?.audience_tags))
 
   // Voice DNA
-  const [voiceTimbre, setVoiceTimbre] = useState('')
-  const [voiceRange, setVoiceRange] = useState('')
-  const [voiceDelivery, setVoiceDelivery] = useState('')
-  const [voiceAccent, setVoiceAccent] = useState('')
-  const [voiceAutotune, setVoiceAutotune] = useState('light')
+  const [voiceTimbre, setVoiceTimbre] = useState(dnaStr(v, 'timbre_core'))
+  const [voiceRange, setVoiceRange] = useState(dnaStr(v, 'range_estimate'))
+  const [voiceDelivery, setVoiceDelivery] = useState(dnaArr(v, 'delivery_style'))
+  const [voiceAccent, setVoiceAccent] = useState(dnaStr(v, 'accent_pronunciation'))
+  const [voiceAutotune, setVoiceAutotune] = useState(dnaStr(v, 'autotune_profile') || 'light')
 
   // Visual DNA
-  const [faceDescription, setFaceDescription] = useState('')
-  const [bodyPresentation, setBodyPresentation] = useState('')
-  const [hairSignature, setHairSignature] = useState('')
-  const [colorPalette, setColorPalette] = useState('')
-  const [artDirection, setArtDirection] = useState('')
-  const [fashionStyleSummary, setFashionStyleSummary] = useState('')
+  const [faceDescription, setFaceDescription] = useState(dnaStr(vis, 'face_description'))
+  const [bodyPresentation, setBodyPresentation] = useState(dnaStr(vis, 'body_presentation'))
+  const [hairSignature, setHairSignature] = useState(dnaStr(vis, 'hair_signature'))
+  const [colorPalette, setColorPalette] = useState(dnaArr(vis, 'color_palette'))
+  const [artDirection, setArtDirection] = useState(dnaStr(vis, 'art_direction'))
+  const [fashionStyleSummary, setFashionStyleSummary] = useState(dnaStr(vis, 'fashion_style_summary'))
 
   // Fashion DNA
-  const [coreGarments, setCoreGarments] = useState('')
-  const [fabricInspirations, setFabricInspirations] = useState('')
-  const [silhouette, setSilhouette] = useState('')
-  const [accessories, setAccessories] = useState('')
-  const [footwear, setFootwear] = useState('')
-  const [stylingMood, setStylingMood] = useState('')
+  const [coreGarments, setCoreGarments] = useState(dnaArr(fa, 'core_garments'))
+  const [fabricInspirations, setFabricInspirations] = useState(dnaArr(fa, 'fabric_inspirations'))
+  const [silhouette, setSilhouette] = useState(dnaStr(fa, 'silhouette'))
+  const [accessories, setAccessories] = useState(dnaArr(fa, 'accessories'))
+  const [footwear, setFootwear] = useState(dnaArr(fa, 'footwear'))
+  const [stylingMood, setStylingMood] = useState(dnaStr(fa, 'styling_mood'))
 
   // Lyrical / persona
-  const [recurringThemes, setRecurringThemes] = useState('')
-  const [vocabLevel, setVocabLevel] = useState('conversational')
-  const [language, setLanguage] = useState('en')
-  const [backstory, setBackstory] = useState('')
-  const [personalityTraits, setPersonalityTraits] = useState('')
+  const [recurringThemes, setRecurringThemes] = useState(dnaArr(ly, 'recurring_themes'))
+  const [vocabLevel, setVocabLevel] = useState(dnaStr(ly, 'vocab_level') || 'conversational')
+  const [language, setLanguage] = useState(dnaStr(ly, 'language') || 'en')
+  const [backstory, setBackstory] = useState(dnaStr(pe, 'backstory'))
+  const [personalityTraits, setPersonalityTraits] = useState(dnaArr(pe, 'personality_traits'))
 
-  const [generatePortrait, setGeneratePortrait] = useState(true)
+  // Portrait generation default differs by mode:
+  //   create → ON (most users want a portrait alongside the new row)
+  //   edit   → OFF (don't burn $0.17 + 15s on every text edit; operator
+  //            uses the dedicated Regen button when they want a new one)
+  const [generatePortrait, setGeneratePortrait] = useState(!isEdit)
+
+  const mut = isEdit ? update : create
 
   const handleSubmit = async () => {
     setError(null)
@@ -782,16 +841,20 @@ function AddArtistModal({ onClose, onCreated }) {
         backstory,
         personality_traits: csvSplit(personalityTraits),
       },
-      generate_portrait: generatePortrait,
-      ceo_approved: true,
+    }
+    if (!isEdit) {
+      body.generate_portrait = generatePortrait
+      body.ceo_approved = true
     }
     try {
-      const res = await create.mutateAsync({ body })
+      const res = isEdit
+        ? await update.mutateAsync({ artistId: existingArtist.artist_id, body })
+        : await create.mutateAsync({ body })
       setResult(res?.data)
       qc.invalidateQueries({ queryKey: ['admin', 'ai-artists'] })
       setTimeout(() => { onCreated?.(); onClose?.() }, 1200)
     } catch (e) {
-      setError(e?.response?.data?.detail || e?.message || 'creation failed')
+      setError(e?.response?.data?.detail || e?.message || (isEdit ? 'update failed' : 'creation failed'))
     }
   }
 
@@ -836,7 +899,7 @@ function AddArtistModal({ onClose, onCreated }) {
         <div className="flex items-center justify-between p-4 border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10">
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
             <Edit3 size={14} className="text-violet-400" />
-            Add artist manually
+            {isEdit ? `Edit artist — ${existingArtist.stage_name}` : 'Add artist manually'}
           </div>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300">
             <X size={16} />
@@ -937,18 +1000,21 @@ function AddArtistModal({ onClose, onCreated }) {
             </div>
           </section>
 
-          {/* Portrait */}
-          <section>
-            <label className="flex items-center gap-2 text-xs text-zinc-400">
-              <input
-                type="checkbox"
-                checked={generatePortrait}
-                onChange={(e) => setGeneratePortrait(e.target.checked)}
-                className="accent-violet-500"
-              />
-              Generate portrait via gpt-image-1 after create (~$0.17, ~15s)
-            </label>
-          </section>
+          {/* Portrait — only on create. On edit, the dedicated Regen
+              button on the portrait itself handles regeneration. */}
+          {!isEdit && (
+            <section>
+              <label className="flex items-center gap-2 text-xs text-zinc-400">
+                <input
+                  type="checkbox"
+                  checked={generatePortrait}
+                  onChange={(e) => setGeneratePortrait(e.target.checked)}
+                  className="accent-violet-500"
+                />
+                Generate portrait via gpt-image-1 after create (~$0.17, ~15s)
+              </label>
+            </section>
+          )}
 
           {error && (
             <div className="bg-rose-500/10 border border-rose-500/30 rounded p-2 text-xs text-rose-300 flex items-center gap-2">
@@ -958,10 +1024,13 @@ function AddArtistModal({ onClose, onCreated }) {
 
           {result && (
             <div className="bg-emerald-500/10 border border-emerald-500/30 rounded p-3 text-xs text-emerald-300 space-y-1">
-              <div className="flex items-center gap-2"><CheckCircle2 size={14} /> Created {result.stage_name}</div>
+              <div className="flex items-center gap-2"><CheckCircle2 size={14} /> {isEdit ? 'Saved' : 'Created'} {result.stage_name}</div>
               <div className="text-[10px] text-emerald-400/70 font-mono">artist_id: {result.artist_id}</div>
-              {result.portrait && <div className="text-[10px]">portrait: {result.portrait.asset_id?.slice(0, 8)} ({Math.round((result.portrait.bytes || 0) / 1024)} KB)</div>}
-              {result.portrait_error && <div className="text-[10px] text-amber-400">portrait failed: {result.portrait_error}</div>}
+              {!isEdit && result.portrait && <div className="text-[10px]">portrait: {result.portrait.asset_id?.slice(0, 8)} ({Math.round((result.portrait.bytes || 0) / 1024)} KB)</div>}
+              {!isEdit && result.portrait_error && <div className="text-[10px] text-amber-400">portrait failed: {result.portrait_error}</div>}
+              {isEdit && Array.isArray(result.fields_updated) && (
+                <div className="text-[10px] text-emerald-400/70">updated: {result.fields_updated.join(', ')}</div>
+              )}
             </div>
           )}
         </div>
@@ -975,11 +1044,15 @@ function AddArtistModal({ onClose, onCreated }) {
           </button>
           <button
             onClick={handleSubmit}
-            disabled={create.isPending || !stageName.trim() || !primaryGenre.trim()}
+            disabled={mut.isPending || !stageName.trim() || !primaryGenre.trim()}
             className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium rounded flex items-center gap-2"
           >
-            {create.isPending ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-            {create.isPending ? 'Creating…' : 'Create artist'}
+            {mut.isPending
+              ? <Loader2 size={14} className="animate-spin" />
+              : (isEdit ? <Save size={14} /> : <Plus size={14} />)}
+            {mut.isPending
+              ? (isEdit ? 'Saving…' : 'Creating…')
+              : (isEdit ? 'Save changes' : 'Create artist')}
           </button>
         </div>
       </div>
