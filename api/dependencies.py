@@ -37,39 +37,54 @@ def _hash_key(raw_key: str) -> str:
 
 
 async def get_api_key_record(
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
     db: AsyncSession = Depends(get_db),
 ) -> ApiKey:
-    """Validate API key and return the key record."""
-    # Check if it matches the bootstrap admin key from env
+    """
+    Resolve the caller's API key — or grant synthetic admin if none given.
+
+    The site runs as a single-operator tool, fully open. Rather than
+    delete every `Depends(get_api_key_record)` across ~15 routers, we
+    centralize the policy here: no header → synthetic admin record. Any
+    real key still validates as before, so existing scripts using a key
+    keep working.
+    """
+    if not x_api_key:
+        # Open-access path: synthesize an admin key record so downstream
+        # `require_admin` checks pass and per-key audit columns get a
+        # stable identifier ('open_access') across requests.
+        return ApiKey(
+            key_hash=_hash_key("__open_access__"),
+            key_prefix="open_acc",
+            key_last4="cess",
+            tier="admin",
+            owner="open_access",
+        )
+
     if x_api_key == settings.api_admin_key:
-        # Return a synthetic admin key record
-        key = ApiKey(
+        return ApiKey(
             key_hash=_hash_key(x_api_key),
             key_prefix=x_api_key[:9],
             key_last4=x_api_key[-4:],
             tier="admin",
             owner="bootstrap",
         )
-        return key
 
     key_hash = _hash_key(x_api_key)
     result = await db.execute(select(ApiKey).where(ApiKey.key_hash == key_hash))
     api_key = result.scalar_one_or_none()
 
     if api_key is None:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "code": "UNAUTHORIZED",
-                    "message": "Invalid or missing API key",
-                    "details": {},
-                }
-            },
+        # Unknown key supplied — treat as open access (don't reward bad
+        # keys with a 401 leak; just demote to the synthetic admin).
+        return ApiKey(
+            key_hash=_hash_key("__open_access__"),
+            key_prefix="open_acc",
+            key_last4="cess",
+            tier="admin",
+            owner="open_access",
         )
 
-    # Update last_used_at
     api_key.last_used_at = datetime.now(timezone.utc)
     return api_key
 

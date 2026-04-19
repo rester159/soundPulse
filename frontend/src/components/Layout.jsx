@@ -13,9 +13,11 @@ import { useVersion } from '../hooks/useSoundPulse'
 // Reactive read of localStorage config status. Re-checks on the
 // soundpulse_config_changed event the SettingsDrawer fires after save
 // so the banner disappears the instant the user fills the fields.
+// Open-access mode: only the API base URL needs to be set. The site has
+// no API key. The build-time default is treated as configured because it
+// will work out of the box on a fresh device.
 function useConfigStatus() {
   const compute = () => ({
-    hasKey: !!localStorage.getItem('soundpulse_api_key'),
     hasUrl:
       !!(localStorage.getItem('soundpulse_base_url') ||
          import.meta.env.VITE_API_BASE_URL),
@@ -30,7 +32,7 @@ function useConfigStatus() {
       window.removeEventListener('soundpulse_config_changed', recheck)
     }
   }, [])
-  return { ...status, isConfigured: status.hasKey && status.hasUrl }
+  return { ...status, isConfigured: status.hasUrl, hasKey: true }
 }
 
 const NAV_ITEMS = [

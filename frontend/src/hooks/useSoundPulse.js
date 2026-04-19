@@ -1,16 +1,22 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 
-export function getApiKey() {
-  return localStorage.getItem('soundpulse_api_key') || ''
-}
-
+// API base URL only — the site runs in open-access mode (no API key).
+// Per-device localStorage override → build-time env baked into the
+// bundle → final relative-path fallback (only useful if the API is
+// served from the same origin as the frontend).
 export function getBaseUrl() {
   return (
     localStorage.getItem('soundpulse_base_url') ||
     import.meta.env.VITE_API_BASE_URL ||
     '/api/v1'
   )
+}
+
+// Kept as a no-op so old call sites compile. The backend ignores the
+// X-API-Key header entirely now.
+export function getApiKey() {
+  return ''
 }
 
 function createClient() {
@@ -21,10 +27,6 @@ function createClient() {
   client.interceptors.request.use((config) => {
     // Re-read on every request so Settings changes take effect without a page reload
     config.baseURL = getBaseUrl()
-    const key = getApiKey()
-    if (key) {
-      config.headers['X-API-Key'] = key
-    }
     config.metadata = { startTime: performance.now() }
     return config
   })
