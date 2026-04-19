@@ -143,3 +143,23 @@ add a 'blueprint' tab where user can generate blueprints, either from a genre/ s
 ## 2026-04-18 12:35:00
 
 I get this error: smart_prompt returned no prompt — check llm_calls table for the failure reason
+
+## 2026-04-18 13:10:00
+
+I need a button next to smart prompt to generate a prompt based on all the fields above. in both primary genre and asjacent genres I need a list of whats in the database, and the ability to add multiple genres in each category
+
+## 2026-04-18 13:15:00
+
+also, this is not correct - voice requirement should be a free text field
+
+## 2026-04-18 13:20:00
+
+need tooltips on sonic profile elemnents, including example for what a 0 or a 1 value for a specific attribute means
+
+## 2026-04-18 13:25:00
+
+is genreId an identifer only for the blueprint or is it going to add a new genre in our 850 genre DB? It should be the former
+
+## 2026-04-18 13:30:00
+
+I also need a tab to add new publishers writers composers - this is a new DB

@@ -837,6 +837,16 @@ export function useAssignBlueprint() {
   })
 }
 
+export function useSynthesizePromptFromFields() {
+  // POST /admin/blueprints/synthesize-prompt-from-fields — LLM composes
+  // a Suno-ready prompt body from the manual blueprint's other fields.
+  // Used by the Generate-prompt button next to the Smart Prompt textarea.
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/blueprints/synthesize-prompt-from-fields', {}, body),
+  })
+}
+
 export function useMusicGenerations(limit = 20) {
   return useQuery({
     queryKey: ['admin', 'music', 'generations', limit],

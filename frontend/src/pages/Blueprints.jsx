@@ -16,7 +16,7 @@
 import { useState } from 'react'
 import {
   Sparkles, Plus, Edit3, Loader2, X, AlertCircle, CheckCircle2,
-  Users, Music, ChevronDown, Trash2, RefreshCw,
+  Users, Music, ChevronDown, Trash2, RefreshCw, Wand2, HelpCircle,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -28,7 +28,31 @@ import {
   useAssignBlueprint,
   useGenerateSongForBlueprint,
   useGenreOpportunities,
+  useSynthesizePromptFromFields,
 } from '../hooks/useSoundPulse'
+import GenreMultiPicker from '../components/GenreMultiPicker'
+
+// Sonic-profile field tooltips. Numbers come from Spotify's audio-features
+// scale (0..1) where applicable. The semantic anchors at 0 and 1 help an
+// operator pick a value without having to look up reference docs.
+const SONIC_TOOLTIPS = {
+  tempo: 'Tempo in BPM (beats per minute). Examples: 70 (lo-fi), 95 (reggaeton), 120 (pop), 140 (drill), 175 (DnB).',
+  key: 'Pitch class 0-11. 0=C, 1=C♯/D♭, 2=D, 3=D♯/E♭, 4=E, 5=F, 6=F♯/G♭, 7=G, 8=G♯/A♭, 9=A, 10=A♯/B♭, 11=B.',
+  mode: 'Modality. 0 = minor (darker, melancholy), 1 = major (brighter, resolved).',
+  energy: 'Perceptual intensity, 0–1. 0 = whisper-quiet ambient piano. 1 = blistering metal or hard EDM. Pop typically 0.6–0.85.',
+  danceability: 'How suitable for dancing, 0–1. 0 = free jazz, ballad, classical solo. 1 = club-ready house or reggaeton. Pop typically 0.6–0.8.',
+  valence: 'Musical positivity, 0–1. 0 = sad / angry / depressing. 1 = euphoric / cheerful / triumphant. Heartbreak ballads ~0.2; party anthems ~0.85.',
+  acousticness: 'Confidence the track is acoustic, 0–1. 0 = fully electronic / synthesized. 1 = solo guitar + voice or unplugged session. Pop typically 0.05–0.3.',
+  loudness: 'Average track loudness in LUFS (typical range -60 to 0). Spotify normalizes to ~-14 LUFS. -8 = aggressively loud master; -20 = quiet, dynamic.',
+}
+
+function FieldTooltip({ text }) {
+  return (
+    <span className="ml-1 inline-flex items-center" title={text}>
+      <HelpCircle size={11} className="text-zinc-500 hover:text-zinc-300 cursor-help" />
+    </span>
+  )
+}
 
 // CSV helpers
 const csvSplit = (s) => (s || '').split(',').map((x) => x.trim()).filter(Boolean)
@@ -323,17 +347,28 @@ function GenerateFromGenreModal({ onClose, onCreated }) {
 function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
   const create = useCreateBlueprintManual()
   const update = useUpdateBlueprint()
+  const synthesize = useSynthesizePromptFromFields()
   const qc = useQueryClient()
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
+  const [synthError, setSynthError] = useState(null)
 
   const isEdit = Boolean(existingBlueprint)
   const e = existingBlueprint || {}
 
-  // Identity
-  const [genreId, setGenreId] = useState(e.genre_id || 'pop')
-  const [primaryGenre, setPrimaryGenre] = useState(e.primary_genre || '')
-  const [adjacentGenres, setAdjacentGenres] = useState(arr(e.adjacent_genres))
+  // Identity — primary + adjacent are now both multi-select. The first
+  // primary entry maps to the schema's single primary_genre column; the
+  // rest spill into adjacent_genres on save (deduplicated).
+  const initialPrimary = (() => {
+    const seed = []
+    if (e.primary_genre) seed.push(e.primary_genre)
+    else if (e.genre_id) seed.push(e.genre_id)
+    return seed
+  })()
+  const [primaryGenres, setPrimaryGenres] = useState(initialPrimary)
+  const [adjacentGenres, setAdjacentGenres] = useState(
+    Array.isArray(e.adjacent_genres) ? e.adjacent_genres : []
+  )
 
   // Sonic profile
   const [tempo, setTempo] = useState(e.target_tempo ?? '')
@@ -349,11 +384,25 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
   const [avoidThemes, setAvoidThemes] = useState(arr(e.avoid_themes))
   const [vocabularyTone, setVocabularyTone] = useState(e.vocabulary_tone || '')
 
-  // Audience + voice
+  // Audience + voice — voice is now a single free-text field. We persist
+  // it as voice_requirements.description so the JSONB column shape stays
+  // intact for any downstream consumer that already reads keys from it.
   const [audienceTags, setAudienceTags] = useState(arr(e.target_audience_tags))
-  const [voiceReqJson, setVoiceReqJson] = useState(
-    e.voice_requirements ? JSON.stringify(e.voice_requirements, null, 2) : ''
-  )
+  const initialVoiceText = (() => {
+    const vr = e.voice_requirements
+    if (!vr) return ''
+    if (typeof vr === 'string') return vr
+    if (typeof vr === 'object') {
+      if (vr.description) return vr.description
+      // Older payloads may have a richer JSON shape — flatten readable
+      // keys so the user sees what's there and can edit as prose.
+      return Object.entries(vr).map(([k, v]) =>
+        typeof v === 'string' ? `${k}: ${v}` : `${k}: ${JSON.stringify(v)}`
+      ).join('\n')
+    }
+    return String(vr)
+  })()
+  const [voiceText, setVoiceText] = useState(initialVoiceText)
 
   // Production
   const [productionNotes, setProductionNotes] = useState(e.production_notes || '')
@@ -364,22 +413,19 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
 
   const mut = isEdit ? update : create
 
-  const handleSubmit = async () => {
-    setError(null)
-    setResult(null)
-    if (!genreId.trim() || !smartPromptText.trim()) {
-      setError('Genre and smart prompt text are required')
-      return
-    }
-    let voiceReq = null
-    if (voiceReqJson.trim()) {
-      try { voiceReq = JSON.parse(voiceReqJson) }
-      catch { setError('Voice requirements must be valid JSON or left empty'); return }
-    }
-    const body = {
-      genre_id: genreId.trim(),
-      primary_genre: primaryGenre.trim() || undefined,
-      adjacent_genres: csvSplit(adjacentGenres),
+  // Resolve "primary genre" from the multi-select. First entry is the
+  // canonical primary; everything else (plus the adjacent picker's
+  // contents) becomes adjacent_genres on save.
+  const buildBodyShape = () => {
+    const primary = primaryGenres[0] || ''
+    const restFromPrimary = primaryGenres.slice(1)
+    const adjacentMerged = Array.from(new Set([...restFromPrimary, ...adjacentGenres]))
+      .filter((g) => g && g !== primary)
+    const voiceReq = voiceText.trim() ? { description: voiceText.trim() } : null
+    return {
+      genre_id: primary,
+      primary_genre: primary || undefined,
+      adjacent_genres: adjacentMerged,
       target_themes: csvSplit(targetThemes),
       avoid_themes: csvSplit(avoidThemes),
       vocabulary_tone: vocabularyTone.trim() || undefined,
@@ -394,8 +440,37 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
       target_acousticness: acousticness === '' ? undefined : parseFloat(acousticness),
       production_notes: productionNotes.trim() || undefined,
       reference_track_descriptors: csvSplit(referenceTracks),
-      smart_prompt_text: smartPromptText.trim(),
     }
+  }
+
+  const handleSynthesize = async () => {
+    setSynthError(null)
+    if (primaryGenres.length === 0) {
+      setSynthError('Pick at least one primary genre first')
+      return
+    }
+    try {
+      const body = buildBodyShape()
+      const res = await synthesize.mutateAsync({ body })
+      const promptText = res?.data?.prompt
+      if (promptText) {
+        setSmartPromptText(promptText)
+      } else {
+        setSynthError('LLM returned an empty prompt')
+      }
+    } catch (e2) {
+      setSynthError(e2?.response?.data?.detail || e2?.message || 'synthesis failed')
+    }
+  }
+
+  const handleSubmit = async () => {
+    setError(null)
+    setResult(null)
+    if (primaryGenres.length === 0 || !smartPromptText.trim()) {
+      setError('At least one primary genre AND smart prompt text are required')
+      return
+    }
+    const body = { ...buildBodyShape(), smart_prompt_text: smartPromptText.trim() }
     try {
       const res = isEdit
         ? await update.mutateAsync({ blueprintId: existingBlueprint.id, body })
@@ -458,25 +533,66 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
         <div className="p-5 space-y-6">
           <section>
             <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Identity</div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {lbl('Genre id *', inp(genreId, setGenreId, 'pop.k-pop'), 'Canonical dotted id from genre_taxonomy.py')}
-              {lbl('Primary genre', inp(primaryGenre, setPrimaryGenre, 'defaults to genre id'))}
-              <div className="md:col-span-2">
-                {lbl('Adjacent genres', ta(adjacentGenres, setAdjacentGenres, 'pop.dance-pop, electronic.edm (csv)'))}
-              </div>
+            <div className="space-y-3">
+              <label className="block text-xs text-zinc-400">
+                Primary genre(s) *
+                <FieldTooltip text="Pick one or more from the 959-genre taxonomy. The first selected becomes the canonical primary genre on the blueprint (used by genre_structures + genre_traits resolution); the rest are auto-merged into Adjacent genres. This does NOT add a new genre to the system taxonomy — it just references an existing one." />
+                <div className="mt-1">
+                  <GenreMultiPicker
+                    value={primaryGenres}
+                    onChange={setPrimaryGenres}
+                    placeholder="Search the taxonomy — type 'k-pop', 'house', 'reggae'…"
+                  />
+                </div>
+              </label>
+              <label className="block text-xs text-zinc-400">
+                Adjacent genres
+                <FieldTooltip text="Genres beyond the primary that this song touches. Used by the assignment engine to score voice/audience overlap and by the smart-prompt LLM to flavor the production. Same picker — pick as many as fit." />
+                <div className="mt-1">
+                  <GenreMultiPicker
+                    value={adjacentGenres}
+                    onChange={setAdjacentGenres}
+                    placeholder="Add adjacent genres…"
+                  />
+                </div>
+              </label>
             </div>
           </section>
 
           <section>
             <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Sonic profile</div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {lbl('Tempo (BPM)', num(tempo, setTempo, '120', '1'))}
-              {lbl('Key (0–11)', num(keyVal, setKeyVal, '0', '1'), '0=C 1=C# 2=D … 11=B')}
-              {lbl('Mode', num(mode, setMode, '1', '1'), '0=minor 1=major')}
-              {lbl('Energy', num(energy, setEnergy, '0.75'), '0.0–1.0')}
-              {lbl('Danceability', num(danceability, setDanceability, '0.7'), '0.0–1.0')}
-              {lbl('Valence', num(valence, setValence, '0.6'), '0.0–1.0 (positivity)')}
-              {lbl('Acousticness', num(acousticness, setAcousticness, '0.2'), '0.0–1.0')}
+              <label className="block text-xs text-zinc-400">
+                Tempo (BPM)<FieldTooltip text={SONIC_TOOLTIPS.tempo} />
+                <div className="mt-1">{num(tempo, setTempo, '120', '1')}</div>
+              </label>
+              <label className="block text-xs text-zinc-400">
+                Key (0–11)<FieldTooltip text={SONIC_TOOLTIPS.key} />
+                <div className="mt-1">{num(keyVal, setKeyVal, '0', '1')}</div>
+              </label>
+              <label className="block text-xs text-zinc-400">
+                Mode<FieldTooltip text={SONIC_TOOLTIPS.mode} />
+                <div className="mt-1">{num(mode, setMode, '1', '1')}</div>
+              </label>
+              <label className="block text-xs text-zinc-400">
+                Energy (0–1)<FieldTooltip text={SONIC_TOOLTIPS.energy} />
+                <div className="mt-1">{num(energy, setEnergy, '0.75')}</div>
+              </label>
+              <label className="block text-xs text-zinc-400">
+                Danceability (0–1)<FieldTooltip text={SONIC_TOOLTIPS.danceability} />
+                <div className="mt-1">{num(danceability, setDanceability, '0.7')}</div>
+              </label>
+              <label className="block text-xs text-zinc-400">
+                Valence (0–1)<FieldTooltip text={SONIC_TOOLTIPS.valence} />
+                <div className="mt-1">{num(valence, setValence, '0.6')}</div>
+              </label>
+              <label className="block text-xs text-zinc-400">
+                Acousticness (0–1)<FieldTooltip text={SONIC_TOOLTIPS.acousticness} />
+                <div className="mt-1">{num(acousticness, setAcousticness, '0.2')}</div>
+              </label>
+            </div>
+            <div className="text-[10px] text-zinc-600 mt-2">
+              Hover the <HelpCircle size={9} className="inline" /> icons for what 0 vs 1 means on each axis. Leave blank to omit (the orchestrator + smart-prompt LLM will fall back to genre defaults).
             </div>
           </section>
 
@@ -495,9 +611,9 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
             <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Audience & voice</div>
             <div className="space-y-3">
               {lbl('Target audience tags', ta(audienceTags, setAudienceTags, 'gen_z, female_lean, urban (csv)'))}
-              {lbl('Voice requirements (JSON)',
-                ta(voiceReqJson, setVoiceReqJson, '{"timbre": "warm soft tenor", "delivery": ["whispered"], "autotune": "light"}', 4),
-                'Optional. Same shape as ai_artists.voice_dna for assignment-engine matching.')}
+              {lbl('Voice requirements',
+                ta(voiceText, setVoiceText, 'Free-text: e.g. "soft warm tenor, half-sung delivery with whispered doubles, light autotune, occasional ad-libs (mhm, yeah)"', 4),
+                'Plain English description of the vocal direction. Used by the assignment engine to match a roster artist + by the smart-prompt LLM to compose the final prompt.')}
             </div>
           </section>
 
@@ -510,11 +626,28 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
           </section>
 
           <section>
-            <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Smart prompt *</div>
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold">Smart prompt *</div>
+              <button
+                type="button"
+                onClick={handleSynthesize}
+                disabled={synthesize.isPending || primaryGenres.length === 0}
+                className="flex items-center gap-1.5 px-3 py-1 bg-violet-600/20 hover:bg-violet-600/40 border border-violet-500/40 disabled:opacity-50 text-violet-200 text-xs font-medium rounded transition-colors"
+                title="Generate the smart prompt from all the fields above using the LLM"
+              >
+                {synthesize.isPending ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
+                {synthesize.isPending ? 'Composing…' : 'Generate from fields'}
+              </button>
+            </div>
             <div className="text-[11px] text-zinc-500 mb-2 leading-relaxed">
-              The actual text the orchestrator sends to Suno (after prepending [STRUCTURE] from §70 + voice DNA from the assigned artist). Paste from a previous generation, write from scratch, or use the "Generate from genre" flow first and then edit here.
+              The actual text the orchestrator sends to Suno (after prepending [STRUCTURE] from §70 + voice DNA from the assigned artist). Click <strong>Generate from fields</strong> to have an LLM compose this from everything above, or paste/write directly. Edit freely — the textarea is the source of truth for what gets saved.
             </div>
             {ta(smartPromptText, setSmartPromptText, 'STYLE: …\nLYRICS:\n[Verse 1] …\n[Chorus] …', 12)}
+            {synthError && (
+              <div className="mt-2 bg-rose-500/10 border border-rose-500/30 rounded p-2 text-xs text-rose-300 flex items-center gap-2">
+                <AlertCircle size={12} /> {synthError}
+              </div>
+            )}
           </section>
 
           {error && (

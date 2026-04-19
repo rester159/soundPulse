@@ -4553,6 +4553,187 @@ async def generate_blueprint_from_genre(
     }
 
 
+class BlueprintSynthesizeFromFieldsRequest(BaseModel):
+    """Body for /admin/blueprints/synthesize-prompt-from-fields. All
+    fields optional except genre_id — same shape the manual editor
+    holds in form state."""
+    genre_id: str
+    primary_genre: str | None = None
+    adjacent_genres: list[str] = []
+    target_themes: list[str] = []
+    avoid_themes: list[str] = []
+    vocabulary_tone: str | None = None
+    target_audience_tags: list[str] = []
+    voice_requirements: dict | None = None
+    target_tempo: float | None = None
+    target_key: int | None = None
+    target_mode: int | None = None
+    target_energy: float | None = None
+    target_danceability: float | None = None
+    target_valence: float | None = None
+    target_acousticness: float | None = None
+    target_loudness: float | None = None
+    production_notes: str | None = None
+    reference_track_descriptors: list[str] = []
+    model: str = "suno"
+
+
+@router.post("/api/v1/admin/blueprints/synthesize-prompt-from-fields")
+async def synthesize_prompt_from_fields(
+    body: BlueprintSynthesizeFromFieldsRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """LLM-compose a Suno/Udio/MusicGen-ready smart_prompt_text from the
+    manual blueprint fields. Used by the "Generate prompt" button next
+    to the Smart Prompt textarea — lets the operator fill the rest of
+    the form, then synthesize the prompt body without hand-writing it.
+
+    Unlike /generate-from-genre, this does NOT require breakout data
+    in the DB for the genre. It composes purely from the operator's
+    inputs + per-genre traits + per-genre structure (when those exist).
+
+    Returns: { prompt: str, llm_call: {...} }
+    """
+    from api.services.llm_client import llm_chat
+    from api.services.genre_traits_service import (
+        resolve_genre_traits, format_traits_for_smart_prompt,
+    )
+    from api.services.genre_structures_service import resolve_genre_structure
+    from api.services.structure_prompt import structure_block_for_prompt
+
+    genre = (body.genre_id or "").strip()
+    if not genre:
+        raise HTTPException(400, detail="genre_id is required")
+
+    # Pull per-genre traits + structure as additional context for the
+    # LLM. Both fall back gracefully (traits has hardcoded defaults;
+    # structure walks dotted chain to 'pop'). Failures are non-fatal.
+    traits_block = ""
+    structure_block = ""
+    try:
+        traits = await resolve_genre_traits(db, genre)
+        traits_block = format_traits_for_smart_prompt(traits)
+    except Exception:
+        logger.exception("[synthesize-prompt] traits lookup failed (continuing without)")
+    try:
+        resolved = await resolve_genre_structure(db, genre)
+        structure_block = structure_block_for_prompt(resolved.structure)
+    except Exception:
+        logger.exception("[synthesize-prompt] structure lookup failed (continuing without)")
+
+    # Voice requirements come in as a free-text dict {"description": "..."}
+    # from the new UI. Older payloads (full JSON shape) are accepted too.
+    voice_text = ""
+    if body.voice_requirements:
+        if isinstance(body.voice_requirements, dict):
+            voice_text = (
+                body.voice_requirements.get("description")
+                or " ".join(f"{k}: {v}" for k, v in body.voice_requirements.items())
+            )
+        else:
+            voice_text = str(body.voice_requirements)
+
+    fields_block_lines = [
+        f"Primary genre: {body.primary_genre or genre}",
+    ]
+    if body.adjacent_genres:
+        fields_block_lines.append(f"Adjacent genres: {', '.join(body.adjacent_genres)}")
+    if body.target_themes:
+        fields_block_lines.append(f"Target themes: {', '.join(body.target_themes)}")
+    if body.avoid_themes:
+        fields_block_lines.append(f"Avoid themes: {', '.join(body.avoid_themes)}")
+    if body.vocabulary_tone:
+        fields_block_lines.append(f"Vocabulary tone: {body.vocabulary_tone}")
+    if body.target_audience_tags:
+        fields_block_lines.append(f"Target audience: {', '.join(body.target_audience_tags)}")
+    if voice_text:
+        fields_block_lines.append(f"Voice requirements: {voice_text}")
+    sonic = []
+    if body.target_tempo is not None: sonic.append(f"tempo {body.target_tempo} BPM")
+    if body.target_key is not None: sonic.append(f"key {body.target_key}")
+    if body.target_mode is not None: sonic.append(f"mode {'major' if body.target_mode == 1 else 'minor'}")
+    if body.target_energy is not None: sonic.append(f"energy {body.target_energy}")
+    if body.target_danceability is not None: sonic.append(f"danceability {body.target_danceability}")
+    if body.target_valence is not None: sonic.append(f"valence {body.target_valence}")
+    if body.target_acousticness is not None: sonic.append(f"acousticness {body.target_acousticness}")
+    if body.target_loudness is not None: sonic.append(f"loudness {body.target_loudness} LUFS")
+    if sonic:
+        fields_block_lines.append(f"Sonic profile: {', '.join(sonic)}")
+    if body.production_notes:
+        fields_block_lines.append(f"Production notes: {body.production_notes}")
+    if body.reference_track_descriptors:
+        fields_block_lines.append(f"Reference tracks: {', '.join(body.reference_track_descriptors)}")
+    fields_block = "\n".join(fields_block_lines)
+
+    user_prompt = (
+        "Compose a single Suno/Udio-style song prompt body from the inputs below. "
+        "Output ONLY the prompt text — no preamble, no JSON, no markdown fences. "
+        "Use this template structure:\n"
+        "  STYLE: <one paragraph describing the production, mood, instrumentation, "
+        "and vocal direction. Reference the sonic profile numbers naturally — don't "
+        "list them.>\n"
+        "  LYRICS:\n"
+        "  [Intro] <lyrics>\n"
+        "  [Verse 1] <lyrics>\n"
+        "  [Pre-chorus] <lyrics>\n"
+        "  [Chorus] <lyrics with a repeated 4-7 syllable hook>\n"
+        "  [Verse 2] <lyrics>\n"
+        "  [Chorus] <repeat hook verbatim>\n"
+        "  [Bridge] <lyrics>\n"
+        "  [Chorus] <repeat hook verbatim>\n"
+        "  [Outro] <lyrics>\n\n"
+        "Honor the avoid-themes list strictly. Lean into target themes + voice + "
+        "tone. The hook phrase in the chorus must repeat verbatim 3+ times. "
+        "If a per-genre [STRUCTURE] block is provided below, match its section "
+        "names + bar counts.\n\n"
+        f"=== INPUTS ===\n{fields_block}\n"
+    )
+    if structure_block:
+        user_prompt += f"\n=== {structure_block} ===\n"
+    if traits_block:
+        user_prompt += f"\n=== GENRE TRAITS ===\n{traits_block}\n"
+
+    try:
+        # Reuse the smart_prompt_generation action key (already registered
+        # in config/llm.json) — same model class, same routing, same
+        # provider fallbacks. No new config entry needed.
+        result = await llm_chat(
+            db=db,
+            action="smart_prompt_generation",
+            messages=[
+                {"role": "system", "content": "You are an expert music producer + lyricist composing prompts for Suno/Udio. Output only the prompt body."},
+                {"role": "user", "content": user_prompt},
+            ],
+            caller="admin.synthesize_prompt_from_fields",
+            context_id=f"synth_from_fields genre={genre} model={body.model}",
+            override_max_tokens=2000,
+            override_temperature=0.8,
+            metadata={"flow": "synthesize_from_fields", "genre": genre},
+        )
+    except Exception as exc:
+        logger.exception("[synthesize-prompt] llm_chat raised")
+        raise HTTPException(502, detail=f"LLM call failed: {exc}")
+
+    if not result.get("success"):
+        raise HTTPException(502, detail=f"LLM call failed: {result.get('error', 'unknown error')}")
+
+    prompt_text = (result.get("content") or "").strip()
+    if not prompt_text:
+        raise HTTPException(502, detail="LLM returned an empty prompt")
+
+    return {
+        "prompt": prompt_text,
+        "llm_call": {
+            "model": result.get("model"),
+            "input_tokens": result.get("input_tokens"),
+            "output_tokens": result.get("output_tokens"),
+            "cost_cents": result.get("cost_cents"),
+            "latency_ms": result.get("latency_ms"),
+        },
+    }
+
+
 class BlueprintManualCreateRequest(BaseModel):
     """Body for /admin/blueprints/manual — every field optional except
     genre_id + smart_prompt_text. Mirrors the song_blueprints column

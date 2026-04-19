@@ -721,3 +721,19 @@ Fixed in two ways:
 Top genres with breakout data confirmed via SQL (last 30d): pop (2358), r-and-b.soul (2071), electronic.ambient (1403), pop.soft-pop (1295), pop.k-pop (1080), hip-hop.trap.anime-trap (515), country (508), classical (341), electronic.house (257), etc.
 
 vite build passes; admin.py AST OK.
+
+## 2026-04-18 17:58:31 — Blueprint editor: 4 UX fixes shipped, rights-holders next
+
+User asked for: (1) generate-prompt button next to Smart Prompt, (2) multi-select genre pickers from DB for primary + adjacent, (3) tooltips on sonic profile fields explaining 0/1, (4) voice requirements as free text not JSON. All four shipped:
+
+- Backend: POST /admin/blueprints/synthesize-prompt-from-fields. Composes a Suno-ready prompt body from all the manual blueprint fields via the LLM. Pulls in genre_traits + genre_structures as additional context. Reuses smart_prompt_generation action key from llm.json (no new config). Unlike generate-from-genre, does NOT require breakout data — composes purely from operator inputs.
+
+- Frontend hook: useSynthesizePromptFromFields.
+
+- New reusable component: GenreMultiPicker — searchable multi-select over all 959 genres in the taxonomy. Chip display, type-to-filter, Enter-to-add, Backspace-to-remove last. Drops 'Add custom genre' fallback for off-taxonomy strings.
+
+- ManualBlueprintModal: identity section now uses two GenreMultiPickers (primary + adjacent). Save logic packs the FIRST primary into primary_genre column (single TEXT in schema) and merges the rest into adjacent_genres (deduplicated). Voice requirements is now a plain textarea (4 rows). On save, packed as { description: <text> } so the JSONB column shape stays intact for any downstream reader. Sonic profile fields each got a HelpCircle tooltip explaining the 0/1 anchors with concrete examples (e.g., 'energy 0 = whisper-quiet ambient piano. 1 = blistering metal'). Tempo gets BPM examples per genre. Key/mode gets the 12-pitch and major/minor mapping. Smart Prompt section now has a 'Generate from fields' button (Wand2 icon) that calls the new endpoint and replaces the textarea contents on success.
+
+- Clarified for user: genre_id on a blueprint is a string reference into the genres taxonomy, not a write to the genres table. Adding a custom genre in the picker only stores the string in the blueprint row. The 959-row genres table is seed-only (scripts/seed_genres.py).
+
+vite build passes. Next: rights-holders tab (publishers/writers/composers DB).
