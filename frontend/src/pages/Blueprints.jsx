@@ -27,6 +27,7 @@ import {
   useUpdateBlueprint,
   useAssignBlueprint,
   useGenerateSongForBlueprint,
+  useGenreOpportunities,
 } from '../hooks/useSoundPulse'
 
 // CSV helpers
@@ -159,12 +160,20 @@ function BlueprintCard({ blueprint, onEdit, onAssign, onGenerateSong, onView }) 
 
 function GenerateFromGenreModal({ onClose, onCreated }) {
   const generate = useGenerateBlueprintFromGenre()
+  const opps = useGenreOpportunities()
   const qc = useQueryClient()
   const [genre, setGenre] = useState('pop')
   const [model, setModel] = useState('suno')
   const [edgeProfile, setEdgeProfile] = useState('')
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
+
+  // Genres ranked by opportunity score from /blueprint/genres. Smart-prompt
+  // generation requires breakout data for the genre — if none exists in the
+  // last 30 days, the LLM call short-circuits with an empty result. The
+  // suggestions list shows operators which genres are guaranteed to work
+  // (so they don't get the cryptic "no breakouts" failure).
+  const genreSuggestions = (opps.data?.data?.data || []).slice(0, 30)
 
   const handleSubmit = async () => {
     setError(null)
@@ -213,10 +222,40 @@ function GenerateFromGenreModal({ onClose, onCreated }) {
               placeholder="pop.k-pop, hip-hop.trap, latin.reggaeton…"
               className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 font-mono"
             />
-            <div className="text-[10px] text-zinc-600 mt-1">
-              Use canonical dotted-genre id from <code>shared/genre_taxonomy.py</code>.
-              Examples: <code>pop</code>, <code>pop.k-pop</code>, <code>hip-hop.trap.drill</code>,
-              <code>african.afrobeats</code>, <code>electronic.house</code>.
+            {genreSuggestions.length > 0 && (
+              <div className="mt-2">
+                <div className="text-[10px] text-zinc-500 mb-1">
+                  Quick pick (genres with recent breakout data — guaranteed to generate):
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {genreSuggestions.map((g) => {
+                    const id = g.genre_id || g.id || g.genre
+                    if (!id) return null
+                    const isActive = id === genre
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setGenre(id)}
+                        className={`px-2 py-0.5 text-[10px] rounded font-mono border transition-colors ${
+                          isActive
+                            ? 'bg-violet-600/30 text-violet-200 border-violet-500/50'
+                            : 'text-zinc-300 border-zinc-700 hover:border-violet-500/50 hover:text-violet-200'
+                        }`}
+                        title={g.breakout_count ? `${g.breakout_count} breakouts in 30d` : ''}
+                      >
+                        {id}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+            <div className="text-[10px] text-zinc-600 mt-2">
+              Or type any canonical dotted-genre id from <code>shared/genre_taxonomy.py</code>.
+              The smart-prompt LLM needs ≥1 breakout event in the last 30 days for the chosen
+              genre — pick one above to be safe, or use <strong>Create manually</strong> for
+              genres without breakout data.
             </div>
           </div>
 

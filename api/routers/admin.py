@@ -4513,10 +4513,21 @@ async def generate_blueprint_from_genre(
         raise HTTPException(502, detail=f"smart_prompt failed: {exc}")
 
     if not sp or not sp.get("prompt"):
-        raise HTTPException(
-            502,
-            detail="smart_prompt returned no prompt — check llm_calls table for the failure reason",
+        # Surface the specific reason from smart_prompt instead of a generic
+        # "check llm_calls" message. Most-common failure: the genre has no
+        # breakout events in the last 30 days, so smart_prompt short-
+        # circuits before the LLM is even called. In that case, suggest
+        # the manual flow as the unblock.
+        reason = (sp or {}).get("error") or (
+            "smart_prompt returned no prompt — check llm_calls for the LLM-side failure"
         )
+        suggestion = ""
+        if "breakout events" in reason.lower() or "no breakout" in reason.lower():
+            suggestion = (
+                " — try a more mainstream genre (pop, hip-hop, electronic.house) "
+                "or use 'Create manually' to write a blueprint without breakout data"
+            )
+        raise HTTPException(422, detail=f"{reason}{suggestion}")
 
     row = SongBlueprint(
         genre_id=genre,

@@ -707,3 +707,17 @@ SongLab integration (SongLab.jsx): New SavedBlueprintsPicker component renders a
 Dimensions covered: identity, sonic profile (7 numeric fields), lyrical themes (target + avoid + tone), audience tags, voice requirements (JSON), production notes, reference tracks, smart prompt body. Per-genre meme density / structure / edge profile come automatically via the existing genre_traits + genre_structures resolvers when the blueprint feeds the orchestrator at song-gen time.
 
 vite build passes; admin.py AST OK.
+
+## 2026-04-18 17:33:36 — Blueprint generate-from-genre: surface real error + add genre suggestions
+
+User got 'smart_prompt returned no prompt' on the Generate-from-genre flow. Investigation in llm_calls: a 196ms / 0-input-token / 0-output-token row at 00:30:05 — smart_prompt short-circuited at line 286-290 before even calling the LLM, because the chosen genre had zero breakout events in the last 30 days. Adjacent calls in the same minute (other genres) returned 1000+ output tokens fine.
+
+Fixed in two ways:
+
+(a) generate_blueprint_from_genre endpoint (admin.py) now surfaces the actual error from sp.error instead of the generic "check llm_calls" message, AND adds an inline suggestion when the failure is the no-breakouts case ("try a more mainstream genre, or use Create manually"). Returns 422 instead of 502 since this is a usable-input issue, not an upstream failure.
+
+(b) GenerateFromGenreModal (Blueprints.jsx) now fetches /blueprint/genres via useGenreOpportunities() and renders the top-30 known-good genres as quick-pick chips below the genre input. Each chip shows breakout count on hover. Clicking sets the input. Eliminates the guesswork that caused the failure in the first place.
+
+Top genres with breakout data confirmed via SQL (last 30d): pop (2358), r-and-b.soul (2071), electronic.ambient (1403), pop.soft-pop (1295), pop.k-pop (1080), hip-hop.trap.anime-trap (515), country (508), classical (341), electronic.house (257), etc.
+
+vite build passes; admin.py AST OK.

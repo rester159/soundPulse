@@ -139,3 +139,7 @@ when accessing the app from a mobile phone I do not see any data in the screens
 ## 2026-04-18 12:00:00
 
 add a 'blueprint' tab where user can generate blueprints, either from a genre/ subgenre/ subsub or manually from scratch. The blueprint content should be organzized across multiple dimensions, e.g., song structure, meme-compatibility, etc - you add what makes sense. Any bluebrint generated this way is available in the blueprint dropdown menu when creating a song
+
+## 2026-04-18 12:35:00
+
+I get this error: smart_prompt returned no prompt — check llm_calls table for the failure reason
