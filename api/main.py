@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from api.middleware.rate_limiter import RateLimitMiddleware
 from api.config import get_settings
-from api.routers import admin, admin_genre_structures, assistant, backtesting, blueprint, genres, instrumentals_public, predictions, search, trending
+from api.routers import admin, admin_genre_structures, admin_rights_holders, assistant, backtesting, blueprint, genres, instrumentals_public, predictions, search, trending
 
 # Record when this process started — proxy for "when was this code deployed"
 _PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
@@ -92,6 +92,7 @@ app.include_router(search.router)
 app.include_router(predictions.router)
 app.include_router(admin.router)
 app.include_router(admin_genre_structures.router)  # task #109 Phase 3
+app.include_router(admin_rights_holders.router)  # rights_holders CRUD (migration 036)
 app.include_router(backtesting.router)
 app.include_router(blueprint.router)
 app.include_router(assistant.router)

@@ -737,3 +737,22 @@ User asked for: (1) generate-prompt button next to Smart Prompt, (2) multi-selec
 - Clarified for user: genre_id on a blueprint is a string reference into the genres taxonomy, not a write to the genres table. Adding a custom genre in the picker only stores the string in the blueprint row. The 959-row genres table is seed-only (scripts/seed_genres.py).
 
 vite build passes. Next: rights-holders tab (publishers/writers/composers DB).
+
+## 2026-04-18 18:04:32 — Rights tab + migration 036
+
+Migration 036 applied to Neon main: rights_holders polymorphic table (kind=publisher|writer|composer) with CHECK constraint pinning kind, range CHECK on default_split_percent, and (kind, legal_name) index for the per-kind list queries.
+
+Backend:
+- api/models/rights_holder.py — RightsHolder SQLAlchemy model.
+- api/routers/admin_rights_holders.py — full CRUD: GET list (with optional ?kind= filter; returns by_kind counts when no filter), GET detail, POST create, PATCH update (kind intentionally locked at create time), DELETE. All admin-gated.
+- api/main.py wires the router after admin_genre_structures.
+
+Frontend hooks: useRightsHolders(kind), useCreateRightsHolder, useUpdateRightsHolder, useDeleteRightsHolder.
+
+New page Rights.jsx (~360 lines): segmented control across the three kinds, table per kind showing legal_name / stage_name / IPI / PRO badge / contact / split %, Add/Edit/Delete actions per row. HolderModal handles both create + edit, with sections for Identity, Rights org IDs (IPI + ISNI + PRO dropdown listing 13 PROs + publisher company), Contact (email/phone/address), Tax & defaults (tax_id + split %), and Notes. Helpful per-kind hints in the description and modal placeholders.
+
+Wired into router (/rights) + nav (Briefcase icon between Releases and Instrumentals).
+
+planning/schema.md updated: head bumped 035 → 036, full table spec appended.
+
+vite build passes; admin.py + main.py + admin_rights_holders.py + rights_holder.py all AST OK.

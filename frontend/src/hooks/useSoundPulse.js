@@ -847,6 +847,41 @@ export function useSynthesizePromptFromFields() {
   })
 }
 
+// -------- Rights holders (publishers / writers / composers) --------
+
+export function useRightsHolders(kind = null) {
+  return useQuery({
+    queryKey: ['admin', 'rights-holders', kind],
+    queryFn: () => {
+      const params = {}
+      if (kind) params.kind = kind
+      return makeRequest('GET', '/admin/rights-holders', params)
+    },
+    staleTime: 30_000,
+  })
+}
+
+export function useCreateRightsHolder() {
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/rights-holders', {}, body),
+  })
+}
+
+export function useUpdateRightsHolder() {
+  return useMutation({
+    mutationFn: ({ holderId, body }) =>
+      makeRequest('PATCH', `/admin/rights-holders/${holderId}`, {}, body),
+  })
+}
+
+export function useDeleteRightsHolder() {
+  return useMutation({
+    mutationFn: ({ holderId }) =>
+      makeRequest('DELETE', `/admin/rights-holders/${holderId}`),
+  })
+}
+
 export function useMusicGenerations(limit = 20) {
   return useQuery({
     queryKey: ['admin', 'music', 'generations', limit],

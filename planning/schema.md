@@ -28,8 +28,9 @@
 | 033 | 2026-04-15 | `genre_structures` table + 20-genre seed — per-genre song structure templates for Suno prompt injection (task #109, PRD §70) |
 | 034 | 2026-04-15 | `ai_artists.structure_template` JSONB + `ai_artists.genre_structure_override` BOOLEAN — per-artist structure overrides (task #109) |
 | 035 | 2026-04-16 | `chartmetric_global_bucket` singleton table — Postgres-coordinated cross-replica rate-limit governor (task #8 / Chartmetric Phase B fix for L016 multi-replica fan-out, PRD §7.3) |
+| 036 | 2026-04-18 | `rights_holders` polymorphic table — canonical publishers / writers / composers (kind discriminator + IPI / PRO / contact / split fields). Backs the new Rights tab in the UI; songs reference these by id instead of duplicating contact info on every `songs_master.writers` blob. |
 
-Head: `035` (file describes 001–005 + 033–035 in detail — migrations 006–032 are authoritative in `alembic/versions/`. Update this file in the same commit when adding new tables.)
+Head: `036` (file describes 001–005 + 033–036 in detail — migrations 006–032 are authoritative in `alembic/versions/`. Update this file in the same commit when adding new tables.)
 
 ---
 
@@ -547,3 +548,30 @@ QA verdict per `audio_assets` row. One row per QA pass. **Currently a planned ta
 | pass_fail | `Boolean` | Aggregate verdict; FALSE triggers regen up to 3x then CEO escalation |
 | report_json | `JSONB` | Full per-check result with reasons (loudness LUFS, lyric intelligibility, vocal prominence, etc.) |
 | created_at | `TIMESTAMPTZ` default NOW() | |
+
+---
+
+## `rights_holders` (migration 036) — publishers / writers / composers
+
+Polymorphic single-table design. `kind` discriminator pins each row to one of `publisher | writer | composer` via a CHECK constraint. Backs the Rights tab in the UI. `songs_master.writers` / `publishers` / `composers` JSONB blobs reference these by id (rather than duplicating contact + IPI + PRO info on every song).
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | `UUID` | PK, default `gen_random_uuid()` | |
+| kind | `Text` | NOT NULL, CHECK in {publisher, writer, composer} | Fixed at create time, not editable on PATCH. |
+| legal_name | `Text` | NOT NULL | Registered legal entity / person name. |
+| stage_name | `Text` | NULL | Pen name / DBA / alias. |
+| ipi_number | `Text` | NULL | 11-digit Interested Parties Information ID. Required for ASCAP/BMI registration. |
+| isni | `Text` | NULL | International Standard Name Identifier. |
+| pro_affiliation | `Text` | NULL | `ASCAP` / `BMI` / `SESAC` / `GMR` / `PRS` / `SOCAN` / `GEMA` / `SACEM` / `JASRAC` / `APRA AMCOS` / `SIAE` / `SUISA` / Other. |
+| publisher_company_name | `Text` | NULL | For writers/composers signed to a publisher. |
+| email | `Text` | NULL | |
+| phone | `Text` | NULL | |
+| address | `Text` | NULL | For W-9 / W-8 mailings. |
+| tax_id | `Text` | NULL | EIN / SSN / VAT reference. |
+| default_split_percent | `Float` | NULL, CHECK 0-100 | Typical % this party gets on a song; the songs_master.writers blob can override per-song. |
+| notes | `Text` | NULL | Admin id, contract reference, signing date, etc. |
+| created_at | `TIMESTAMPTZ` | NOT NULL, default NOW() | |
+| updated_at | `TIMESTAMPTZ` | NOT NULL, default NOW() | Onupdate via SQLAlchemy. |
+
+Indexes: `idx_rights_holders_kind_name (kind, legal_name)` for the per-kind list queries the Rights tab runs.

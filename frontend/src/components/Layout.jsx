@@ -3,7 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 import {
   BarChart3, Search, Terminal, FlaskConical, Music, Settings as SettingsIcon, AudioLines,
   GitBranch, Database, MessageSquare, ChevronRight, Disc3, Users, Package, Sliders, Send,
-  Menu, X, AlertTriangle, Sparkles,
+  Menu, X, AlertTriangle, Sparkles, Briefcase,
 } from 'lucide-react'
 import AssistantPanel from './AssistantPanel'
 import SettingsDrawer from './SettingsDrawer'
@@ -41,6 +41,7 @@ const NAV_ITEMS = [
   { to: '/songs',           label: 'Songs',           icon: Disc3 },
   { to: '/artists',         label: 'Artists',         icon: Users },
   { to: '/releases',        label: 'Releases',        icon: Package },
+  { to: '/rights',          label: 'Rights',          icon: Briefcase },
   { to: '/instrumentals',   label: 'Instrumentals',   icon: Sliders },
   { to: '/submissions',     label: 'Submissions',     icon: Send },
   { to: '/model-validation',label: 'Model Validation',icon: FlaskConical },

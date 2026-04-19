@@ -9,6 +9,7 @@ import ApiPlayground from './pages/ApiPlayground'
 import ModelValidation from './pages/ModelValidation'
 import SongLab from './pages/SongLab'
 import Blueprints from './pages/Blueprints'
+import Rights from './pages/Rights'
 import Songs from './pages/Songs'
 import Artists from './pages/Artists'
 import Releases from './pages/Releases'
@@ -63,6 +64,7 @@ function App() {
             <Route path="/model-validation" element={<ErrorBoundary><ModelValidation /></ErrorBoundary>} />
             <Route path="/song-lab" element={<ErrorBoundary><SongLab /></ErrorBoundary>} />
             <Route path="/blueprints" element={<ErrorBoundary><Blueprints /></ErrorBoundary>} />
+            <Route path="/rights" element={<ErrorBoundary><Rights /></ErrorBoundary>} />
             <Route path="/songs" element={<ErrorBoundary><Songs /></ErrorBoundary>} />
             <Route path="/artists" element={<ErrorBoundary><Artists /></ErrorBoundary>} />
             <Route path="/releases" element={<ErrorBoundary><Releases /></ErrorBoundary>} />
