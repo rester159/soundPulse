@@ -13,7 +13,7 @@
  * Generate song actions. Saved blueprints automatically appear in the
  * SongLab generation panel's blueprint dropdown.
  */
-import { useState } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import {
   Sparkles, Plus, Edit3, Loader2, X, AlertCircle, CheckCircle2,
   Users, Music, ChevronDown, Trash2, RefreshCw, Wand2, HelpCircle,
@@ -29,6 +29,7 @@ import {
   useGenerateSongForBlueprint,
   useGenreOpportunities,
   useSynthesizePromptFromFields,
+  useGenres,
 } from '../hooks/useSoundPulse'
 import GenreMultiPicker from '../components/GenreMultiPicker'
 
@@ -180,10 +181,38 @@ function BlueprintCard({ blueprint, onEdit, onAssign, onGenerateSong, onView }) 
   )
 }
 
+// ── Cascading genre picker level ─────────────────────────────────────────
+
+// One row in the cascade. Renders a labeled <select> populated with the
+// children of the parent picked at the previous level. Picking here drops
+// any deeper levels (handled by the parent via setChainAt).
+function CascadeLevel({ label, options, value, onChange, optional = false }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+        {label}{optional && <span className="ml-1 text-zinc-600 normal-case">(optional)</span>}
+      </div>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 font-mono"
+      >
+        <option value="">— {optional ? 'stop here' : 'pick one'} —</option>
+        {options.map((g) => (
+          <option key={g.id} value={g.id}>
+            {g.id}{g.name && g.name !== g.id ? ` · ${g.name}` : ''}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
 // ── Modal: generate from genre ───────────────────────────────────────────
 
 function GenerateFromGenreModal({ onClose, onCreated }) {
   const generate = useGenerateBlueprintFromGenre()
+  const allGenres = useGenres({ flat: true })  // full 959-row taxonomy
   const opps = useGenreOpportunities()
   const qc = useQueryClient()
   const [genre, setGenre] = useState('pop')
@@ -192,11 +221,45 @@ function GenerateFromGenreModal({ onClose, onCreated }) {
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
 
-  // Genres ranked by opportunity score from /blueprint/genres. Smart-prompt
-  // generation requires breakout data for the genre — if none exists in the
-  // last 30 days, the LLM call short-circuits with an empty result. The
-  // suggestions list shows operators which genres are guaranteed to work
-  // (so they don't get the cryptic "no breakouts" failure).
+  // Build a parent→children map of the entire taxonomy so the cascading
+  // picker can drill down. Roots (depth=0) seed the first dropdown;
+  // each subsequent dropdown shows the children of the prior pick.
+  const genreList = allGenres.data?.data?.data?.genres
+    || allGenres.data?.data?.genres
+    || []
+  const childrenByParent = useMemo(() => {
+    const map = new Map()
+    for (const g of genreList) {
+      const parent = g.parent_id || '__root__'
+      if (!map.has(parent)) map.set(parent, [])
+      map.get(parent).push(g)
+    }
+    for (const arr of map.values()) {
+      arr.sort((a, b) => (a.id || '').localeCompare(b.id || ''))
+    }
+    return map
+  }, [genreList])
+
+  // The cascade chain — each entry is the genre id picked at that
+  // depth. The picker for depth N shows children of chain[N-1].
+  // chain[-1] (last entry) is the currently-selected leaf and what we
+  // send to the API.
+  const [chain, setChain] = useState(['pop'])
+
+  // Keep `genre` (the API input) in sync with the chain leaf.
+  useEffect(() => {
+    if (chain.length > 0) setGenre(chain[chain.length - 1])
+  }, [chain])
+
+  const setChainAt = (depthIdx, value) => {
+    // When the user changes a level, drop everything below it.
+    const next = chain.slice(0, depthIdx)
+    if (value) next.push(value)
+    setChain(next)
+  }
+
+  // Suggestions kept for back-compat — show top breakout-rich genres
+  // beneath the cascade as quick-pick chips.
   const genreSuggestions = (opps.data?.data?.data || []).slice(0, 30)
 
   const handleSubmit = async () => {
@@ -238,48 +301,97 @@ function GenerateFromGenreModal({ onClose, onCreated }) {
           </p>
 
           <div>
-            <label className="text-xs text-zinc-400 block mb-1">Genre / subgenre</label>
-            <input
-              type="text"
-              value={genre}
-              onChange={(e) => setGenre(e.target.value)}
-              placeholder="pop.k-pop, hip-hop.trap, latin.reggaeton…"
-              className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 font-mono"
-            />
-            {genreSuggestions.length > 0 && (
-              <div className="mt-2">
-                <div className="text-[10px] text-zinc-500 mb-1">
-                  Quick pick (genres with recent breakout data — guaranteed to generate):
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {genreSuggestions.map((g) => {
-                    const id = g.genre_id || g.id || g.genre
-                    if (!id) return null
-                    const isActive = id === genre
-                    return (
-                      <button
-                        key={id}
-                        type="button"
-                        onClick={() => setGenre(id)}
-                        className={`px-2 py-0.5 text-[10px] rounded font-mono border transition-colors ${
-                          isActive
-                            ? 'bg-violet-600/30 text-violet-200 border-violet-500/50'
-                            : 'text-zinc-300 border-zinc-700 hover:border-violet-500/50 hover:text-violet-200'
-                        }`}
-                        title={g.breakout_count ? `${g.breakout_count} breakouts in 30d` : ''}
-                      >
-                        {id}
-                      </button>
-                    )
-                  })}
-                </div>
+            <label className="text-xs text-zinc-400 block mb-1">Genre — drill down to the most granular level</label>
+
+            {/* Cascading dropdowns: root → subgenre → sub-subgenre → … */}
+            {allGenres.isLoading && (
+              <div className="flex items-center gap-2 text-xs text-zinc-500 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded">
+                <Loader2 size={12} className="animate-spin" /> Loading 959-genre taxonomy…
               </div>
             )}
+            {allGenres.isError && (
+              <div className="text-xs text-rose-300 px-3 py-2 bg-rose-500/10 border border-rose-500/30 rounded">
+                Could not load genre taxonomy: {allGenres.error?.message || 'request failed'}.
+                Check that your API key is set (Settings).
+              </div>
+            )}
+            {!allGenres.isLoading && !allGenres.isError && genreList.length === 0 && (
+              <div className="text-xs text-amber-300 px-3 py-2 bg-amber-500/10 border border-amber-500/30 rounded">
+                Genre list is empty — the /genres endpoint returned no rows. Use the breakout-rich list below or type a genre id directly into the manual flow.
+              </div>
+            )}
+            {!allGenres.isLoading && !allGenres.isError && genreList.length > 0 && (() => {
+              const rows = []
+              // Depth 0: roots — every genre with parent_id=null. Shown
+              // ALWAYS, regardless of breakout/charting data.
+              const roots = childrenByParent.get('__root__') || []
+              rows.push(
+                <CascadeLevel
+                  key="depth-0"
+                  label={`Top-level genre (${roots.length})`}
+                  options={roots}
+                  value={chain[0] || ''}
+                  onChange={(v) => setChainAt(0, v)}
+                />
+              )
+              // Subsequent depths: children of the previously-picked id.
+              for (let d = 0; d < chain.length; d++) {
+                const parent = chain[d]
+                const children = childrenByParent.get(parent) || []
+                if (children.length === 0) break
+                rows.push(
+                  <CascadeLevel
+                    key={`depth-${d + 1}`}
+                    label={`${d === 0 ? 'Subgenre' : `Sub${'-sub'.repeat(d)}genre`} (${children.length})`}
+                    options={children}
+                    value={chain[d + 1] || ''}
+                    onChange={(v) => setChainAt(d + 1, v)}
+                    optional
+                  />
+                )
+              }
+              return <div className="space-y-2">{rows}</div>
+            })()}
+
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] text-zinc-500">Selected:</span>
+              <code className="text-xs font-mono text-violet-300">{genre}</code>
+              <span className="text-[10px] text-zinc-600">({genreList.length} genres in taxonomy)</span>
+            </div>
+
+            <details className="mt-3">
+              <summary className="text-[10px] text-zinc-500 cursor-pointer hover:text-zinc-300">
+                Or pick from genres with recent breakout data ({genreSuggestions.length}) — guaranteed to generate
+              </summary>
+              <div className="flex flex-wrap gap-1 mt-2">
+                {genreSuggestions.map((g) => {
+                  const id = g.genre_id || g.id || g.genre
+                  if (!id) return null
+                  const isActive = id === genre
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setChain(id.split('.').reduce((acc, _, i, arr) => {
+                        acc.push(arr.slice(0, i + 1).join('.'))
+                        return acc
+                      }, []))}
+                      className={`px-2 py-0.5 text-[10px] rounded font-mono border transition-colors ${
+                        isActive
+                          ? 'bg-violet-600/30 text-violet-200 border-violet-500/50'
+                          : 'text-zinc-300 border-zinc-700 hover:border-violet-500/50 hover:text-violet-200'
+                      }`}
+                      title={g.breakout_count ? `${g.breakout_count} breakouts in 30d` : ''}
+                    >
+                      {id}
+                    </button>
+                  )
+                })}
+              </div>
+            </details>
+
             <div className="text-[10px] text-zinc-600 mt-2">
-              Or type any canonical dotted-genre id from <code>shared/genre_taxonomy.py</code>.
-              The smart-prompt LLM needs ≥1 breakout event in the last 30 days for the chosen
-              genre — pick one above to be safe, or use <strong>Create manually</strong> for
-              genres without breakout data.
+              The smart-prompt LLM needs ≥1 breakout event in the last 30 days for the chosen genre. If your pick has none, you'll see a "no breakouts" error and can either pick a parent genre, switch to one with breakouts, or use <strong>Create manually</strong>.
             </div>
           </div>
 
@@ -670,7 +782,7 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
           <button onClick={onClose} className="px-4 py-2 text-zinc-400 text-xs hover:text-zinc-200">Cancel</button>
           <button
             onClick={handleSubmit}
-            disabled={mut.isPending || !genreId.trim() || !smartPromptText.trim()}
+            disabled={mut.isPending || primaryGenres.length === 0 || !smartPromptText.trim()}
             className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium rounded flex items-center gap-2"
           >
             {mut.isPending ? <Loader2 size={14} className="animate-spin" /> : <Edit3 size={14} />}
