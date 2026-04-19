@@ -946,6 +946,42 @@ export function useDeleteBlueprint() {
   })
 }
 
+// -------- SongLab (#26, #27) --------
+
+// All structures whose primary_genre is on the dotted-chain ancestry
+// of the requested genre. Most-specific first.
+export function useStructuresForGenre(genre) {
+  return useQuery({
+    queryKey: ['admin', 'structures-for-genre', genre],
+    queryFn: () => makeRequest('GET', `/admin/structures-for-genre/${encodeURIComponent(genre)}`),
+    enabled: !!genre,
+    staleTime: 30_000,
+  })
+}
+
+// Compose smart prompt + generate lyrics for a (blueprint, artist,
+// theme, rating) combo. NO music provider call yet — strictly preview.
+export function useSongLabPreview() {
+  return useMutation({
+    mutationFn: (body) => makeRequest('POST', '/admin/songlab/preview', {}, body),
+  })
+}
+
+// Final song generation. Reuses the existing endpoint with the new
+// SongLab override fields (artist_id, prompt_override, lyrics_override,
+// structure_override, primary_genre_override).
+export function useSongLabGenerate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ blueprintId, body }) =>
+      makeRequest('POST', `/admin/blueprints/${blueprintId}/generate-song`, {}, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'songs'] })
+      qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] })
+    },
+  })
+}
+
 // -------- Genre structures (task #109) --------
 
 export function useGenreStructures() {

@@ -4598,6 +4598,160 @@ async def generate_blueprint_from_genre(
     }
 
 
+# ── SongLab preview (#26) ────────────────────────────────────────────────
+# The preview endpoint composes the smart prompt + generates lyrics for
+# a (blueprint, artist, theme, rating) combo WITHOUT calling the music
+# provider. Output is shown in the SongLab window so the user can edit
+# either text before triggering the actual generation.
+
+class SongLabPreviewRequest(BaseModel):
+    blueprint_id: str
+    artist_id: str
+    theme: str | None = None
+    content_rating: str | None = None  # 'clean' | 'explicit' | None
+    structure_override: list[dict] | None = None  # caller's chosen structure
+    primary_genre_override: str | None = None     # if user picks a different genre
+
+
+@router.post("/api/v1/admin/songlab/preview")
+async def songlab_preview(
+    body: SongLabPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Compose smart prompt + generate lyrics for a (blueprint, artist,
+    theme, rating) combo. Does NOT call the music provider — strictly a
+    preview the user can edit before committing."""
+    import uuid as _uuid
+    from api.models.ai_artist import AIArtist
+    from api.models.song_blueprint import SongBlueprint
+    from api.services.freeform_lyrics import generate_freeform_lyrics
+    from api.services.generation_orchestrator import assemble_generation_prompt
+    from api.services.genre_traits_service import resolve_genre_traits
+    from api.services.structure_prompt import structure_block_for_prompt
+    from api.services.structure_resolver import resolve_structure_for_song
+
+    try:
+        bp_uuid = _uuid.UUID(body.blueprint_id)
+        a_uuid = _uuid.UUID(body.artist_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id or artist_id")
+
+    bp = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if bp is None:
+        raise HTTPException(404, detail="blueprint not found")
+
+    artist = (await db.execute(
+        select(AIArtist).where(AIArtist.artist_id == a_uuid)
+    )).scalar_one_or_none()
+    if artist is None:
+        raise HTTPException(404, detail="artist not found")
+
+    primary_genre = (
+        body.primary_genre_override
+        or bp.primary_genre or bp.genre_id
+        or artist.primary_genre
+        or "pop"
+    )
+
+    # Resolve structure: caller-provided override wins; else walk the
+    # genre_structures + artist override chain.
+    structure_block = ""
+    try:
+        if body.structure_override and isinstance(body.structure_override, list):
+            structure_block = structure_block_for_prompt(body.structure_override)
+        else:
+            resolved_structure = await resolve_structure_for_song(
+                db, artist=artist, primary_genre=primary_genre,
+            )
+            structure_block = structure_block_for_prompt(resolved_structure)
+    except Exception:
+        logger.exception("[songlab-preview] structure resolution failed; continuing")
+
+    # Genre traits — needed for theme=genre_default
+    genre_traits_dict: dict | None = None
+    if (body.theme or "").strip() == "genre_default":
+        try:
+            traits = await resolve_genre_traits(db, primary_genre)
+            genre_traits_dict = {
+                "notes": getattr(traits, "notes", None),
+                "structural_conventions": getattr(traits, "structural_conventions", None),
+                "vocabulary_era": getattr(traits, "vocabulary_era", None),
+            }
+        except Exception:
+            logger.exception("[songlab-preview] genre_traits load failed")
+
+    artist_dict = {
+        "voice_dna": artist.voice_dna,
+        "persona_dna": artist.persona_dna,
+        "lyrical_dna": artist.lyrical_dna,
+        "song_count": artist.song_count or 0,
+        "content_rating": artist.content_rating or "mild",
+    }
+    blueprint_dict = {
+        "primary_genre": primary_genre,
+        "genre_id": bp.genre_id,
+        "adjacent_genres": bp.adjacent_genres or [],
+        "target_themes": bp.target_themes or [],
+        "avoid_themes": bp.avoid_themes or [],
+        "vocabulary_tone": bp.vocabulary_tone,
+        "target_audience_tags": bp.target_audience_tags or [],
+        "voice_requirements": bp.voice_requirements,
+        "target_tempo": bp.target_tempo,
+        "target_key": bp.target_key,
+        "target_mode": bp.target_mode,
+        "target_energy": bp.target_energy,
+        "target_danceability": bp.target_danceability,
+        "target_valence": bp.target_valence,
+        "target_acousticness": bp.target_acousticness,
+        "production_notes": bp.production_notes,
+        "reference_track_descriptors": bp.reference_track_descriptors or [],
+    }
+
+    composed_prompt = assemble_generation_prompt(
+        artist=artist_dict,
+        blueprint=blueprint_dict,
+        voice_state=None,  # preview path doesn't read voice state
+        structure_block=structure_block,
+        theme=body.theme,
+        content_rating_override=body.content_rating,
+        genre_traits=genre_traits_dict,
+    )
+
+    # Resolve theme to a directive string for the lyrics LLM. Uses the
+    # same picklist semantics as the orchestrator so the lyrics align.
+    theme_directive = None
+    if body.theme and body.theme not in ("artist_default", ""):
+        if body.theme == "genre_default":
+            theme_directive = (genre_traits_dict or {}).get("notes")
+        elif body.theme in ("love_relationships", "sex", "introspection",
+                            "family", "god", "partying"):
+            theme_directive = body.theme.replace("_", " ")
+        else:
+            theme_directive = body.theme  # free text
+
+    lyrics_result = await generate_freeform_lyrics(
+        db,
+        artist=artist,
+        blueprint=bp,
+        theme_directive=theme_directive,
+        content_rating_override=body.content_rating,
+    )
+    lyrics_text = lyrics_result.get("lyrics") or ""
+    lyrics_error = lyrics_result.get("error")
+
+    return {
+        "prompt": composed_prompt,
+        "lyrics": lyrics_text,
+        "lyrics_error": lyrics_error,
+        "title_suggested": lyrics_result.get("title"),
+        "primary_genre": primary_genre,
+        "structure_used": body.structure_override or None,
+    }
+
+
 @router.delete("/api/v1/admin/blueprints/{blueprint_id}")
 async def delete_blueprint(
     blueprint_id: str,
@@ -6708,6 +6862,15 @@ class GenerateSongRequest(BaseModel):
     #     artist's content_rating for THIS song only.
     theme: str | None = None
     content_rating_override: str | None = None
+    # SongLab additions (#27): the new flow lets the user pick the
+    # artist explicitly (instead of the now-deprecated assigned_artist_id
+    # field on the blueprint), and edit the composed prompt + lyrics
+    # before kicking off the music provider.
+    artist_id: str | None = None
+    prompt_override: str | None = None
+    lyrics_override: str | None = None
+    structure_override: list[dict] | None = None
+    primary_genre_override: str | None = None
 
 
 @router.post("/api/v1/admin/blueprints/{blueprint_id}/generate-song")
@@ -6758,19 +6921,29 @@ async def generate_song_for_blueprint(
     )).scalar_one_or_none()
     if blueprint is None:
         raise HTTPException(404, detail="blueprint not found")
-    if blueprint.assigned_artist_id is None:
+
+    # Resolve artist: explicit body.artist_id > legacy assigned_artist_id.
+    # Post-#28 SongLab pivot the assignment column is no longer required.
+    target_artist_id = None
+    if body.artist_id:
+        try:
+            target_artist_id = _uuid.UUID(body.artist_id)
+        except ValueError:
+            raise HTTPException(400, detail="invalid artist_id")
+    elif blueprint.assigned_artist_id is not None:
+        target_artist_id = blueprint.assigned_artist_id
+    else:
         raise HTTPException(
             409,
-            detail="blueprint has no assigned_artist_id — run the assignment engine "
-                   "and approve via the CEO gate first",
+            detail="no artist provided — pass artist_id in the body (SongLab "
+                   "flow) or pre-assign one to the blueprint",
         )
 
-    # Load artist
     artist = (await db.execute(
-        select(AIArtist).where(AIArtist.artist_id == blueprint.assigned_artist_id)
+        select(AIArtist).where(AIArtist.artist_id == target_artist_id)
     )).scalar_one_or_none()
     if artist is None:
-        raise HTTPException(500, detail="assigned artist row missing")
+        raise HTTPException(404, detail="artist not found")
 
     # Voice state — optional (None for first song)
     from sqlalchemy import text as _text
@@ -6853,18 +7026,21 @@ async def generate_song_for_blueprint(
     }
     # Task #109: resolve per-genre structure (with optional artist override
     # / blend) and format as a [STRUCTURE] tag block prepended to the
-    # final prompt. Failure here is non-fatal — generation must still
-    # work even if the structure table is unreachable.
+    # final prompt. SongLab override (#27) wins if the caller picked one.
+    # Failure here is non-fatal — generation must still work even if the
+    # structure table is unreachable.
+    effective_genre = body.primary_genre_override or blueprint.primary_genre or blueprint.genre_id or "pop"
     structure_block = ""
     try:
         from api.services.structure_resolver import resolve_structure_for_song
         from api.services.structure_prompt import structure_block_for_prompt
-        resolved_structure = await resolve_structure_for_song(
-            db,
-            artist=artist,
-            primary_genre=blueprint.primary_genre or blueprint.genre_id or "pop",
-        )
-        structure_block = structure_block_for_prompt(resolved_structure)
+        if body.structure_override and isinstance(body.structure_override, list):
+            structure_block = structure_block_for_prompt(body.structure_override)
+        else:
+            resolved_structure = await resolve_structure_for_song(
+                db, artist=artist, primary_genre=effective_genre,
+            )
+            structure_block = structure_block_for_prompt(resolved_structure)
     except Exception:
         logger.exception("[orchestrator] structure resolution failed; continuing without [STRUCTURE] block")
 
@@ -6886,7 +7062,7 @@ async def generate_song_for_blueprint(
         except Exception:
             logger.exception("[orchestrator] genre_traits load failed for theme=genre_default")
 
-    final_prompt = assemble_generation_prompt(
+    composed_prompt = assemble_generation_prompt(
         artist=artist_dict,
         blueprint=blueprint_dict,
         voice_state=voice_state_dict,
@@ -6896,6 +7072,18 @@ async def generate_song_for_blueprint(
         genre_traits=genre_traits_dict,
         legacy_smart_prompt_text=fresh_smart_prompt_text,
     )
+
+    # SongLab override (#27): if the user edited the prompt in the
+    # preview window, use their version verbatim. Otherwise fall back
+    # to the freshly-composed one. If lyrics_override is also supplied,
+    # append it as a [LYRICS] block so Suno sings what the user wrote.
+    if body.prompt_override and body.prompt_override.strip():
+        final_prompt = body.prompt_override.strip()
+    else:
+        final_prompt = composed_prompt
+    if body.lyrics_override and body.lyrics_override.strip():
+        final_prompt = f"{final_prompt}\n\n[LYRICS]\n{body.lyrics_override.strip()}"
+
     title = body.title or derive_song_title(blueprint_dict, artist_dict)
 
     # Call provider

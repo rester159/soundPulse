@@ -108,6 +108,29 @@ async def get_genre_structure(
     return _to_out(row)
 
 
+@router.get("/api/v1/admin/structures-for-genre/{primary_genre:path}")
+async def list_structures_for_genre(
+    primary_genre: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Return every genre_structure whose primary_genre is on the
+    dotted-chain ancestry of the requested genre. Powers the SongLab
+    structure dropdown — the most-specific match is the default; the
+    user can swap to a parent's structure if they prefer."""
+    from api.services.genre_structures_service import _candidate_genre_ids
+    candidates = _candidate_genre_ids(primary_genre)
+    if not candidates:
+        return {"items": []}
+    rows = (await db.execute(
+        select(GenreStructure).where(GenreStructure.primary_genre.in_(candidates))
+    )).scalars().all()
+    # Order most-specific-first so the UI default matches the resolver.
+    rank = {gid: i for i, gid in enumerate(candidates)}
+    rows = sorted(rows, key=lambda r: rank.get(r.primary_genre, 999))
+    return {"items": [_to_out(r) for r in rows], "count": len(rows)}
+
+
 @router.put("/api/v1/admin/genre-structures/{primary_genre:path}")
 async def upsert_genre_structure_endpoint(
     primary_genre: str,

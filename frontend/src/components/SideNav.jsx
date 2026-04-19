@@ -128,31 +128,30 @@ function pluck(layout, id) {
 //   placement: 'before' | 'after' | 'inside'
 function performDrop(layout, sourceId, targetId, placement) {
   if (sourceId === targetId) return layout
-  // Pluck first
   const [stripped, taken] = pluck(layout, sourceId)
   if (!taken) return layout
 
-  // Inside a folder
+  // Local helper — never lose `taken`. Any path that fails to find the
+  // intended landing spot pushes it to the top of the layout instead of
+  // dropping it on the floor.
+  const safeFallback = () => { stripped.unshift(taken); return stripped }
+
   if (placement === 'inside') {
-    if (taken.type === 'folder') return layout  // Can't nest folders
+    if (taken.type === 'folder') return layout
     const folder = stripped.find((n) => n.type === 'folder' && n.id === targetId)
-    if (!folder) return layout
+    if (!folder) return safeFallback()
     folder.children = folder.children || []
     folder.children.push(taken)
     return stripped
   }
 
-  // Before/after a top-level node
   const tIdx = stripped.findIndex((n) => n.id === targetId)
   if (tIdx === -1) {
-    // Target was inside a folder — drop just before/after that child
     for (const n of stripped) {
       if (n.type !== 'folder') continue
       const ci = (n.children || []).findIndex((c) => c.id === targetId)
       if (ci !== -1) {
         if (taken.type === 'folder') {
-          // Can't put a folder inside another folder — promote it to top
-          // level just after the target's parent folder.
           const parentIdx = stripped.findIndex((x) => x.id === n.id)
           stripped.splice(parentIdx + (placement === 'after' ? 1 : 0), 0, taken)
           return stripped
@@ -162,7 +161,7 @@ function performDrop(layout, sourceId, targetId, placement) {
         return stripped
       }
     }
-    return stripped
+    return safeFallback()
   }
   const insertAt = placement === 'after' ? tIdx + 1 : tIdx
   stripped.splice(insertAt, 0, taken)
@@ -329,13 +328,27 @@ export default function SideNav({ navItems, onItemClick }) {
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
         <span className="text-[10px] uppercase tracking-wider text-zinc-500">Navigation</span>
-        <button
-          onClick={() => setLayout(addFolder(layout))}
-          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-violet-300 hover:text-violet-200 border border-violet-500/30 rounded"
-          title="Add folder"
-        >
-          <FolderPlus size={10} /> Folder
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => {
+              if (confirm('Reset nav to default order? Your folders will be removed and every tab returns to the top level.')) {
+                try { localStorage.removeItem(STORAGE_KEY) } catch {}
+                setLayout(loadLayout(navItems))
+              }
+            }}
+            className="text-[10px] text-zinc-500 hover:text-zinc-300 px-1.5 py-0.5 border border-zinc-800 rounded"
+            title="Reset nav layout (recovers any tabs lost in folders)"
+          >
+            Reset
+          </button>
+          <button
+            onClick={() => setLayout(addFolder(layout))}
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-violet-300 hover:text-violet-200 border border-violet-500/30 rounded"
+            title="Add folder"
+          >
+            <FolderPlus size={10} /> Folder
+          </button>
+        </div>
       </div>
 
       <nav className="flex-1 flex flex-col gap-0.5 px-2 py-3 overflow-y-auto">

@@ -137,6 +137,8 @@ async def generate_freeform_lyrics(
     artist,
     instrumental=None,
     blueprint=None,
+    theme_directive: str | None = None,
+    content_rating_override: str | None = None,
 ) -> dict[str, Any]:
     """
     Call Gemini flash to produce a full STYLE + LYRICS block for an
@@ -180,10 +182,18 @@ async def generate_freeform_lyrics(
         if isinstance(targets, list) and targets:
             bp_theme = f"\nBlueprint target themes (prefer these): {', '.join(targets[:3])}"
 
+    # Per-song theme override picked in the SongLab window. Wins over
+    # the blueprint's target themes — caller already resolved picklist
+    # values vs free text.
+    if theme_directive:
+        bp_theme = f"\nPER-SONG THEME (override — focus the lyrics here): {theme_directive}"
+
+    effective_rating = (content_rating_override or artist.content_rating or "mild").lower()
+
     user = f"""ARTIST: {artist.stage_name}
   primary_genre: {artist.primary_genre}
   edge_profile: {getattr(artist, 'edge_profile', 'flirty_edge')}
-  content_rating: {artist.content_rating or 'mild'}
+  content_rating: {effective_rating}
   gender_presentation: {artist.gender_presentation or 'unspecified'}
   ethnicity_heritage: {artist.ethnicity_heritage or 'unspecified'}
 
