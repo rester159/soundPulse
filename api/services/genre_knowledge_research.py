@@ -70,9 +70,15 @@ async def research_genre_blueprint(
     db: AsyncSession,
     *,
     genre_id: str,
+    web_context: str | None = None,
 ) -> dict[str, Any]:
-    """Knowledge-only LLM research for a genre. Returns a dict with the
-    blueprint columns filled in, or {"error": "..."} on failure.
+    """LLM research for a genre. Returns a dict with the blueprint
+    columns filled in, or {"error": "..."} on failure.
+
+    `web_context`, if provided, is real article text fetched from
+    Wikipedia (or BlackTip browser research) that grounds the LLM in
+    accurate, current information instead of leaning on training data
+    alone.
 
     The caller is expected to persist the output as a SongBlueprint with
     primary_genre=genre_id, is_genre_default=true.
@@ -80,7 +86,20 @@ async def research_genre_blueprint(
     if not genre_id or not genre_id.strip():
         return {"error": "genre_id is required"}
 
-    user = f"""Describe the genre id "{genre_id.strip()}" as a JSON blueprint following the schema in the system prompt. Return only the JSON now."""
+    grounding = ""
+    if web_context and web_context.strip():
+        grounding = (
+            "\n\nUSE THE FOLLOWING SOURCE TEXT AS YOUR PRIMARY GROUND TRUTH "
+            "for production traits, regional roots, era, and conventions. "
+            "Where it conflicts with your training memory, prefer the source.\n\n"
+            "--- SOURCE TEXT ---\n"
+            f"{web_context.strip()[:6000]}\n"
+            "--- END SOURCE ---"
+        )
+
+    user = f"""Describe the genre id "{genre_id.strip()}" as a JSON blueprint following the schema in the system prompt.{grounding}
+
+Return only the JSON now."""
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

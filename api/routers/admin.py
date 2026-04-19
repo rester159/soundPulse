@@ -4561,16 +4561,31 @@ async def generate_blueprint_from_genre(
         rationale = sp.get("rationale") or {}
         composed_prompt_text = sp["prompt"]
     else:
-        # Knowledge-only fallback. Doesn't depend on breakout data.
+        # Hybrid research fallback (#30):
+        #   1. Pull Wikipedia article text for the genre as ground truth.
+        #   2. Feed it to the LLM along with our blueprint schema prompt.
+        #   3. If Wikipedia returns nothing useful, the LLM falls back
+        #      to its training memory only (still produces a valid
+        #      blueprint, just lower confidence).
         from api.services.genre_knowledge_research import research_genre_blueprint
-        kb = await research_genre_blueprint(db, genre_id=genre)
+        from api.services.wikipedia_genre_research import fetch_wikipedia_context
+        try:
+            web_context = await fetch_wikipedia_context(genre)
+        except Exception:
+            logger.exception("[blueprint-research-base] wikipedia fetch failed for %s", genre)
+            web_context = ""
+        kb = await research_genre_blueprint(
+            db, genre_id=genre, web_context=web_context or None,
+        )
         if kb.get("error"):
             raise HTTPException(
                 502,
                 detail=f"both smart_prompt and knowledge-only research failed: {kb['error']}",
             )
         rationale = kb
-        detected_via = "research_base_knowledge_only"
+        detected_via = (
+            "research_base_wikipedia_grounded" if web_context else "research_base_knowledge_only"
+        )
 
     row = SongBlueprint(
         genre_id=genre,
