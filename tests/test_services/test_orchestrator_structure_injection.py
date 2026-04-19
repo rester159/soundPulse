@@ -72,3 +72,90 @@ def test_empty_structure_block_does_not_inject_header():
         structure_block="",
     )
     assert "[STRUCTURE]" not in prompt
+
+
+# ── Persona + Lyrical DNA injection ───────────────────────────────────────
+# User requirement: artist's persona + lyrical DNA must be in EVERY
+# song-generation prompt regardless of blueprint, so the artist stays
+# recognizable across blueprints / sessions.
+
+def _artist_with_dna():
+    return {
+        "voice_dna": {"timbre_core": "warm tenor"},
+        "persona_dna": {
+            "backstory": "Raised in Atlanta, moved to Seoul at 17.",
+            "personality_traits": ["confident", "flirty", "internet-native"],
+            "posting_style": "casual photo dumps with one-line captions",
+        },
+        "lyrical_dna": {
+            "recurring_themes": ["midnight drives", "longing", "neon"],
+            "vocab_level": "conversational",
+            "language": "en",
+            "perspective": "first person",
+        },
+        "song_count": 0,
+        "content_rating": "mild",
+    }
+
+
+def test_persona_dna_block_injected_when_present():
+    prompt = assemble_generation_prompt(
+        artist=_artist_with_dna(), blueprint=_blueprint(), voice_state=None,
+    )
+    assert "[PERSONA]" in prompt
+    assert "Backstory: Raised in Atlanta" in prompt
+    assert "Personality traits: confident, flirty, internet-native" in prompt
+    assert "Posting / social tone: casual photo dumps" in prompt
+
+
+def test_lyrical_dna_block_injected_when_present():
+    prompt = assemble_generation_prompt(
+        artist=_artist_with_dna(), blueprint=_blueprint(), voice_state=None,
+    )
+    assert "[LYRICAL DNA]" in prompt
+    assert "Recurring themes: midnight drives, longing, neon" in prompt
+    assert "Vocabulary tier: conversational" in prompt
+    assert "Language: en" in prompt
+    assert "Perspective: first person" in prompt
+
+
+def test_persona_and_lyrical_blocks_skipped_when_absent():
+    """A bare artist (no persona/lyrical DNA fields) must not produce
+    empty [PERSONA] / [LYRICAL DNA] headers."""
+    prompt = assemble_generation_prompt(
+        artist=_artist(), blueprint=_blueprint(), voice_state=None,
+    )
+    assert "[PERSONA]" not in prompt
+    assert "[LYRICAL DNA]" not in prompt
+
+
+def test_persona_dna_injection_independent_of_blueprint():
+    """The user's hard requirement: persona DNA appears in the prompt
+    EVEN IF the blueprint mentions nothing about the artist's brand.
+    The blueprint can change song-to-song; persona is a constant."""
+    bp = {"smart_prompt_text": "STYLE: punk thrash. LYRICS: scream about politics."}
+    prompt = assemble_generation_prompt(
+        artist=_artist_with_dna(), blueprint=bp, voice_state=None,
+    )
+    assert "[PERSONA]" in prompt
+    assert "[LYRICAL DNA]" in prompt
+    # Smart prompt still appears too — DNA layers ON TOP of, not in
+    # place of, the blueprint.
+    assert "punk thrash" in prompt
+
+
+def test_persona_block_passes_through_unknown_keys():
+    """Unrecognized string-valued keys on persona_dna get surfaced in
+    the [PERSONA] block automatically — no code change needed when the
+    schema picks up new fields."""
+    artist = _artist()
+    artist["persona_dna"] = {
+        "backstory": "—",
+        "favorite_food": "Korean BBQ",  # not in the explicit handler
+        "spirit_animal": "snow leopard",
+    }
+    prompt = assemble_generation_prompt(
+        artist=artist, blueprint=_blueprint(), voice_state=None,
+    )
+    assert "Favorite food: Korean BBQ" in prompt
+    assert "Spirit animal: snow leopard" in prompt

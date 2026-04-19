@@ -6578,9 +6578,14 @@ async def generate_song_for_blueprint(
         # Convert SQLAlchemy Row to dict of named attributes
         voice_state_dict = {k: getattr(vs, k) for k in vs._mapping.keys()}
 
-    # Assemble artist + blueprint dicts for the orchestrator service
+    # Assemble artist + blueprint dicts for the orchestrator service.
+    # persona_dna + lyrical_dna are injected unconditionally so the
+    # artist's identity stays stable across blueprints — see
+    # api/services/generation_orchestrator.py docstring.
     artist_dict = {
         "voice_dna": artist.voice_dna,
+        "persona_dna": artist.persona_dna,
+        "lyrical_dna": artist.lyrical_dna,
         "song_count": artist.song_count or 0,
         "content_rating": artist.content_rating or "mild",
     }
@@ -7480,6 +7485,8 @@ async def _generate_song_with_instrumental_core(
 
     artist_dict = {
         "voice_dna": artist.voice_dna,
+        "persona_dna": artist.persona_dna,
+        "lyrical_dna": artist.lyrical_dna,
         "song_count": artist.song_count or 0,
         "content_rating": artist.content_rating or "mild",
     }
