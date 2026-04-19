@@ -673,3 +673,17 @@ Frontend hook: useUpdateArtistManual in useSoundPulse.js — mirrors useCreateAr
 Modal refactor: AddArtistModal accepts existingArtist prop. When provided, all 30+ form fields prefill from voice_dna / visual_dna / fashion_dna / lyrical_dna / persona_dna blobs (with defensive null-handling on JSONB sub-keys + array-to-CSV conversion for textareas). Header switches to 'Edit artist — {stage_name}'. Submit button switches to 'Save changes' icon Save. Portrait checkbox hidden in edit mode. Success banner says 'Saved' instead of 'Created' and lists fields_updated.
 
 Edit buttons in two places on ArtistCard: (1) compact text+icon button in collapsed header row right of song count, (2) richer button in expanded panel grouped with Regen-portrait button on portrait overlay. Both stopPropagation so opening the modal doesn't toggle the card.
+
+## 2026-04-18 17:03:04 — Mobile UX fix: responsive layout + config banner + share-to-device flow
+
+Root cause of "no data on mobile": each browser has its own localStorage so the API key + base URL set on desktop don't follow to mobile. Frontend was failing silently — missing key + missing URL just left every query empty with no UI hint of why. Compounded by a desktop-only layout (fixed w-52 sidebar + assistant panel ate the entire phone screen, leaving content invisible).
+
+Three fixes shipped:
+
+1. Layout.jsx mobile-responsive: sidebar now hidden md+ collapses to a hamburger-triggered slide-in drawer on mobile (closed-by-default, closes on route change). Top bar shows hamburger + SoundPulse logo on small screens, version badge on the right. Assistant panel + its floating re-open button hidden on mobile entirely.
+
+2. Persistent 'API not configured' banner in Layout, visible across every page when API key OR base URL is missing in localStorage. Click → opens Settings drawer. Tells the user exactly what's missing (key, URL, or both) and explicitly explains the per-browser-localStorage gotcha + points to the share-link flow. Reactive: re-checks on storage event AND on a custom soundpulse_config_changed event the SettingsDrawer fires after save, so the banner disappears the instant config is filled.
+
+3. SettingsDrawer share-to-device flow: 'Generate & copy share link' button on the desktop settings encodes the {apiKey, baseUrl} as base64 + appends ?config= to the current URL. User texts/emails the link to themselves. Mobile opens the link → SettingsDrawer auto-detects ?config= on mount → shows a violet 'Import settings from another device?' card with the URL + truncated key preview + Apply / Dismiss buttons. Apply persists to localStorage, fires soundpulse_config_changed (banner disappears + queries refetch), strips ?config= from the URL via history.replaceState (so the API key doesn't sit in the address bar after import).
+
+vite build passes (only the pre-existing CSS @import warning, unrelated).

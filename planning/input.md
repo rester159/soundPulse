@@ -131,3 +131,7 @@ can you write the streamlined PRD as a .doc document?
 ## 2026-04-18 10:30:00
 
 add an edit button on each artist page - going back to the editing screen that appears when creating an artist manually. Everything needs to be prepopulated
+
+## 2026-04-18 11:15:00
+
+when accessing the app from a mobile phone I do not see any data in the screens

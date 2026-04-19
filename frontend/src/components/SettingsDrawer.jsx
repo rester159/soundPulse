@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { X, Key, Globe, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { X, Key, Globe, AlertTriangle, CheckCircle2, Share2, Copy, Check, Download } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 
 // Generality principle: NO hardcoded production URL or admin key in the
@@ -9,9 +9,32 @@ import { useQueryClient } from '@tanstack/react-query'
 // override. API key comes from the user — we never ship one.
 const VITE_DEFAULT_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
+// Encode/decode the cross-device config blob. Plain base64 of a JSON
+// string — not a secret, just opaque enough that the URL doesn't shout
+// the API key in plaintext when texted/emailed. Server-side keys are
+// what actually gate access; this is a usability convenience.
+function encodeConfig(apiKey, baseUrl) {
+  const json = JSON.stringify({ k: apiKey || '', u: baseUrl || '' })
+  // btoa needs to handle UTF-8 safely
+  return btoa(unescape(encodeURIComponent(json)))
+}
+function decodeConfig(encoded) {
+  try {
+    const json = decodeURIComponent(escape(atob(encoded)))
+    const obj = JSON.parse(json)
+    if (typeof obj === 'object' && obj && (obj.k !== undefined || obj.u !== undefined)) {
+      return { apiKey: obj.k || '', baseUrl: obj.u || '' }
+    }
+  } catch {}
+  return null
+}
+
 export default function SettingsDrawer({ isOpen, onClose }) {
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
+  const [shareLink, setShareLink] = useState('')
+  const [copied, setCopied] = useState(false)
+  const [importPrompt, setImportPrompt] = useState(null)  // { apiKey, baseUrl } when ?config= is present
   const drawerRef = useRef(null)
   const queryClient = useQueryClient()
 
@@ -23,8 +46,23 @@ export default function SettingsDrawer({ isOpen, onClose }) {
         import.meta.env.VITE_API_BASE_URL ||
         '/api/v1'
       )
+      setShareLink('')
+      setCopied(false)
     }
   }, [isOpen])
+
+  // Detect a ?config= query param on EVERY mount (not just when the drawer
+  // opens) so a user who opens a share link goes straight to a prompt.
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const encoded = params.get('config')
+      if (encoded) {
+        const decoded = decodeConfig(encoded)
+        if (decoded) setImportPrompt(decoded)
+      }
+    } catch {}
+  }, [])
 
   useEffect(() => {
     function handleKeyDown(e) {
@@ -34,17 +72,65 @@ export default function SettingsDrawer({ isOpen, onClose }) {
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [isOpen, onClose])
 
-  function handleSave() {
-    localStorage.setItem('soundpulse_api_key', apiKey)
-    localStorage.setItem('soundpulse_base_url', baseUrl)
-    // Invalidate all queries so they refetch with the new URL + key immediately
+  function persistAndNotify(key, url) {
+    localStorage.setItem('soundpulse_api_key', key || '')
+    localStorage.setItem('soundpulse_base_url', url || '')
+    // Tell the rest of the app (Layout's not-configured banner, any other
+    // listener) to recheck. Plain Event since CustomEvent payload isn't
+    // needed — listeners re-read localStorage themselves.
+    try { window.dispatchEvent(new Event('soundpulse_config_changed')) } catch {}
     queryClient.invalidateQueries()
+  }
+
+  function handleSave() {
+    persistAndNotify(apiKey, baseUrl)
     onClose?.()
   }
 
   function applyDefaults() {
     setBaseUrl(VITE_DEFAULT_BASE)
     // Deliberately do NOT prefill the API key — it must come from the user.
+  }
+
+  function handleGenerateShareLink() {
+    const origin = window.location.origin
+    const path = window.location.pathname
+    const encoded = encodeConfig(apiKey, baseUrl)
+    const link = `${origin}${path}?config=${encoded}`
+    setShareLink(link)
+    // Best-effort clipboard write. Falls through silently if denied —
+    // the input is selectable for manual copy.
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(link).then(
+        () => { setCopied(true); setTimeout(() => setCopied(false), 2000) },
+        () => {}
+      )
+    }
+  }
+
+  function handleAcceptImport() {
+    if (!importPrompt) return
+    setApiKey(importPrompt.apiKey)
+    setBaseUrl(importPrompt.baseUrl)
+    persistAndNotify(importPrompt.apiKey, importPrompt.baseUrl)
+    setImportPrompt(null)
+    // Strip the ?config= from the URL so a refresh doesn't re-prompt and
+    // the API key doesn't sit in the address bar.
+    try {
+      const url = new URL(window.location.href)
+      url.searchParams.delete('config')
+      window.history.replaceState({}, '', url.toString())
+    } catch {}
+    onClose?.()
+  }
+
+  function handleDismissImport() {
+    setImportPrompt(null)
+    try {
+      const url = new URL(window.location.href)
+      url.searchParams.delete('config')
+      window.history.replaceState({}, '', url.toString())
+    } catch {}
   }
 
   function handleBackdropClick(e) {
@@ -56,7 +142,11 @@ export default function SettingsDrawer({ isOpen, onClose }) {
     !!localStorage.getItem('soundpulse_api_key') &&
     savedUrl.startsWith('http')
 
-  if (!isOpen) return null
+  // Keep the drawer mounted when an import prompt is pending so the user
+  // can decide. The import prompt itself is a top-of-drawer modal-card.
+  const shouldRender = isOpen || importPrompt
+
+  if (!shouldRender) return null
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end" onClick={handleBackdropClick}>
@@ -76,6 +166,38 @@ export default function SettingsDrawer({ isOpen, onClose }) {
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          {/* Import prompt — shown when this device opened a ?config= share link */}
+          {importPrompt && (
+            <div className="px-4 py-4 bg-violet-500/10 border border-violet-500/40 rounded-lg space-y-3">
+              <div className="flex items-start gap-2.5">
+                <Download className="w-5 h-5 text-violet-300 flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-violet-200">Import settings from another device?</p>
+                  <p className="text-xs text-violet-300/80 mt-1 leading-relaxed">
+                    URL: <span className="font-mono break-all">{importPrompt.baseUrl || '(empty)'}</span>
+                  </p>
+                  <p className="text-xs text-violet-300/80 leading-relaxed">
+                    API key: <span className="font-mono">{importPrompt.apiKey ? `${importPrompt.apiKey.slice(0, 12)}…` : '(empty)'}</span>
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={handleDismissImport}
+                  className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200"
+                >
+                  Dismiss
+                </button>
+                <button
+                  onClick={handleAcceptImport}
+                  className="px-3 py-1.5 text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white rounded"
+                >
+                  Apply &amp; reload data
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Status banner */}
           {!isConfigured ? (
             <div className="flex items-start gap-3 px-4 py-3 bg-amber-900/20 border border-amber-700/40 rounded-lg">
@@ -141,6 +263,36 @@ export default function SettingsDrawer({ isOpen, onClose }) {
             <p className="mt-1.5 text-xs text-zinc-500 break-all">
               Build-time default: {VITE_DEFAULT_BASE}
             </p>
+          </div>
+
+          {/* Share to another device — generates a one-tap import link */}
+          <div className="pt-3 border-t border-zinc-800">
+            <label className="flex items-center gap-2 text-sm font-medium text-zinc-300 mb-2">
+              <Share2 className="w-3.5 h-3.5 text-zinc-500" />
+              Share to another device
+            </label>
+            <p className="text-xs text-zinc-500 mb-2 leading-relaxed">
+              Each browser stores its own API key + URL. Generate a one-tap
+              import link, text or email it to yourself, open on the new
+              device, and tap Apply.
+            </p>
+            <button
+              onClick={handleGenerateShareLink}
+              disabled={!apiKey || !baseUrl}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-900 disabled:text-zinc-600 border border-zinc-700 text-zinc-200 text-xs font-medium rounded transition-colors"
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              {copied ? 'Link copied to clipboard' : 'Generate &amp; copy share link'}
+            </button>
+            {shareLink && (
+              <textarea
+                readOnly
+                value={shareLink}
+                rows={3}
+                onClick={(e) => e.target.select()}
+                className="w-full mt-2 px-2 py-2 bg-zinc-950 border border-zinc-800 rounded text-[11px] text-zinc-300 font-mono break-all resize-none"
+              />
+            )}
           </div>
         </div>
 
