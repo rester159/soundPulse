@@ -1,16 +1,27 @@
 /**
- * Reorderable + folderable left sidebar nav.
+ * Drag-and-drop reorderable, folderable sidebar nav.
  *
- * The user can:
- *   - Reorder tabs up/down in edit mode
- *   - Create folders to group related tabs
- *   - Move tabs into / out of folders
- *   - Rename folders, delete folders (deleting just unfolds them)
+ * UX:
+ *   - Drag any tab to a new spot, or onto a folder header to drop it inside.
+ *   - Drag any folder to reorder among other folders / top-level tabs.
+ *   - Click "+ Folder" to create a new folder at the bottom.
+ *   - Click a folder's name to rename inline (Enter / blur to save, Esc to cancel).
+ *   - Click the trash on a folder to delete it (children unfold to top level).
+ *   - Click the chevron on a folder to collapse / expand.
  *
- * Layout is persisted to localStorage (`soundpulse_nav_layout`) — no
- * backend involved. New nav items added in code that aren't yet in the
- * stored layout get auto-appended to the end on next render so users
- * never lose track of newly-shipped pages.
+ * Layout persists to localStorage `soundpulse_nav_layout`. Newly-shipped
+ * routes auto-append at the end so the user never loses track of new
+ * pages; routes removed in code are dropped on next load.
+ *
+ * Implementation notes — HTML5 native DnD (no external library):
+ *   - Each draggable row carries dataTransfer with a JSON descriptor
+ *     `{ kind: 'item' | 'folder', id }`.
+ *   - Each drop target accepts a drop and asks the layout helpers to
+ *     splice the source into the target's position.
+ *   - Folder headers also act as containers — dropping a tab onto a
+ *     folder header puts it inside that folder.
+ *   - We block recursive folder-into-folder (folders can only nest one
+ *     level by design — see "Structure" below).
  *
  * Structure of the stored layout (a flat list of nodes):
  *   [
@@ -25,32 +36,25 @@
  *   ]
  *
  * `id` for items is the route path (matches NavLink `to`). For folders
- * it's a generated UUID-ish string. Children lists are themselves flat;
- * folders cannot nest folders (one level only — keeps reordering simple).
+ * it's a generated string. Folders cannot nest other folders.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
-  ChevronDown, ChevronUp, ChevronRight, Folder, FolderPlus,
-  Pencil, Trash2, Check, X,
+  ChevronDown, ChevronRight, Folder, FolderPlus, Trash2,
 } from 'lucide-react'
 
 const STORAGE_KEY = 'soundpulse_nav_layout'
+const DRAG_MIME = 'application/x-soundpulse-nav'
 
 function loadLayout(navItems) {
-  // Read from localStorage if present + valid; else default = each item
-  // top-level in the canonical NAV_ITEMS order.
   let stored = null
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) stored = JSON.parse(raw)
   } catch {}
   const knownIds = new Set(navItems.map((i) => i.to))
-
   const layout = Array.isArray(stored) ? stored.filter(Boolean) : []
-
-  // Drop any nodes that point to routes the codebase no longer ships
-  // (avoids dead nav entries when a tab is removed).
   const seen = new Set()
   const cleaned = []
   for (const node of layout) {
@@ -72,8 +76,6 @@ function loadLayout(navItems) {
       })
     }
   }
-  // Append any item that's in NAV_ITEMS but not yet in the stored layout
-  // — handles newly-shipped routes.
   for (const item of navItems) {
     if (!seen.has(item.to)) {
       cleaned.push({ type: 'item', id: item.to })
@@ -84,133 +86,93 @@ function loadLayout(navItems) {
 }
 
 function saveLayout(layout) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(layout))
-  } catch {}
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(layout)) } catch {}
 }
 
-// Walk the layout flat (top-level + folder children) and return an
-// ordered list of {locator, item} where locator describes where the
-// item lives so move/delete operations know what to act on.
-function flatten(layout) {
-  const out = []
-  layout.forEach((node, idx) => {
-    if (node.type === 'item') {
-      out.push({ kind: 'item', id: node.id, parent: 'root', topIdx: idx })
-    } else if (node.type === 'folder') {
-      out.push({ kind: 'folder', id: node.id, name: node.name, collapsed: node.collapsed, topIdx: idx, childCount: (node.children || []).length })
-      ;(node.children || []).forEach((c, ci) => {
-        out.push({ kind: 'item', id: c.id, parent: node.id, topIdx: idx, childIdx: ci })
-      })
+// Locate a node by id, anywhere in the tree. Returns
+// { source: 'root' | folderId, index } or null if not found.
+function locate(layout, id) {
+  for (let i = 0; i < layout.length; i++) {
+    const n = layout[i]
+    if (n.id === id) return { source: 'root', index: i, node: n }
+    if (n.type === 'folder') {
+      const ci = (n.children || []).findIndex((c) => c.id === id)
+      if (ci !== -1) return { source: n.id, index: ci, node: n.children[ci] }
     }
-  })
-  return out
+  }
+  return null
 }
 
-function moveItemUp(layout, itemId) {
+// Pluck a node out of its current location, returning [newLayout, plucked].
+function pluck(layout, id) {
   const next = JSON.parse(JSON.stringify(layout))
   for (let i = 0; i < next.length; i++) {
-    const node = next[i]
-    if (node.type === 'item' && node.id === itemId) {
-      if (i > 0) {
-        ;[next[i - 1], next[i]] = [next[i], next[i - 1]]
-      }
-      return next
+    const n = next[i]
+    if (n.id === id) {
+      const [taken] = next.splice(i, 1)
+      return [next, taken]
     }
-    if (node.type === 'folder') {
-      const ci = (node.children || []).findIndex((c) => c.id === itemId)
+    if (n.type === 'folder') {
+      const ci = (n.children || []).findIndex((c) => c.id === id)
       if (ci !== -1) {
-        if (ci > 0) {
-          ;[node.children[ci - 1], node.children[ci]] = [node.children[ci], node.children[ci - 1]]
-        } else {
-          // Promote out of folder, just before the folder
-          node.children.splice(ci, 1)
-          next.splice(i, 0, { type: 'item', id: itemId })
+        const [taken] = n.children.splice(ci, 1)
+        return [next, taken]
+      }
+    }
+  }
+  return [layout, null]
+}
+
+// Drop `sourceId` either before/after `targetId` at the top level, or
+// at the end of `targetFolderId`'s children list.
+//   placement: 'before' | 'after' | 'inside'
+function performDrop(layout, sourceId, targetId, placement) {
+  if (sourceId === targetId) return layout
+  // Pluck first
+  const [stripped, taken] = pluck(layout, sourceId)
+  if (!taken) return layout
+
+  // Inside a folder
+  if (placement === 'inside') {
+    if (taken.type === 'folder') return layout  // Can't nest folders
+    const folder = stripped.find((n) => n.type === 'folder' && n.id === targetId)
+    if (!folder) return layout
+    folder.children = folder.children || []
+    folder.children.push(taken)
+    return stripped
+  }
+
+  // Before/after a top-level node
+  const tIdx = stripped.findIndex((n) => n.id === targetId)
+  if (tIdx === -1) {
+    // Target was inside a folder — drop just before/after that child
+    for (const n of stripped) {
+      if (n.type !== 'folder') continue
+      const ci = (n.children || []).findIndex((c) => c.id === targetId)
+      if (ci !== -1) {
+        if (taken.type === 'folder') {
+          // Can't put a folder inside another folder — promote it to top
+          // level just after the target's parent folder.
+          const parentIdx = stripped.findIndex((x) => x.id === n.id)
+          stripped.splice(parentIdx + (placement === 'after' ? 1 : 0), 0, taken)
+          return stripped
         }
-        return next
+        const insertAt = placement === 'after' ? ci + 1 : ci
+        n.children.splice(insertAt, 0, taken)
+        return stripped
       }
     }
+    return stripped
   }
-  return next
-}
-
-function moveItemDown(layout, itemId) {
-  const next = JSON.parse(JSON.stringify(layout))
-  for (let i = 0; i < next.length; i++) {
-    const node = next[i]
-    if (node.type === 'item' && node.id === itemId) {
-      if (i < next.length - 1) {
-        ;[next[i + 1], next[i]] = [next[i], next[i + 1]]
-      }
-      return next
-    }
-    if (node.type === 'folder') {
-      const ci = (node.children || []).findIndex((c) => c.id === itemId)
-      if (ci !== -1) {
-        if (ci < (node.children.length - 1)) {
-          ;[node.children[ci + 1], node.children[ci]] = [node.children[ci], node.children[ci + 1]]
-        } else {
-          // Promote out, just after the folder
-          node.children.splice(ci, 1)
-          next.splice(i + 1, 0, { type: 'item', id: itemId })
-        }
-        return next
-      }
-    }
-  }
-  return next
-}
-
-function moveFolderUp(layout, folderId) {
-  const next = [...layout]
-  const idx = next.findIndex((n) => n.type === 'folder' && n.id === folderId)
-  if (idx > 0) [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]]
-  return next
-}
-function moveFolderDown(layout, folderId) {
-  const next = [...layout]
-  const idx = next.findIndex((n) => n.type === 'folder' && n.id === folderId)
-  if (idx !== -1 && idx < next.length - 1) [next[idx + 1], next[idx]] = [next[idx], next[idx + 1]]
-  return next
-}
-
-function moveItemToFolder(layout, itemId, folderId) {
-  // Remove from current location, push into folder.children
-  const next = JSON.parse(JSON.stringify(layout))
-  // First, locate + remove
-  let plucked = null
-  for (let i = 0; i < next.length; i++) {
-    const node = next[i]
-    if (node.type === 'item' && node.id === itemId) {
-      plucked = next.splice(i, 1)[0]
-      break
-    }
-    if (node.type === 'folder') {
-      const ci = (node.children || []).findIndex((c) => c.id === itemId)
-      if (ci !== -1) {
-        plucked = node.children.splice(ci, 1)[0]
-        break
-      }
-    }
-  }
-  if (!plucked) return layout
-  // Insert
-  if (folderId === 'root') {
-    next.push(plucked)
-  } else {
-    const folder = next.find((n) => n.type === 'folder' && n.id === folderId)
-    if (folder) {
-      folder.children = folder.children || []
-      folder.children.push(plucked)
-    }
-  }
-  return next
+  const insertAt = placement === 'after' ? tIdx + 1 : tIdx
+  stripped.splice(insertAt, 0, taken)
+  return stripped
 }
 
 function addFolder(layout, name = 'New Folder') {
   return [...layout, {
     type: 'folder',
-    id: `folder_${Math.random().toString(36).slice(2, 10)}`,
+    id: `folder_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
     name,
     collapsed: false,
     children: [],
@@ -219,12 +181,11 @@ function addFolder(layout, name = 'New Folder') {
 
 function deleteFolder(layout, folderId) {
   const next = []
-  for (const node of layout) {
-    if (node.type === 'folder' && node.id === folderId) {
-      // Promote children back to top level
-      ;(node.children || []).forEach((c) => next.push(c))
+  for (const n of layout) {
+    if (n.type === 'folder' && n.id === folderId) {
+      ;(n.children || []).forEach((c) => next.push(c))
     } else {
-      next.push(node)
+      next.push(n)
     }
   }
   return next
@@ -244,13 +205,15 @@ function toggleFolderCollapsed(layout, folderId) {
 
 export default function SideNav({ navItems, onItemClick }) {
   const [layout, setLayout] = useState(() => loadLayout(navItems))
-  const [editMode, setEditMode] = useState(false)
   const [renamingFolderId, setRenamingFolderId] = useState(null)
   const [renameDraft, setRenameDraft] = useState('')
+  // Drop-target hover state — id of the row being hovered + placement.
+  const [dropHint, setDropHint] = useState(null)  // { id, placement }
+  const dragSourceId = useRef(null)
 
   useEffect(() => { saveLayout(layout) }, [layout])
 
-  // If NAV_ITEMS gains a route after load, sync it in.
+  // Sync newly-shipped routes / drop dead ones.
   useEffect(() => {
     setLayout((prev) => {
       const known = new Set(navItems.map((i) => i.to))
@@ -260,14 +223,10 @@ export default function SideNav({ navItems, onItemClick }) {
         else if (n.type === 'folder') (n.children || []).forEach((c) => seen.add(c.id))
       })
       const missing = navItems.filter((i) => !seen.has(i.to)).map((i) => ({ type: 'item', id: i.to }))
-      if (missing.length === 0) {
-        // Also drop dead routes to keep the saved layout clean
-        const hasDead = prev.some((n) => n.type === 'item' && !known.has(n.id))
-          || prev.some((n) => n.type === 'folder' && (n.children || []).some((c) => !known.has(c.id)))
-        if (!hasDead) return prev
-        return loadLayout(navItems)
-      }
-      return [...prev, ...missing]
+      const hasDead = prev.some((n) => n.type === 'item' && !known.has(n.id))
+        || prev.some((n) => n.type === 'folder' && (n.children || []).some((c) => !known.has(c.id)))
+      if (missing.length === 0 && !hasDead) return prev
+      return loadLayout(navItems)
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navItems])
@@ -278,43 +237,81 @@ export default function SideNav({ navItems, onItemClick }) {
     return map
   }, [navItems])
 
-  const folders = useMemo(
-    () => layout.filter((n) => n.type === 'folder'),
-    [layout]
-  )
+  // ── DnD handlers ───────────────────────────────────────────────────────
+  const handleDragStart = (id) => (e) => {
+    dragSourceId.current = id
+    try {
+      e.dataTransfer.setData(DRAG_MIME, id)
+      e.dataTransfer.effectAllowed = 'move'
+    } catch {}
+  }
+  const handleDragEnd = () => {
+    dragSourceId.current = null
+    setDropHint(null)
+  }
+  // Compute placement (before/after) based on cursor's vertical position
+  // within the row. Inside is only valid for folder targets.
+  const computePlacement = (e, allowInside) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const y = e.clientY - rect.top
+    const h = rect.height
+    if (allowInside && y > h * 0.25 && y < h * 0.75) return 'inside'
+    return y < h / 2 ? 'before' : 'after'
+  }
+  const handleDragOver = (id, allowInside) => (e) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    const placement = computePlacement(e, allowInside)
+    if (!dropHint || dropHint.id !== id || dropHint.placement !== placement) {
+      setDropHint({ id, placement })
+    }
+  }
+  const handleDragLeave = (id) => () => {
+    if (dropHint?.id === id) setDropHint(null)
+  }
+  const handleDrop = (id, allowInside) => (e) => {
+    e.preventDefault()
+    const sourceId = dragSourceId.current || (() => {
+      try { return e.dataTransfer.getData(DRAG_MIME) } catch { return null }
+    })()
+    const placement = computePlacement(e, allowInside)
+    if (sourceId && sourceId !== id) {
+      setLayout((prev) => performDrop(prev, sourceId, id, placement))
+    }
+    setDropHint(null)
+    dragSourceId.current = null
+  }
+
+  // Visual hint border for drop targets.
+  const hintClass = (id) => {
+    if (dropHint?.id !== id) return ''
+    if (dropHint.placement === 'before') return 'border-t-2 border-t-violet-400'
+    if (dropHint.placement === 'after') return 'border-b-2 border-b-violet-400'
+    return 'ring-2 ring-violet-400/70'  // inside
+  }
 
   const renderItem = (node, parent) => {
     const meta = itemsById.get(node.id)
     if (!meta) return null
     const Icon = meta.icon
     return (
-      <div key={node.id} className="flex items-center gap-1 group">
-        {editMode && (
-          <div className="flex flex-col -mr-1">
-            <button
-              onClick={() => setLayout(moveItemUp(layout, node.id))}
-              className="p-0.5 text-zinc-600 hover:text-zinc-300"
-              title="Move up"
-            ><ChevronUp size={10} /></button>
-            <button
-              onClick={() => setLayout(moveItemDown(layout, node.id))}
-              className="p-0.5 text-zinc-600 hover:text-zinc-300"
-              title="Move down"
-            ><ChevronDown size={10} /></button>
-          </div>
-        )}
+      <div
+        key={node.id}
+        draggable
+        onDragStart={handleDragStart(node.id)}
+        onDragEnd={handleDragEnd}
+        onDragOver={handleDragOver(node.id, false)}
+        onDragLeave={handleDragLeave(node.id)}
+        onDrop={handleDrop(node.id, false)}
+        className={`rounded-lg ${hintClass(node.id)}`}
+      >
         <NavLink
           to={meta.to}
           end={meta.to === '/'}
-          onClick={(e) => {
-            // Suppress navigation while editing — prevents accidental
-            // route changes when the user is reorganizing.
-            if (editMode) { e.preventDefault(); return }
-            onItemClick?.()
-          }}
+          onClick={() => onItemClick?.()}
           className={({ isActive }) =>
-            `flex-1 flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-              isActive && !editMode
+            `flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors cursor-grab active:cursor-grabbing ${
+              isActive
                 ? 'bg-violet-500/10 text-violet-400'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
             } ${parent ? 'pl-2' : ''}`
@@ -323,63 +320,44 @@ export default function SideNav({ navItems, onItemClick }) {
           <Icon className="w-4 h-4 flex-shrink-0" />
           <span className="truncate">{meta.label}</span>
         </NavLink>
-        {editMode && (
-          <select
-            value={parent || 'root'}
-            onChange={(e) => setLayout(moveItemToFolder(layout, node.id, e.target.value))}
-            title="Move into…"
-            className="text-[10px] bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-zinc-400 max-w-16 truncate"
-          >
-            <option value="root">— top —</option>
-            {folders.map((f) => (
-              <option key={f.id} value={f.id}>{f.name}</option>
-            ))}
-          </select>
-        )}
       </div>
     )
   }
 
   return (
     <>
-      {/* Edit-mode header */}
+      {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
         <span className="text-[10px] uppercase tracking-wider text-zinc-500">Navigation</span>
-        <div className="flex items-center gap-1">
-          {editMode && (
-            <button
-              onClick={() => setLayout(addFolder(layout))}
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-violet-300 hover:text-violet-200 border border-violet-500/30 rounded"
-              title="Add folder"
-            >
-              <FolderPlus size={10} /> Folder
-            </button>
-          )}
-          <button
-            onClick={() => setEditMode((v) => !v)}
-            className={`px-1.5 py-0.5 text-[10px] rounded border ${
-              editMode
-                ? 'bg-violet-600/30 text-violet-100 border-violet-500/50'
-                : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-700'
-            }`}
-            title={editMode ? 'Done' : 'Edit nav'}
-          >
-            {editMode ? 'Done' : 'Edit'}
-          </button>
-        </div>
+        <button
+          onClick={() => setLayout(addFolder(layout))}
+          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-violet-300 hover:text-violet-200 border border-violet-500/30 rounded"
+          title="Add folder"
+        >
+          <FolderPlus size={10} /> Folder
+        </button>
       </div>
 
       <nav className="flex-1 flex flex-col gap-0.5 px-2 py-3 overflow-y-auto">
-        {layout.map((node, idx) => {
-          if (node.type === 'item') {
-            return renderItem(node, null)
-          }
+        {layout.map((node) => {
+          if (node.type === 'item') return renderItem(node, null)
           // Folder
           const f = node
           const isRenaming = renamingFolderId === f.id
           return (
-            <div key={f.id} className="mt-1">
-              <div className="flex items-center gap-1 px-2">
+            <div
+              key={f.id}
+              draggable={!isRenaming}
+              onDragStart={handleDragStart(f.id)}
+              onDragEnd={handleDragEnd}
+              className="mt-1"
+            >
+              <div
+                onDragOver={handleDragOver(f.id, true)}
+                onDragLeave={handleDragLeave(f.id)}
+                onDrop={handleDrop(f.id, true)}
+                className={`flex items-center gap-1 px-2 py-1 rounded ${hintClass(f.id)}`}
+              >
                 <button
                   onClick={() => setLayout(toggleFolderCollapsed(layout, f.id))}
                   className="p-0.5 text-zinc-500 hover:text-zinc-300"
@@ -387,7 +365,7 @@ export default function SideNav({ navItems, onItemClick }) {
                 >
                   {f.collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
                 </button>
-                <Folder size={12} className="text-zinc-500" />
+                <Folder size={12} className="text-zinc-500 cursor-grab" />
                 {isRenaming ? (
                   <input
                     autoFocus
@@ -408,41 +386,35 @@ export default function SideNav({ navItems, onItemClick }) {
                     className="flex-1 px-1 py-0.5 bg-zinc-900 border border-zinc-700 rounded text-xs text-zinc-100"
                   />
                 ) : (
-                  <span className="flex-1 text-[11px] uppercase tracking-wider text-zinc-400 font-semibold truncate">
+                  <button
+                    onClick={() => { setRenamingFolderId(f.id); setRenameDraft(f.name) }}
+                    title="Click to rename"
+                    className="flex-1 text-left text-[11px] uppercase tracking-wider text-zinc-400 font-semibold truncate hover:text-zinc-200 cursor-text"
+                  >
                     {f.name}
-                  </span>
+                  </button>
                 )}
-                {editMode && !isRenaming && (
-                  <div className="flex items-center gap-0.5">
-                    <button
-                      onClick={() => setLayout(moveFolderUp(layout, f.id))}
-                      className="p-0.5 text-zinc-600 hover:text-zinc-300" title="Move folder up"
-                    ><ChevronUp size={10} /></button>
-                    <button
-                      onClick={() => setLayout(moveFolderDown(layout, f.id))}
-                      className="p-0.5 text-zinc-600 hover:text-zinc-300" title="Move folder down"
-                    ><ChevronDown size={10} /></button>
-                    <button
-                      onClick={() => { setRenamingFolderId(f.id); setRenameDraft(f.name) }}
-                      className="p-0.5 text-zinc-600 hover:text-violet-300" title="Rename folder"
-                    ><Pencil size={10} /></button>
-                    <button
-                      onClick={() => {
-                        if (confirm(`Delete folder "${f.name}"? Tabs inside will move back to the top level.`)) {
-                          setLayout(deleteFolder(layout, f.id))
-                        }
-                      }}
-                      className="p-0.5 text-zinc-600 hover:text-rose-400" title="Delete folder (tabs inside come out)"
-                    ><Trash2 size={10} /></button>
-                  </div>
-                )}
+                <button
+                  onClick={() => {
+                    if (confirm(`Delete folder "${f.name}"? Tabs inside will move back to the top level.`)) {
+                      setLayout(deleteFolder(layout, f.id))
+                    }
+                  }}
+                  className="p-0.5 text-zinc-600 hover:text-rose-400 opacity-0 group-hover:opacity-100"
+                  title="Delete folder (tabs inside come out)"
+                  style={{ opacity: 1 }}
+                ><Trash2 size={10} /></button>
               </div>
               {!f.collapsed && (
                 <div className="ml-3 mt-0.5 space-y-0.5 border-l border-zinc-800/60 pl-1">
                   {(f.children || []).map((child) => renderItem(child, f.id))}
-                  {(f.children || []).length === 0 && editMode && (
-                    <div className="text-[10px] text-zinc-600 italic px-2 py-1">
-                      Empty — use the dropdown next to a tab to move it here.
+                  {(f.children || []).length === 0 && (
+                    <div
+                      onDragOver={handleDragOver(f.id, true)}
+                      onDrop={handleDrop(f.id, true)}
+                      className={`text-[10px] text-zinc-600 italic px-2 py-1 rounded ${dropHint?.id === f.id && dropHint.placement === 'inside' ? 'ring-2 ring-violet-400/70' : ''}`}
+                    >
+                      Drop a tab here…
                     </div>
                   )}
                 </div>

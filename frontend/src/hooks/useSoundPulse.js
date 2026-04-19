@@ -926,13 +926,22 @@ export function usePatchGenreTaxonomy() {
   })
 }
 
-// -------- Blueprint forking (#18) --------
+// -------- Blueprint forking + delete (#18, follow-up) --------
 
 export function useForkBlueprint() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ blueprintId, body }) =>
       makeRequest('POST', `/admin/blueprints/${blueprintId}/fork`, {}, body || {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] }),
+  })
+}
+
+export function useDeleteBlueprint() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ blueprintId }) =>
+      makeRequest('DELETE', `/admin/blueprints/${blueprintId}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] }),
   })
 }

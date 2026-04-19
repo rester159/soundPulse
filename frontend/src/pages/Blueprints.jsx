@@ -16,20 +16,19 @@
 import { useState, useMemo, useEffect } from 'react'
 import {
   Sparkles, Plus, Edit3, Loader2, X, AlertCircle, CheckCircle2,
-  Users, Music, ChevronDown, Trash2, RefreshCw, HelpCircle,
+  Music, ChevronDown, ChevronRight, Trash2, RefreshCw, HelpCircle,
+  GitFork,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useBlueprints,
-  useBlueprintDetail,
   useGenerateBlueprintFromGenre,
   useCreateBlueprintManual,
   useUpdateBlueprint,
-  useAssignBlueprint,
-  useGenerateSongForBlueprint,
   useGenreOpportunities,
   useGenres,
   useForkBlueprint,
+  useDeleteBlueprint,
 } from '../hooks/useSoundPulse'
 import GenreMultiPicker from '../components/GenreMultiPicker'
 
@@ -59,145 +58,173 @@ function FieldTooltip({ text }) {
 const csvSplit = (s) => (s || '').split(',').map((x) => x.trim()).filter(Boolean)
 const arr = (v) => (Array.isArray(v) ? v.join(', ') : (v || ''))
 
-const STATUS_LABELS = {
-  pending_assignment: { color: 'amber', label: 'pending assignment' },
-  assigned: { color: 'cyan', label: 'assigned to artist' },
-  assigned_pending_creation: { color: 'violet', label: 'awaiting song' },
-  assigned_to_release: { color: 'emerald', label: 'song generated' },
-}
-
-function StatusBadge({ status }) {
-  const meta = STATUS_LABELS[status] || { color: 'zinc', label: status || 'unknown' }
-  const colorClass = {
-    amber: 'text-amber-300 bg-amber-500/10 border-amber-500/30',
-    cyan: 'text-cyan-300 bg-cyan-500/10 border-cyan-500/30',
-    violet: 'text-violet-300 bg-violet-500/10 border-violet-500/30',
-    emerald: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30',
-    zinc: 'text-zinc-300 bg-zinc-500/10 border-zinc-500/30',
-  }[meta.color]
-  return (
-    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[9px] uppercase tracking-wider ${colorClass}`}>
-      {meta.label}
-    </span>
-  )
-}
-
-function BlueprintCard({ blueprint, onEdit, onAssign, onGenerateSong, onView, onFork }) {
+// Compact one-line row with click-to-expand details. Replaces the
+// previous large card layout. No status / assign / generate-song
+// surface here — blueprints are pure recipes; songs originate from
+// the artist flow.
+function BlueprintRow({ blueprint, onEdit, onFork, onDelete }) {
+  const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(null)
-
-  const themes = blueprint.target_themes || []
-  const audience = blueprint.target_audience_tags || []
+  const isBase = !!blueprint.is_genre_default
   const displayName = blueprint.name || blueprint.primary_genre || blueprint.genre_id
+  const themes = blueprint.target_themes || []
 
-  const handleAssign = async () => {
-    setBusy('assign')
-    try { await onAssign(blueprint) } finally { setBusy(null) }
-  }
-  const handleGenSong = async () => {
-    setBusy('gen')
-    try { await onGenerateSong(blueprint) } finally { setBusy(null) }
-  }
-  const handleFork = async () => {
-    setBusy('fork')
+  const stop = (e) => { e.stopPropagation() }
+  const handleFork = async (e) => {
+    stop(e); setBusy('fork')
     try { await onFork(blueprint) } finally { setBusy(null) }
   }
+  const handleDelete = async (e) => {
+    stop(e); setBusy('delete')
+    try { await onDelete(blueprint) } finally { setBusy(null) }
+  }
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 space-y-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-semibold text-violet-200">{displayName}</span>
-            {blueprint.is_genre_default && (
-              <span className="text-[9px] uppercase tracking-wider text-violet-200 bg-violet-500/20 border border-violet-500/40 rounded px-1.5 py-0.5">
-                base
-              </span>
-            )}
-            <StatusBadge status={blueprint.status} />
-            {blueprint.predicted_success_score != null && (
-              <span className="text-[10px] text-zinc-500 tabular-nums">
-                score {blueprint.predicted_success_score.toFixed(2)}
-              </span>
-            )}
-          </div>
-          <div className="text-[10px] text-zinc-600 mt-0.5">
-            <code className="text-zinc-500">{blueprint.primary_genre || blueprint.genre_id}</code>
-            {' · '}id {blueprint.id.slice(0, 8)} · created {new Date(blueprint.created_at).toLocaleDateString()}
-            {blueprint.assigned_artist_id && ` · artist ${blueprint.assigned_artist_id.slice(0, 8)}`}
-          </div>
+    <div className="border-t border-zinc-800 first:border-t-0">
+      {/* Row */}
+      <div
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-3 px-3 py-2 hover:bg-zinc-900/40 cursor-pointer"
+      >
+        <button className="text-zinc-500 hover:text-zinc-300" tabIndex={-1}>
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </button>
+        <div className="min-w-0 flex-1 flex items-center gap-2">
+          <span className="text-sm font-medium text-zinc-100 truncate">{displayName}</span>
+          {isBase && (
+            <span className="text-[9px] uppercase tracking-wider text-violet-200 bg-violet-500/20 border border-violet-500/40 rounded px-1.5 py-0.5 flex-shrink-0">
+              base
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-1 flex-shrink-0">
-          <button
-            onClick={handleFork}
-            disabled={busy === 'fork'}
-            className="flex items-center gap-1 px-2 py-1 text-zinc-400 hover:text-cyan-300 hover:bg-cyan-500/10 rounded text-xs disabled:opacity-50"
-            title="Fork — duplicate this blueprint into a new editable copy"
-          >
-            {busy === 'fork' ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
-            Fork
-          </button>
-          <button
-            onClick={() => onEdit(blueprint)}
-            className="flex items-center gap-1 px-2 py-1 text-zinc-400 hover:text-violet-300 hover:bg-violet-500/10 rounded text-xs"
-            title="Edit blueprint"
-          >
-            <Edit3 size={11} /> Edit
-          </button>
-        </div>
-      </div>
-
-      {themes.length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {themes.slice(0, 6).map((t) => (
-            <span key={t} className="text-[10px] text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5">
+        <code className="text-[11px] font-mono text-zinc-500 truncate hidden md:inline max-w-40">
+          {blueprint.primary_genre || blueprint.genre_id}
+        </code>
+        <div className="hidden md:flex flex-wrap gap-1 max-w-xs overflow-hidden">
+          {themes.slice(0, 3).map((t) => (
+            <span key={t} className="text-[10px] text-cyan-200/80 bg-cyan-500/10 border border-cyan-500/20 rounded px-1.5 py-0.5">
               {t}
             </span>
           ))}
-          {themes.length > 6 && <span className="text-[10px] text-zinc-500">+{themes.length - 6}</span>}
+          {themes.length > 3 && <span className="text-[10px] text-zinc-600">+{themes.length - 3}</span>}
         </div>
-      )}
-
-      {audience.length > 0 && (
-        <div className="text-[10px] text-zinc-500">
-          audience: <span className="text-zinc-400">{audience.join(', ')}</span>
-        </div>
-      )}
-
-      {blueprint.smart_prompt_text && (
-        <div className="text-xs text-zinc-400 line-clamp-3 leading-relaxed bg-zinc-950/50 border border-zinc-800 rounded p-2">
-          {blueprint.smart_prompt_text}
-        </div>
-      )}
-
-      <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">
-        <button
-          onClick={() => onView(blueprint)}
-          className="text-xs text-zinc-400 hover:text-zinc-200 underline"
-        >
-          View full
-        </button>
-        {blueprint.status === 'pending_assignment' && (
+        <span className="text-[10px] text-zinc-600 hidden lg:inline tabular-nums">
+          {new Date(blueprint.created_at).toLocaleDateString()}
+        </span>
+        <div className="flex items-center gap-0.5 flex-shrink-0" onClick={stop}>
           <button
-            onClick={handleAssign}
-            disabled={busy === 'assign'}
-            className="ml-auto flex items-center gap-1 px-2 py-1 bg-cyan-600/20 hover:bg-cyan-600/40 border border-cyan-500/40 text-cyan-200 text-xs rounded disabled:opacity-50"
+            onClick={handleFork}
+            disabled={busy === 'fork'}
+            className="flex items-center gap-1 px-1.5 py-1 text-zinc-500 hover:text-cyan-300 hover:bg-cyan-500/10 rounded text-xs disabled:opacity-50"
+            title="Fork — duplicate this blueprint into a new editable copy"
           >
-            {busy === 'assign' ? <Loader2 size={11} className="animate-spin" /> : <Users size={11} />}
-            Assign artist
+            {busy === 'fork' ? <Loader2 size={11} className="animate-spin" /> : <GitFork size={11} />}
           </button>
-        )}
-        {blueprint.assigned_artist_id && blueprint.status !== 'assigned_to_release' && (
           <button
-            onClick={handleGenSong}
-            disabled={busy === 'gen'}
-            className="ml-auto flex items-center gap-1 px-2 py-1 bg-violet-600/20 hover:bg-violet-600/40 border border-violet-500/40 text-violet-200 text-xs rounded disabled:opacity-50"
+            onClick={(e) => { stop(e); onEdit(blueprint) }}
+            className="flex items-center gap-1 px-1.5 py-1 text-zinc-500 hover:text-violet-300 hover:bg-violet-500/10 rounded text-xs"
+            title="Edit blueprint"
           >
-            {busy === 'gen' ? <Loader2 size={11} className="animate-spin" /> : <Music size={11} />}
-            Generate song
+            <Edit3 size={11} />
           </button>
-        )}
+          {!isBase && (
+            <button
+              onClick={handleDelete}
+              disabled={busy === 'delete'}
+              className="flex items-center gap-1 px-1.5 py-1 text-zinc-500 hover:text-rose-300 hover:bg-rose-500/10 rounded text-xs disabled:opacity-50"
+              title="Delete blueprint"
+            >
+              {busy === 'delete' ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+            </button>
+          )}
+          {isBase && (
+            <span
+              title="Base blueprints cannot be deleted (they cache LLM research). Fork instead."
+              className="px-1.5 py-1 text-zinc-700 cursor-not-allowed"
+            >
+              <Trash2 size={11} />
+            </span>
+          )}
+        </div>
       </div>
+
+      {/* Expanded details */}
+      {expanded && (
+        <div className="px-8 pb-4 pt-1 bg-zinc-950/40 border-t border-zinc-800/50 text-xs text-zinc-400 space-y-3">
+          <BlueprintExpandedDetails blueprint={blueprint} />
+        </div>
+      )}
     </div>
+  )
+}
+
+function BlueprintExpandedDetails({ blueprint }) {
+  const sections = [
+    {
+      title: 'Genre',
+      items: [
+        ['Primary', blueprint.primary_genre || blueprint.genre_id],
+        ['Adjacent', (blueprint.adjacent_genres || []).join(', ') || '—'],
+      ],
+    },
+    {
+      title: 'Sonic',
+      items: [
+        ['Tempo', blueprint.target_tempo != null ? `${blueprint.target_tempo} BPM` : '—'],
+        ['Energy', blueprint.target_energy != null ? blueprint.target_energy.toFixed(2) : '—'],
+        ['Danceability', blueprint.target_danceability != null ? blueprint.target_danceability.toFixed(2) : '—'],
+        ['Valence', blueprint.target_valence != null ? blueprint.target_valence.toFixed(2) : '—'],
+        ['Acousticness', blueprint.target_acousticness != null ? blueprint.target_acousticness.toFixed(2) : '—'],
+      ],
+    },
+    {
+      title: 'Lyrical',
+      items: [
+        ['Themes', (blueprint.target_themes || []).join(', ') || '—'],
+        ['Avoid', (blueprint.avoid_themes || []).join(', ') || '—'],
+        ['Vocab tone', blueprint.vocabulary_tone || '—'],
+      ],
+    },
+    {
+      title: 'Audience & voice',
+      items: [
+        ['Audience tags', (blueprint.target_audience_tags || []).join(', ') || '—'],
+        ['Voice req.', (() => {
+          const vr = blueprint.voice_requirements
+          if (!vr) return '—'
+          if (typeof vr === 'string') return vr
+          if (typeof vr === 'object' && vr.description) return vr.description
+          return JSON.stringify(vr)
+        })()],
+      ],
+    },
+    {
+      title: 'Production',
+      items: [
+        ['Notes', blueprint.production_notes || '—'],
+        ['References', (blueprint.reference_track_descriptors || []).join('; ') || '—'],
+      ],
+    },
+  ]
+  return (
+    <>
+      {sections.map((s) => (
+        <div key={s.title}>
+          <div className="text-[10px] uppercase tracking-wider text-violet-400/80 font-semibold mb-1">{s.title}</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-0.5">
+            {s.items.map(([k, v]) => (
+              <div key={k} className="flex gap-2">
+                <span className="text-zinc-600 min-w-24">{k}:</span>
+                <span className="text-zinc-300 truncate">{v}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="text-[10px] text-zinc-600 pt-1 border-t border-zinc-800">
+        id {blueprint.id} · created {new Date(blueprint.created_at).toLocaleString()}
+      </div>
+    </>
   )
 }
 
@@ -787,179 +814,19 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
   )
 }
 
-// ── Modal: per-song theme + clean/explicit picker (#22) ────────────────
-// Opens when the user clicks "Generate song" on a blueprint card.
-// Picker output is forwarded to the orchestrator as theme +
-// content_rating_override so the prompt composes appropriately.
-
-const THEME_OPTIONS = [
-  { value: 'artist_default',     label: 'Artist default — pull from artist persona/lyrical DNA' },
-  { value: 'genre_default',      label: 'Genre default — pull from genre traits' },
-  { value: 'love_relationships', label: 'Love relationships' },
-  { value: 'sex',                label: 'Sex' },
-  { value: 'introspection',      label: 'Introspection' },
-  { value: 'family',             label: 'Family' },
-  { value: 'god',                label: 'God / spirituality' },
-  { value: 'partying',           label: 'Partying / having fun' },
-  { value: 'free_text',          label: 'Free text — type my own' },
-]
-
-function GenerateSongPickerModal({ blueprint, onClose, onSubmit, busy }) {
-  const [themeChoice, setThemeChoice] = useState('artist_default')
-  const [freeText, setFreeText] = useState('')
-  const [rating, setRating] = useState('')  // '' = use artist default
-
-  const canSubmit = themeChoice !== 'free_text' || freeText.trim().length > 0
-
-  const handleSubmit = () => {
-    const themePayload = themeChoice === 'free_text' ? freeText.trim() : themeChoice
-    onSubmit({
-      blueprint,
-      theme: themePayload,
-      contentRating: rating || null,
-    })
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-zinc-950 border border-zinc-800 rounded-xl max-w-lg w-full" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between p-4 border-b border-zinc-800">
-          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
-            <Music size={14} className="text-violet-400" />
-            Generate song
-          </div>
-          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300"><X size={16} /></button>
-        </div>
-
-        <div className="p-5 space-y-4">
-          <div className="text-xs text-zinc-500 leading-relaxed">
-            Using blueprint{' '}
-            <code className="text-violet-300 font-mono">{blueprint.name || blueprint.primary_genre || blueprint.genre_id}</code>.
-            The orchestrator composes the prompt from this blueprint + the
-            assigned artist's DNA + the per-genre structure + your picks below.
-          </div>
-
-          <label className="block text-xs text-zinc-400">
-            Lyrical theme
-            <select
-              value={themeChoice}
-              onChange={(e) => setThemeChoice(e.target.value)}
-              className="mt-1 w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100"
-            >
-              {THEME_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </label>
-
-          {themeChoice === 'free_text' && (
-            <label className="block text-xs text-zinc-400">
-              Custom theme
-              <textarea
-                value={freeText}
-                onChange={(e) => setFreeText(e.target.value)}
-                rows={3}
-                placeholder="e.g. Lyrics about driving back from a wedding at 4am, processing an old friendship"
-                className="mt-1 w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600"
-              />
-            </label>
-          )}
-
-          <div>
-            <label className="block text-xs text-zinc-400 mb-1.5">Content rating (this song only)</label>
-            <div className="flex gap-2">
-              {[
-                { v: '',         label: 'Artist default' },
-                { v: 'clean',    label: 'Clean' },
-                { v: 'explicit', label: 'Explicit' },
-              ].map((opt) => (
-                <button
-                  key={opt.v}
-                  onClick={() => setRating(opt.v)}
-                  className={`flex-1 px-3 py-2 text-xs rounded border transition-colors ${
-                    rating === opt.v
-                      ? 'bg-violet-600/20 border-violet-500/50 text-violet-100'
-                      : 'border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-end gap-2 p-4 border-t border-zinc-800">
-          <button onClick={onClose} className="px-4 py-2 text-zinc-400 text-xs hover:text-zinc-200">Cancel</button>
-          <button
-            onClick={handleSubmit}
-            disabled={busy || !canSubmit}
-            className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium rounded flex items-center gap-2"
-          >
-            {busy ? <Loader2 size={14} className="animate-spin" /> : <Music size={14} />}
-            {busy ? 'Submitting…' : 'Generate'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Modal: full-detail view (read-only) ──────────────────────────────────
-
-function BlueprintViewModal({ blueprintId, onClose }) {
-  const { data, isLoading } = useBlueprintDetail(blueprintId)
-  const bp = data?.data
-
-  return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
-      <div className="bg-zinc-950 border border-zinc-800 rounded-xl max-w-3xl w-full my-4" onClick={(ev) => ev.stopPropagation()}>
-        <div className="flex items-center justify-between p-4 border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10">
-          <div className="text-sm font-semibold text-zinc-200">
-            Blueprint detail
-            {bp && <span className="ml-2 font-mono text-violet-300">{bp.primary_genre || bp.genre_id}</span>}
-          </div>
-          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300"><X size={16} /></button>
-        </div>
-        <div className="p-5">
-          {isLoading && (
-            <div className="flex items-center gap-2 text-zinc-500 text-sm">
-              <Loader2 size={14} className="animate-spin" /> Loading…
-            </div>
-          )}
-          {bp && (
-            <pre className="text-xs text-zinc-300 whitespace-pre-wrap break-words font-mono bg-zinc-900 border border-zinc-800 rounded p-3 max-h-[70vh] overflow-y-auto">
-              {JSON.stringify(bp, null, 2)}
-            </pre>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // ── Page ─────────────────────────────────────────────────────────────────
 
 export default function Blueprints() {
-  const [statusFilter, setStatusFilter] = useState('')
-  const { data, isLoading, isError, error, refetch, isFetching } = useBlueprints({
-    status: statusFilter || null,
-  })
+  const { data, isLoading, isError, error, refetch, isFetching } = useBlueprints({})
   const blueprints = data?.data?.blueprints || []
   const qc = useQueryClient()
 
   const [showGenerate, setShowGenerate] = useState(false)
   const [showManual, setShowManual] = useState(false)
   const [editing, setEditing] = useState(null)
-  const [viewing, setViewing] = useState(null)
-
-  const assign = useAssignBlueprint()
-  const generateSong = useGenerateSongForBlueprint()
   const fork = useForkBlueprint()
+  const del = useDeleteBlueprint()
   const [actionStatus, setActionStatus] = useState(null)  // {kind, msg}
-
-  // Per-song picker — opens before the Generate song API call (#22).
-  const [generatingFor, setGeneratingFor] = useState(null)
 
   const handleFork = async (blueprint) => {
     setActionStatus(null)
@@ -986,55 +853,24 @@ export default function Blueprints() {
     }
   }
 
-  const handleAssign = async (blueprint) => {
+  const handleDelete = async (blueprint) => {
     setActionStatus(null)
+    const label = blueprint.name || blueprint.primary_genre || blueprint.genre_id
+    if (!confirm(`Delete blueprint "${label}"? This cannot be undone.`)) return
     try {
-      const res = await assign.mutateAsync({ blueprintId: blueprint.id })
-      setActionStatus({
-        kind: 'success',
-        msg: `Assignment proposal queued — check Settings → Pending Decisions to approve. Decision id ${res?.data?.decision_id?.slice(0, 8) || ''}`,
-      })
+      await del.mutateAsync({ blueprintId: blueprint.id })
+      setActionStatus({ kind: 'success', msg: `Deleted "${label}".` })
       qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] })
-      qc.invalidateQueries({ queryKey: ['admin', 'ceo-decisions'] })
     } catch (e) {
       setActionStatus({
         kind: 'error',
-        msg: e?.response?.data?.detail || e?.message || 'assign failed',
-      })
-    }
-  }
-
-  // Click on the card opens the picker; picker confirms → fires the API
-  // call with the per-song theme + clean/explicit selections.
-  const handleGenerateSong = async (blueprint) => {
-    setActionStatus(null)
-    setGeneratingFor(blueprint)
-  }
-
-  const submitGenerateSong = async ({ blueprint, theme, contentRating }) => {
-    setActionStatus(null)
-    try {
-      const body = {}
-      if (theme) body.theme = theme
-      if (contentRating) body.content_rating_override = contentRating
-      const res = await generateSong.mutateAsync({ blueprintId: blueprint.id, body })
-      setActionStatus({
-        kind: 'success',
-        msg: `Song generation kicked off — song id ${res?.data?.song_id?.slice(0, 8) || ''}. Check Songs tab in ~60s.`,
-      })
-      setGeneratingFor(null)
-      qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] })
-      qc.invalidateQueries({ queryKey: ['admin', 'songs'] })
-    } catch (e) {
-      setActionStatus({
-        kind: 'error',
-        msg: e?.response?.data?.detail || e?.message || 'song generation failed',
+        msg: e?.response?.data?.detail || e?.message || 'delete failed',
       })
     }
   }
 
   return (
-    <div className="p-4 md:p-6 max-w-5xl mx-auto">
+    <div className="p-4 md:p-6 max-w-6xl mx-auto">
       <div className="flex items-start justify-between mb-6 gap-3 flex-wrap">
         <div>
           <div className="flex items-center gap-3 mb-1">
@@ -1042,7 +878,10 @@ export default function Blueprints() {
             <h1 className="text-2xl font-bold text-zinc-100">Blueprints</h1>
           </div>
           <p className="text-sm text-zinc-500">
-            Song recipes. Generate from a genre using the smart-prompt LLM, or build one manually from scratch. Saved blueprints appear in the SongLab dropdown when generating songs.
+            Song recipes — pure style/sonic/lyrical/audience configuration. Each
+            genre has one base blueprint (researched from the LLM on first use)
+            and any number of forks. Songs are generated from the artist flow,
+            using whichever blueprint matches the artist's genres.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1061,19 +900,7 @@ export default function Blueprints() {
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="flex items-center gap-3 mb-4">
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-xs text-zinc-200"
-        >
-          <option value="">all statuses</option>
-          <option value="pending_assignment">pending assignment</option>
-          <option value="assigned">assigned</option>
-          <option value="assigned_pending_creation">awaiting song</option>
-          <option value="assigned_to_release">song generated</option>
-        </select>
+      <div className="flex items-center gap-3 mb-3">
         <button
           onClick={() => refetch()}
           disabled={isFetching}
@@ -1130,19 +957,19 @@ export default function Blueprints() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {blueprints.map((bp) => (
-          <BlueprintCard
-            key={bp.id}
-            blueprint={bp}
-            onEdit={(b) => setEditing(b)}
-            onAssign={handleAssign}
-            onGenerateSong={handleGenerateSong}
-            onFork={handleFork}
-            onView={(b) => setViewing(b.id)}
-          />
-        ))}
-      </div>
+      {blueprints.length > 0 && (
+        <div className="border border-zinc-800 rounded-lg overflow-hidden bg-zinc-950">
+          {blueprints.map((bp) => (
+            <BlueprintRow
+              key={bp.id}
+              blueprint={bp}
+              onEdit={(b) => setEditing(b)}
+              onFork={handleFork}
+              onDelete={handleDelete}
+            />
+          ))}
+        </div>
+      )}
 
       {showGenerate && (
         <GenerateFromGenreModal
@@ -1161,17 +988,6 @@ export default function Blueprints() {
           existingBlueprint={editing}
           onClose={() => setEditing(null)}
           onSaved={() => qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] })}
-        />
-      )}
-      {viewing && (
-        <BlueprintViewModal blueprintId={viewing} onClose={() => setViewing(null)} />
-      )}
-      {generatingFor && (
-        <GenerateSongPickerModal
-          blueprint={generatingFor}
-          onClose={() => setGeneratingFor(null)}
-          onSubmit={submitGenerateSong}
-          busy={generateSong.isPending}
         />
       )}
     </div>

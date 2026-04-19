@@ -4598,6 +4598,45 @@ async def generate_blueprint_from_genre(
     }
 
 
+@router.delete("/api/v1/admin/blueprints/{blueprint_id}")
+async def delete_blueprint(
+    blueprint_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Hard-delete a blueprint. Refuses base blueprints (the one
+    is_genre_default=true row per genre) — those represent the cached
+    LLM research and would be re-researched on next access; deleting
+    by accident wastes money. Songs that reference the deleted blueprint
+    keep their blueprint_id (no FK constraint, just becomes a dangling
+    reference — harmless because songs_master also stores
+    primary_genre + the resolved generation_prompt directly)."""
+    import uuid as _uuid
+    from api.models.song_blueprint import SongBlueprint
+
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id")
+
+    bp = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if bp is None:
+        raise HTTPException(404, detail="blueprint not found")
+    if bp.is_genre_default:
+        raise HTTPException(
+            409,
+            detail="cannot delete the base blueprint for a genre — fork it "
+                   "first if you want to keep the original around, or unset "
+                   "is_genre_default via PATCH if you really want it gone",
+        )
+
+    await db.delete(bp)
+    await db.commit()
+    return {"id": str(bp_uuid), "deleted": True}
+
+
 class BlueprintForkRequest(BaseModel):
     """Body for /admin/blueprints/{id}/fork. Name is optional (auto-
     generated from source name + ' (fork)' if not provided)."""
