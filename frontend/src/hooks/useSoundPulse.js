@@ -946,6 +946,44 @@ export function useDeleteBlueprint() {
   })
 }
 
+// -------- BlackTip "Research deeper" (#31) --------
+
+// Kicks off a queued web_research job for a blueprint's genre. The
+// portal-worker (Node + Playwright + BlackTip) picks it up and posts
+// back when done. UI polls /admin/web-research/{job_id} for status.
+export function useResearchDeeper() {
+  return useMutation({
+    mutationFn: ({ blueprintId }) =>
+      makeRequest('POST', `/admin/blueprints/${blueprintId}/research-deeper`, {}, {}),
+  })
+}
+
+export function useWebResearchJob(jobId, { pollMs = 2000 } = {}) {
+  return useQuery({
+    queryKey: ['admin', 'web-research', jobId],
+    queryFn: () => makeRequest('GET', `/admin/web-research/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: (q) => {
+      const status = q?.state?.data?.data?.status
+      // Stop polling once terminal.
+      return (status === 'completed' || status === 'failed') ? false : pollMs
+    },
+    staleTime: 0,
+  })
+}
+
+// Refines a blueprint by feeding the completed research job's result
+// text back through the LLM and PATCHing the blueprint with the new
+// fields.
+export function useRefineFromResearch() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ blueprintId, jobId }) =>
+      makeRequest('POST', `/admin/blueprints/${blueprintId}/refine-from-research`, {}, { job_id: jobId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] }),
+  })
+}
+
 // -------- SongLab (#26, #27) --------
 
 // All structures whose primary_genre is on the dotted-chain ancestry

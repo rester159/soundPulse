@@ -19,6 +19,7 @@ from api.models.chartmetric_queue import (
     ChartmetricQuotaState,
     ChartmetricRequestQueue,
 )
+from api.models.web_research_job import WebResearchJob
 
 __all__ = [
     "Artist", "Track", "Genre", "TrendingSnapshot", "Prediction", "Feedback",
@@ -27,4 +28,5 @@ __all__ = [
     "TrackStatHistory",
     "ChartmetricRequestQueue", "ChartmetricQuotaState",
     "ChartmetricEndpointConfig", "ChartmetricEntityFetchLog",
+    "WebResearchJob",
 ]

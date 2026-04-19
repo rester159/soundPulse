@@ -26,11 +26,15 @@
 
 import os from 'node:os';
 import { runAscapFlow } from './portals/ascap.mjs';
+import { runWebResearchFlow } from './portals/web_research.mjs';
 
 const API_BASE = (process.env.SOUNDPULSE_API || 'http://localhost:8000').replace(/\/$/, '');
 const API_KEY = process.env.API_ADMIN_KEY || '';
 const WORKER_ID = process.env.WORKER_ID || os.hostname() || 'portal-worker-unknown';
-const TARGET_SERVICES = (process.env.TARGET_SERVICES || 'ascap').split(',').map(s => s.trim()).filter(Boolean);
+// Default target list now includes web_research (#31) so a fresh
+// portal-worker instance picks up genre research jobs out of the box.
+const TARGET_SERVICES = (process.env.TARGET_SERVICES || 'ascap,web_research')
+  .split(',').map(s => s.trim()).filter(Boolean);
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
 
 if (!API_KEY) {
@@ -42,6 +46,7 @@ if (!API_KEY) {
 // new portals come online. Each flow is (claimedRow) => {status, external_id, response, screenshot_b64?}
 const PORTAL_FLOWS = {
   ascap: runAscapFlow,
+  web_research: runWebResearchFlow,
 };
 
 function log(...args) {

@@ -17,7 +17,7 @@ import { useState, useMemo, useEffect } from 'react'
 import {
   Sparkles, Plus, Edit3, Loader2, X, AlertCircle, CheckCircle2,
   Music, ChevronDown, ChevronRight, Trash2, RefreshCw, HelpCircle,
-  GitFork,
+  GitFork, Globe,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -29,6 +29,9 @@ import {
   useGenres,
   useForkBlueprint,
   useDeleteBlueprint,
+  useResearchDeeper,
+  useWebResearchJob,
+  useRefineFromResearch,
 } from '../hooks/useSoundPulse'
 import GenreMultiPicker from '../components/GenreMultiPicker'
 
@@ -62,12 +65,16 @@ const arr = (v) => (Array.isArray(v) ? v.join(', ') : (v || ''))
 // previous large card layout. No status / assign / generate-song
 // surface here — blueprints are pure recipes; songs originate from
 // the artist flow.
-function BlueprintRow({ blueprint, onEdit, onFork, onDelete }) {
+function BlueprintRow({ blueprint, onEdit, onFork, onDelete, onResearchDeeper, deepResearchState }) {
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(null)
   const isBase = !!blueprint.is_genre_default
   const displayName = blueprint.name || blueprint.primary_genre || blueprint.genre_id
   const themes = blueprint.target_themes || []
+  const isResearching = deepResearchState?.blueprintId === blueprint.id
+    && deepResearchState?.status !== 'completed'
+    && deepResearchState?.status !== 'failed'
+    && deepResearchState?.status !== 'idle'
 
   const stop = (e) => { e.stopPropagation() }
   const handleFork = async (e) => {
@@ -77,6 +84,10 @@ function BlueprintRow({ blueprint, onEdit, onFork, onDelete }) {
   const handleDelete = async (e) => {
     stop(e); setBusy('delete')
     try { await onDelete(blueprint) } finally { setBusy(null) }
+  }
+  const handleResearchDeeper = async (e) => {
+    stop(e)
+    onResearchDeeper(blueprint)
   }
 
   return (
@@ -112,6 +123,14 @@ function BlueprintRow({ blueprint, onEdit, onFork, onDelete }) {
           {new Date(blueprint.created_at).toLocaleDateString()}
         </span>
         <div className="flex items-center gap-0.5 flex-shrink-0" onClick={stop}>
+          <button
+            onClick={handleResearchDeeper}
+            disabled={isResearching}
+            className="flex items-center gap-1 px-1.5 py-1 text-zinc-500 hover:text-emerald-300 hover:bg-emerald-500/10 rounded text-xs disabled:opacity-50"
+            title="Research deeper — open BlackTip browser, fetch Wikipedia + Allmusic + RYM, refine the blueprint with the new context"
+          >
+            {isResearching ? <Loader2 size={11} className="animate-spin" /> : <Globe size={11} />}
+          </button>
           <button
             onClick={handleFork}
             disabled={busy === 'fork'}
@@ -826,7 +845,47 @@ export default function Blueprints() {
   const [editing, setEditing] = useState(null)
   const fork = useForkBlueprint()
   const del = useDeleteBlueprint()
+  const research = useResearchDeeper()
+  const refine = useRefineFromResearch()
   const [actionStatus, setActionStatus] = useState(null)  // {kind, msg}
+
+  // Active deep-research job state. The hook below polls.
+  const [deepResearch, setDeepResearch] = useState({ blueprintId: null, jobId: null, status: 'idle' })
+  const jobQ = useWebResearchJob(deepResearch.jobId)
+  const jobData = jobQ.data?.data
+  // When the job completes, kick off the refine call exactly once.
+  useEffect(() => {
+    if (!deepResearch.jobId || !jobData || deepResearch.status === 'refining' || deepResearch.status === 'completed') return
+    if (jobData.status === 'completed') {
+      setDeepResearch((s) => ({ ...s, status: 'refining' }))
+      ;(async () => {
+        try {
+          const res = await refine.mutateAsync({
+            blueprintId: deepResearch.blueprintId,
+            jobId: deepResearch.jobId,
+          })
+          setActionStatus({
+            kind: 'success',
+            msg: `Refined blueprint with ${jobData.result_chars || 0} chars from ${(jobData.sources || []).map(s => s.source).join(', ') || 'sources'}. Updated: ${(res?.data?.fields_updated || []).join(', ') || '(none)'}.`,
+          })
+          setDeepResearch({ blueprintId: null, jobId: null, status: 'completed' })
+        } catch (e) {
+          setActionStatus({
+            kind: 'error',
+            msg: `Refine failed: ${e?.response?.data?.detail || e?.message}`,
+          })
+          setDeepResearch({ blueprintId: null, jobId: null, status: 'failed' })
+        }
+      })()
+    } else if (jobData.status === 'failed') {
+      setActionStatus({
+        kind: 'error',
+        msg: `Research failed: ${jobData.error || 'unknown'}`,
+      })
+      setDeepResearch({ blueprintId: null, jobId: null, status: 'failed' })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobData?.status])
 
   const handleFork = async (blueprint) => {
     setActionStatus(null)
@@ -865,6 +924,29 @@ export default function Blueprints() {
       setActionStatus({
         kind: 'error',
         msg: e?.response?.data?.detail || e?.message || 'delete failed',
+      })
+    }
+  }
+
+  const handleResearchDeeper = async (blueprint) => {
+    setActionStatus(null)
+    if (deepResearch.jobId) {
+      setActionStatus({ kind: 'error', msg: 'Another deep-research job is already running. Wait for it to finish.' })
+      return
+    }
+    try {
+      const res = await research.mutateAsync({ blueprintId: blueprint.id })
+      const jobId = res?.data?.job_id
+      if (!jobId) throw new Error('no job_id returned')
+      setDeepResearch({ blueprintId: blueprint.id, jobId, status: 'pending' })
+      setActionStatus({
+        kind: 'success',
+        msg: `BlackTip browser dispatched for "${blueprint.primary_genre || blueprint.genre_id}". Polling for result… (worker may take 15-30s)`,
+      })
+    } catch (e) {
+      setActionStatus({
+        kind: 'error',
+        msg: e?.response?.data?.detail || e?.message || 'research-deeper failed',
       })
     }
   }
@@ -966,6 +1048,8 @@ export default function Blueprints() {
               onEdit={(b) => setEditing(b)}
               onFork={handleFork}
               onDelete={handleDelete}
+              onResearchDeeper={handleResearchDeeper}
+              deepResearchState={deepResearch}
             />
           ))}
         </div>

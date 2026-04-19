@@ -4627,6 +4627,214 @@ async def generate_blueprint_from_genre(
     }
 
 
+# ── BlackTip "Research deeper" (#31) ─────────────────────────────────────
+# Queue + status endpoints + a blueprint-specific helper that does the
+# common workflow: queue a research job for the blueprint's genre, poll
+# until done (or up to 30s sync wait), then refine the blueprint with
+# the new context. Frontend's "Research deeper" button hits the helper.
+
+class WebResearchQueueRequest(BaseModel):
+    target_kind: str = "genre_research"  # future: 'artist_research', etc.
+    query: str                            # what the worker should research
+    genre_id: str | None = None
+    blueprint_id: str | None = None
+
+
+@router.post("/api/v1/admin/web-research/queue")
+async def queue_web_research(
+    body: WebResearchQueueRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Queue a BlackTip web-research job. Worker picks it up via
+    /admin/worker/claim-next?target_service=web_research."""
+    import uuid as _uuid
+    from api.models.web_research_job import WebResearchJob
+    if not body.query.strip():
+        raise HTTPException(400, detail="query is required")
+    bp_uuid = None
+    if body.blueprint_id:
+        try:
+            bp_uuid = _uuid.UUID(body.blueprint_id)
+        except ValueError:
+            raise HTTPException(400, detail="invalid blueprint_id")
+    row = WebResearchJob(
+        target_kind=body.target_kind.strip() or "genre_research",
+        query=body.query.strip(),
+        genre_id=(body.genre_id or "").strip() or None,
+        blueprint_id=bp_uuid,
+        status="pending",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {
+        "id": str(row.id),
+        "status": row.status,
+        "queued_at": row.created_at.isoformat(),
+    }
+
+
+@router.get("/api/v1/admin/web-research/{job_id}")
+async def get_web_research_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Poll a queued research job. Frontend hits this every 2s while a
+    Research-deeper button spins."""
+    import uuid as _uuid
+    from api.models.web_research_job import WebResearchJob
+    try:
+        jid = _uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid job_id")
+    row = (await db.execute(
+        select(WebResearchJob).where(WebResearchJob.id == jid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail="job not found")
+    return {
+        "id": str(row.id),
+        "target_kind": row.target_kind,
+        "query": row.query,
+        "genre_id": row.genre_id,
+        "blueprint_id": str(row.blueprint_id) if row.blueprint_id else None,
+        "status": row.status,
+        "claimed_by": row.claimed_by,
+        "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "result_text": row.result_text,
+        "result_chars": len(row.result_text) if row.result_text else 0,
+        "sources": row.sources,
+        "error": row.error,
+    }
+
+
+@router.post("/api/v1/admin/blueprints/{blueprint_id}/research-deeper")
+async def blueprint_research_deeper(
+    blueprint_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """One-shot helper: queue a BlackTip research job for the
+    blueprint's genre and return the job_id. Frontend then polls
+    /admin/web-research/{job_id} until status=='completed', then calls
+    /admin/blueprints/{id}/refine-from-research to fold the result
+    text into the blueprint via LLM."""
+    import uuid as _uuid
+    from api.models.song_blueprint import SongBlueprint
+    from api.models.web_research_job import WebResearchJob
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id")
+    bp = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if bp is None:
+        raise HTTPException(404, detail="blueprint not found")
+    genre = bp.primary_genre or bp.genre_id
+    if not genre:
+        raise HTTPException(400, detail="blueprint has no primary_genre")
+    # Build a worker-friendly query: list the genre + its parent chain
+    # so the worker hits the most-specific Wikipedia/Allmusic article.
+    query = f"music genre: {genre}"
+    job = WebResearchJob(
+        target_kind="genre_research",
+        query=query,
+        genre_id=genre,
+        blueprint_id=bp_uuid,
+        status="pending",
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    return {
+        "job_id": str(job.id),
+        "blueprint_id": str(bp_uuid),
+        "genre": genre,
+        "status": job.status,
+        "next": f"poll GET /admin/web-research/{job.id} until status=='completed', then POST /admin/blueprints/{bp_uuid}/refine-from-research",
+    }
+
+
+@router.post("/api/v1/admin/blueprints/{blueprint_id}/refine-from-research")
+async def blueprint_refine_from_research(
+    blueprint_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Take the result_text of a completed web_research job, run the
+    knowledge-only LLM with it as ground truth, and PATCH the blueprint
+    with the refined fields. Body: {job_id}."""
+    import uuid as _uuid
+    from api.models.song_blueprint import SongBlueprint
+    from api.models.web_research_job import WebResearchJob
+    from api.services.genre_knowledge_research import research_genre_blueprint
+
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+        jid = _uuid.UUID((body or {}).get("job_id") or "")
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id or job_id")
+
+    bp = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if bp is None:
+        raise HTTPException(404, detail="blueprint not found")
+
+    job = (await db.execute(
+        select(WebResearchJob).where(WebResearchJob.id == jid)
+    )).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(404, detail="research job not found")
+    if job.status != "completed":
+        raise HTTPException(409, detail=f"job not completed (status={job.status})")
+    if not (job.result_text or "").strip():
+        raise HTTPException(409, detail="job has no result_text")
+
+    genre = bp.primary_genre or bp.genre_id
+    refined = await research_genre_blueprint(
+        db, genre_id=genre, web_context=job.result_text,
+    )
+    if refined.get("error"):
+        raise HTTPException(502, detail=f"LLM refinement failed: {refined['error']}")
+
+    # Apply refined fields onto the blueprint, but DON'T blow away the
+    # user's name / is_genre_default / status. Only the recipe fields.
+    fields_updated: list[str] = []
+    for key in ("target_themes", "avoid_themes", "vocabulary_tone",
+                "target_audience_tags", "voice_requirements",
+                "target_tempo", "target_energy", "target_danceability",
+                "target_valence", "target_acousticness",
+                "production_notes", "reference_track_descriptors"):
+        v = refined.get(key)
+        if v is None:
+            continue
+        # Don't overwrite existing non-empty arrays/strings unless the
+        # refined value is materially better. Keep this simple: always
+        # overwrite (the user explicitly asked to research deeper).
+        setattr(bp, key, v)
+        fields_updated.append(key)
+
+    bp.smart_prompt_rationale = {
+        **(bp.smart_prompt_rationale or {}),
+        "refined_from_research_job": str(jid),
+        "refined_from_sources": job.sources,
+    }
+    await db.commit()
+    await db.refresh(bp)
+    return {
+        "blueprint_id": str(bp.id),
+        "fields_updated": fields_updated,
+        "research_job_id": str(jid),
+        "result_chars": len(job.result_text or ""),
+    }
+
+
 # ── SongLab preview (#26) ────────────────────────────────────────────────
 # The preview endpoint composes the smart prompt + generates lyrics for
 # a (blueprint, artist, theme, rating) combo WITHOUT calling the music
@@ -9160,6 +9368,44 @@ async def worker_claim_next(
             }
         }
 
+    if target_service == "web_research":
+        # BlackTip browser-driven research jobs (#31). Different table,
+        # different payload — the worker just needs the query string.
+        row = (await db.execute(
+            _text("""
+                SELECT id, target_kind, query, genre_id, blueprint_id, created_at
+                FROM web_research_jobs
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            """),
+        )).fetchone()
+        if row is None:
+            return {"claimed": None, "message": "no pending web_research jobs"}
+        await db.execute(
+            _text("""
+                UPDATE web_research_jobs
+                SET status = 'in_progress',
+                    claimed_by = :wid,
+                    claimed_at = NOW()
+                WHERE id = :id
+            """),
+            {"id": row[0], "wid": worker_id},
+        )
+        await db.commit()
+        return {
+            "claimed": {
+                "submission_id": str(row[0]),
+                "target_service": "web_research",
+                "target_kind": row[1],
+                "query": row[2],
+                "genre_id": row[3],
+                "blueprint_id": str(row[4]) if row[4] else None,
+                "worker_id": worker_id,
+            }
+        }
+
     # All other targets use external_submissions
     row = (await db.execute(
         _text("""
@@ -9298,6 +9544,23 @@ async def worker_ack(
                 "shot": screenshot_b64,
             },
         )
+    elif target_service == "web_research":
+        # Worker returns {result_text, sources: [{url, title}, ...]}
+        # in `response`. We persist both onto the queue row + flip
+        # status='completed'.
+        result_text = (response or {}).get("result_text") or ""
+        sources = (response or {}).get("sources") or []
+        await db.execute(
+            _text("""
+                UPDATE web_research_jobs SET
+                    status = 'completed',
+                    result_text = :rt,
+                    sources = :src,
+                    completed_at = NOW()
+                WHERE id = :id
+            """),
+            {"id": sid, "rt": result_text, "src": json.dumps(sources)},
+        )
     else:
         await db.execute(
             _text("""
@@ -9357,6 +9620,17 @@ async def worker_fail(
                     retry_count = retry_count + 1,
                     last_error_message = :err,
                     updated_at = NOW()
+                WHERE id = :id
+            """),
+            {"id": sid, "status": new_status, "err": error[:1000]},
+        )
+    elif target_service == "web_research":
+        await db.execute(
+            _text("""
+                UPDATE web_research_jobs SET
+                    status = :status,
+                    error = :err,
+                    completed_at = CASE WHEN :status = 'failed' THEN NOW() ELSE NULL END
                 WHERE id = :id
             """),
             {"id": sid, "status": new_status, "err": error[:1000]},
