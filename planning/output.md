@@ -687,3 +687,23 @@ Three fixes shipped:
 3. SettingsDrawer share-to-device flow: 'Generate & copy share link' button on the desktop settings encodes the {apiKey, baseUrl} as base64 + appends ?config= to the current URL. User texts/emails the link to themselves. Mobile opens the link → SettingsDrawer auto-detects ?config= on mount → shows a violet 'Import settings from another device?' card with the URL + truncated key preview + Apply / Dismiss buttons. Apply persists to localStorage, fires soundpulse_config_changed (banner disappears + queries refetch), strips ?config= from the URL via history.replaceState (so the API key doesn't sit in the address bar after import).
 
 vite build passes (only the pre-existing CSS @import warning, unrelated).
+
+## 2026-04-18 17:27:52 — Blueprint tab + SongLab picker
+
+Backend (api/routers/admin.py): 4 new endpoints:
+- POST /admin/blueprints/generate-from-genre — wraps smart_prompt.generate_smart_prompt + persists. Body { genre, model, edge_profile? }. Returns full saved blueprint with rationale + based_on + confidence + edge_profile + pop_culture_refs_offered.
+- POST /admin/blueprints/manual — fully hand-filled blueprint, no LLM. Mirrors song_blueprints column set: identity (genre_id, primary_genre, adjacent_genres) + sonic profile (tempo, key, mode, energy, danceability, valence, acousticness, loudness) + lyrical (target_themes, avoid_themes, vocabulary_tone) + audience (target_audience_tags) + voice_requirements JSON + production_notes + reference_track_descriptors + smart_prompt_text.
+- PATCH /admin/blueprints/{id} — partial update. Whitelisted scalar/numeric/array/JSON field families; refuses to clear genre_id or smart_prompt_text.
+- GET /admin/blueprints/{id} — full detail (every column).
+
+Frontend hooks (useSoundPulse.js): useBlueprintDetail, useGenerateBlueprintFromGenre, useCreateBlueprintManual, useUpdateBlueprint, useAssignBlueprint.
+
+New page: frontend/src/pages/Blueprints.jsx (~520 lines). Three modals: GenerateFromGenreModal (genre input, model + edge override picker, smart_prompt LLM call, success card showing edge/confidence/refs), ManualBlueprintModal (full form across 6 sections: Identity / Sonic profile / Lyrical & themes / Audience & voice / Production / Smart prompt — also drives the Edit flow via existingBlueprint prop), BlueprintViewModal (read-only JSON dump for inspection). Card grid with Edit / View full / Assign artist / Generate song actions per blueprint, status filter dropdown, refresh button, friendly empty state.
+
+Wired into router: App.jsx imports Blueprints, adds /blueprints route. Layout.jsx adds Sparkles-icon nav entry between Song Lab and Songs.
+
+SongLab integration (SongLab.jsx): New SavedBlueprintsPicker component renders above the top-5 opportunity cards. Lists every saved blueprint (status != assigned_to_release) in a dropdown. Selecting one shows its smart_prompt_text preview + 'Generate song' button (disabled if no artist assigned, with pointer to the Blueprints tab to assign). When zero saved blueprints exist, the section collapses to a single hint line linking to /blueprints. Generation calls existing useGenerateSongForBlueprint hook.
+
+Dimensions covered: identity, sonic profile (7 numeric fields), lyrical themes (target + avoid + tone), audience tags, voice requirements (JSON), production notes, reference tracks, smart prompt body. Per-genre meme density / structure / edge profile come automatically via the existing genre_traits + genre_structures resolvers when the blueprint feeds the orchestrator at song-gen time.
+
+vite build passes; admin.py AST OK.

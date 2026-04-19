@@ -795,6 +795,48 @@ export function useBlueprints({ status = null, limit = 50 } = {}) {
   })
 }
 
+export function useBlueprintDetail(blueprintId) {
+  return useQuery({
+    queryKey: ['admin', 'blueprints', 'detail', blueprintId],
+    queryFn: () => makeRequest('GET', `/admin/blueprints/${blueprintId}`),
+    enabled: Boolean(blueprintId),
+    staleTime: 30_000,
+  })
+}
+
+export function useGenerateBlueprintFromGenre() {
+  // POST /admin/blueprints/generate-from-genre — runs smart_prompt LLM
+  // and persists the result. Body: { genre, model?, edge_profile? }.
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/blueprints/generate-from-genre', {}, body),
+  })
+}
+
+export function useCreateBlueprintManual() {
+  // POST /admin/blueprints/manual — fully hand-filled blueprint, no LLM.
+  return useMutation({
+    mutationFn: ({ body }) =>
+      makeRequest('POST', '/admin/blueprints/manual', {}, body),
+  })
+}
+
+export function useUpdateBlueprint() {
+  // PATCH /admin/blueprints/{id} — partial update from edit modal.
+  return useMutation({
+    mutationFn: ({ blueprintId, body }) =>
+      makeRequest('PATCH', `/admin/blueprints/${blueprintId}`, {}, body),
+  })
+}
+
+export function useAssignBlueprint() {
+  // POST /admin/blueprints/{id}/assign — runs §22 assignment engine.
+  return useMutation({
+    mutationFn: ({ blueprintId }) =>
+      makeRequest('POST', `/admin/blueprints/${blueprintId}/assign`, {}, {}),
+  })
+}
+
 export function useMusicGenerations(limit = 20) {
   return useQuery({
     queryKey: ['admin', 'music', 'generations', limit],

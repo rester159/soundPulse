@@ -4,9 +4,11 @@ import {
   Activity, RefreshCw, Loader2, ChevronDown, ChevronUp,
   Play, AlertTriangle,
 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import {
   useTopOpportunities, useMusicProviders, useMusicGenerate, useMusicPoll,
   useMusicGenerations, getBaseUrl,
+  useBlueprints, useGenerateSongForBlueprint,
 } from '../hooks/useSoundPulse'
 
 // Backend-served audio URLs come back as /api/v1/... paths. Resolve
@@ -433,6 +435,117 @@ function BlueprintCard({ blueprint, index, providerId, providerLive }) {
   )
 }
 
+// Compact picker section — lists every blueprint saved via the
+// /blueprints tab so the operator can kick off a generation without
+// leaving SongLab. Renders empty (just a hint) when there are no saved
+// blueprints, so the section never gets in the way of the top-5 cards.
+function SavedBlueprintsPicker() {
+  const { data, isLoading, refetch } = useBlueprints({ limit: 50 })
+  const blueprints = data?.data?.blueprints || []
+  // Only show ones that haven't already produced a song.
+  const usable = blueprints.filter(b => b.status !== 'assigned_to_release')
+  const generate = useGenerateSongForBlueprint()
+  const [selectedId, setSelectedId] = useState('')
+  const [status, setStatus] = useState(null)  // {kind, msg}
+
+  const selected = usable.find(b => b.id === selectedId)
+
+  const handleGenerate = async () => {
+    if (!selected) return
+    setStatus(null)
+    try {
+      const res = await generate.mutateAsync({ blueprintId: selected.id, body: {} })
+      setStatus({
+        kind: 'success',
+        msg: `Song generation started — id ${res?.data?.song_id?.slice(0, 8) || ''}. Check Songs tab in ~60s.`,
+      })
+      refetch()
+    } catch (e) {
+      setStatus({
+        kind: 'error',
+        msg: e?.response?.data?.detail || e?.message || 'generation failed',
+      })
+    }
+  }
+
+  if (isLoading || usable.length === 0) {
+    // Don't render the section if there's nothing useful to pick.
+    // Provide a discoverability hint pointing to the /blueprints tab.
+    return (
+      <div className="mb-4 text-xs text-zinc-500">
+        Want to use a custom recipe?{' '}
+        <Link to="/blueprints" className="text-violet-400 hover:text-violet-300 underline">
+          Open the Blueprints tab
+        </Link>{' '}
+        to generate one from a genre or build it from scratch.
+      </div>
+    )
+  }
+
+  return (
+    <div className="mb-6 p-4 rounded-xl border border-violet-500/30 bg-violet-500/5">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Sparkles size={14} className="text-violet-400" />
+          <span className="text-sm font-semibold text-violet-200">Use a saved blueprint</span>
+          <span className="text-xs text-zinc-500">({usable.length} available)</span>
+        </div>
+        <Link to="/blueprints" className="text-xs text-violet-400 hover:text-violet-300 underline">
+          Manage all →
+        </Link>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <select
+          value={selectedId}
+          onChange={(e) => setSelectedId(e.target.value)}
+          className="flex-1 min-w-[280px] px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100"
+        >
+          <option value="">— pick a saved blueprint —</option>
+          {usable.map((b) => {
+            const themePreview = (b.target_themes || []).slice(0, 2).join(', ')
+            return (
+              <option key={b.id} value={b.id}>
+                {b.primary_genre || b.genre_id}
+                {themePreview && ` · ${themePreview}`}
+                {b.assigned_artist_id && ` · artist assigned`}
+                {b.predicted_success_score != null && ` · score ${b.predicted_success_score.toFixed(2)}`}
+              </option>
+            )
+          })}
+        </select>
+        <button
+          onClick={handleGenerate}
+          disabled={!selected || generate.isPending || !selected.assigned_artist_id}
+          className="flex items-center gap-1.5 px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium rounded"
+          title={selected && !selected.assigned_artist_id ? 'Assign an artist on the Blueprints tab first' : ''}
+        >
+          {generate.isPending ? <Loader2 size={14} className="animate-spin" /> : <Music size={14} />}
+          {generate.isPending ? 'Generating…' : 'Generate song'}
+        </button>
+      </div>
+      {selected && !selected.assigned_artist_id && (
+        <div className="mt-2 text-xs text-amber-300/80">
+          This blueprint has no assigned artist yet. <Link to="/blueprints" className="underline">Assign one on the Blueprints tab</Link> before generating.
+        </div>
+      )}
+      {selected && (
+        <div className="mt-2 text-xs text-zinc-500 line-clamp-2">
+          {selected.smart_prompt_text}
+        </div>
+      )}
+      {status && (
+        <div className={`mt-3 p-2 rounded text-xs ${
+          status.kind === 'success'
+            ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+            : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
+        }`}>
+          {status.msg}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function SongLab() {
   const { data: providersData } = useMusicProviders()
   const providers = providersData?.data?.providers || []
@@ -501,6 +614,9 @@ export default function SongLab() {
           </button>
         </div>
       </div>
+
+      {/* Saved blueprints picker (from the /blueprints tab) */}
+      <SavedBlueprintsPicker />
 
       {/* Recent generations — persisted across sessions */}
       <RecentGenerations />

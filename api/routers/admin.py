@@ -4477,6 +4477,319 @@ async def list_blueprints(
     }
 
 
+class BlueprintGenerateAndSaveRequest(BaseModel):
+    """Body for /admin/blueprints/generate-from-genre."""
+    genre: str
+    model: str = "suno"
+    edge_profile: str | None = None  # clean_edge | flirty_edge | savage_edge
+
+
+@router.post("/api/v1/admin/blueprints/generate-from-genre")
+async def generate_blueprint_from_genre(
+    body: BlueprintGenerateAndSaveRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Generate a smart-prompt blueprint for a given genre + persist it.
+
+    Wraps `smart_prompt.generate_smart_prompt` (Layer 5 of the breakout
+    engine) so the user can produce a fresh blueprint from any genre,
+    not just the system-surfaced top opportunities. Saved blueprints
+    appear immediately in the SongLab dropdown.
+    """
+    from api.models.song_blueprint import SongBlueprint
+    from api.services.smart_prompt import generate_smart_prompt
+
+    genre = (body.genre or "").strip()
+    if not genre:
+        raise HTTPException(400, detail="genre is required")
+
+    try:
+        sp = await generate_smart_prompt(
+            db, genre=genre, model=body.model, edge_profile=body.edge_profile,
+        )
+    except Exception as exc:
+        logger.exception("[blueprint-generate-from-genre] smart_prompt failed for %s", genre)
+        raise HTTPException(502, detail=f"smart_prompt failed: {exc}")
+
+    if not sp or not sp.get("prompt"):
+        raise HTTPException(
+            502,
+            detail="smart_prompt returned no prompt — check llm_calls table for the failure reason",
+        )
+
+    row = SongBlueprint(
+        genre_id=genre,
+        primary_genre=genre,
+        smart_prompt_text=sp["prompt"],
+        smart_prompt_rationale=sp.get("rationale"),
+        detected_via="manual_generate_from_genre",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {
+        "id": str(row.id),
+        "genre_id": row.genre_id,
+        "status": row.status,
+        "created_at": row.created_at.isoformat(),
+        "smart_prompt_text": row.smart_prompt_text,
+        "smart_prompt_rationale": row.smart_prompt_rationale,
+        "edge_profile": sp.get("edge_profile"),
+        "based_on": sp.get("based_on"),
+        "confidence": sp.get("confidence"),
+        "pop_culture_refs_offered": sp.get("pop_culture_refs_offered", 0),
+    }
+
+
+class BlueprintManualCreateRequest(BaseModel):
+    """Body for /admin/blueprints/manual — every field optional except
+    genre_id + smart_prompt_text. Mirrors the song_blueprints column
+    set so the manual editor has full coverage."""
+    genre_id: str
+    primary_genre: str | None = None
+    adjacent_genres: list[str] = []
+    target_themes: list[str] = []
+    avoid_themes: list[str] = []
+    vocabulary_tone: str | None = None
+    target_audience_tags: list[str] = []
+    voice_requirements: dict | None = None
+    target_tempo: float | None = None
+    target_key: int | None = None
+    target_mode: int | None = None
+    target_energy: float | None = None
+    target_danceability: float | None = None
+    target_valence: float | None = None
+    target_acousticness: float | None = None
+    target_loudness: float | None = None
+    structural_pattern: dict | None = None
+    production_notes: str | None = None
+    reference_track_descriptors: list[str] = []
+    smart_prompt_text: str
+    smart_prompt_rationale: dict | None = None
+
+
+@router.post("/api/v1/admin/blueprints/manual")
+async def create_blueprint_manual(
+    body: BlueprintManualCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Create a blueprint from a fully hand-filled payload — no LLM, no
+    breakout-engine inputs. Lets the operator define a song direction
+    that the system wouldn't surface on its own."""
+    from api.models.song_blueprint import SongBlueprint
+
+    if not body.genre_id.strip():
+        raise HTTPException(400, detail="genre_id is required")
+    if not body.smart_prompt_text.strip():
+        raise HTTPException(400, detail="smart_prompt_text is required")
+
+    row = SongBlueprint(
+        genre_id=body.genre_id.strip(),
+        primary_genre=(body.primary_genre or body.genre_id).strip(),
+        adjacent_genres=body.adjacent_genres or None,
+        target_themes=body.target_themes or None,
+        avoid_themes=body.avoid_themes or None,
+        vocabulary_tone=body.vocabulary_tone,
+        target_audience_tags=body.target_audience_tags or None,
+        voice_requirements=body.voice_requirements,
+        target_tempo=body.target_tempo,
+        target_key=body.target_key,
+        target_mode=body.target_mode,
+        target_energy=body.target_energy,
+        target_danceability=body.target_danceability,
+        target_valence=body.target_valence,
+        target_acousticness=body.target_acousticness,
+        target_loudness=body.target_loudness,
+        structural_pattern=body.structural_pattern,
+        production_notes=body.production_notes,
+        reference_track_descriptors=body.reference_track_descriptors or None,
+        smart_prompt_text=body.smart_prompt_text,
+        smart_prompt_rationale=body.smart_prompt_rationale,
+        detected_via="manual_create",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {
+        "id": str(row.id),
+        "genre_id": row.genre_id,
+        "primary_genre": row.primary_genre,
+        "status": row.status,
+        "created_at": row.created_at.isoformat(),
+    }
+
+
+@router.patch("/api/v1/admin/blueprints/{blueprint_id}")
+async def update_blueprint(
+    blueprint_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Partial update of a blueprint. Only fields present in the body
+    are written. Used by the edit modal in the Blueprint tab."""
+    import uuid as _uuid
+    from api.models.song_blueprint import SongBlueprint
+
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id")
+
+    bp = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if bp is None:
+        raise HTTPException(404, detail="blueprint not found")
+
+    SCALAR = {
+        "genre_id", "primary_genre", "vocabulary_tone",
+        "production_notes", "smart_prompt_text", "status",
+    }
+    NUMERIC = {
+        "target_tempo", "target_key", "target_mode", "target_energy",
+        "target_danceability", "target_valence", "target_acousticness",
+        "target_loudness", "predicted_success_score",
+    }
+    ARRAYS = {
+        "adjacent_genres", "target_themes", "avoid_themes",
+        "target_audience_tags", "reference_track_descriptors",
+    }
+    JSON_FIELDS = {
+        "voice_requirements", "structural_pattern",
+        "smart_prompt_rationale", "quantification_snapshot",
+    }
+
+    fields_set: list[str] = []
+
+    for key in SCALAR:
+        if key not in body:
+            continue
+        v = body[key]
+        if v is None:
+            if key in ("genre_id", "smart_prompt_text"):
+                raise HTTPException(400, detail=f"{key} cannot be cleared")
+            setattr(bp, key, None)
+        else:
+            s = str(v).strip()
+            if not s and key in ("genre_id", "smart_prompt_text"):
+                raise HTTPException(400, detail=f"{key} cannot be empty")
+            setattr(bp, key, s if s else None)
+        fields_set.append(key)
+
+    for key in NUMERIC:
+        if key not in body:
+            continue
+        v = body[key]
+        if v is None or v == "":
+            setattr(bp, key, None)
+        else:
+            try:
+                setattr(bp, key, float(v) if "tempo" in key or any(p in key for p in ("energy", "valence", "danceability", "acousticness", "loudness", "score")) else int(v))
+            except (TypeError, ValueError):
+                raise HTTPException(400, detail=f"{key} must be numeric, got {v!r}")
+        fields_set.append(key)
+
+    for key in ARRAYS:
+        if key not in body:
+            continue
+        v = body[key]
+        if v is None:
+            setattr(bp, key, None)
+        elif isinstance(v, list):
+            cleaned = [str(x).strip() for x in v if str(x).strip()]
+            setattr(bp, key, cleaned or None)
+        else:
+            raise HTTPException(400, detail=f"{key} must be an array or null")
+        fields_set.append(key)
+
+    for key in JSON_FIELDS:
+        if key not in body:
+            continue
+        v = body[key]
+        if v is None:
+            setattr(bp, key, None)
+        elif isinstance(v, dict):
+            setattr(bp, key, v)
+        else:
+            raise HTTPException(400, detail=f"{key} must be an object or null")
+        fields_set.append(key)
+
+    if not fields_set:
+        raise HTTPException(400, detail="no editable fields in body")
+
+    try:
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(409, detail=f"update failed: {exc}")
+    await db.refresh(bp)
+
+    return {
+        "id": str(bp.id),
+        "genre_id": bp.genre_id,
+        "status": bp.status,
+        "fields_updated": sorted(set(fields_set)),
+        "updated_at": bp.updated_at.isoformat() if bp.updated_at else None,
+    }
+
+
+@router.get("/api/v1/admin/blueprints/{blueprint_id}")
+async def get_blueprint_detail(
+    blueprint_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Full blueprint detail — every column. Backs the edit modal."""
+    import uuid as _uuid
+    from api.models.song_blueprint import SongBlueprint
+
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id")
+
+    bp = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if bp is None:
+        raise HTTPException(404, detail="blueprint not found")
+
+    return {
+        "id": str(bp.id),
+        "genre_id": bp.genre_id,
+        "primary_genre": bp.primary_genre,
+        "adjacent_genres": bp.adjacent_genres,
+        "detected_via": bp.detected_via,
+        "status": bp.status,
+        "assigned_artist_id": str(bp.assigned_artist_id) if bp.assigned_artist_id else None,
+        "target_tempo": bp.target_tempo,
+        "target_key": bp.target_key,
+        "target_mode": bp.target_mode,
+        "target_energy": bp.target_energy,
+        "target_danceability": bp.target_danceability,
+        "target_valence": bp.target_valence,
+        "target_acousticness": bp.target_acousticness,
+        "target_loudness": bp.target_loudness,
+        "target_themes": bp.target_themes,
+        "avoid_themes": bp.avoid_themes,
+        "vocabulary_tone": bp.vocabulary_tone,
+        "structural_pattern": bp.structural_pattern,
+        "target_audience_tags": bp.target_audience_tags,
+        "voice_requirements": bp.voice_requirements,
+        "production_notes": bp.production_notes,
+        "reference_track_descriptors": bp.reference_track_descriptors,
+        "predicted_success_score": bp.predicted_success_score,
+        "quantification_snapshot": bp.quantification_snapshot,
+        "smart_prompt_text": bp.smart_prompt_text,
+        "smart_prompt_rationale": bp.smart_prompt_rationale,
+        "created_at": bp.created_at.isoformat(),
+        "updated_at": bp.updated_at.isoformat() if bp.updated_at else None,
+    }
+
+
 @router.post("/api/v1/admin/artists")
 async def create_ai_artist(
     body: AIArtistCreateRequest,
