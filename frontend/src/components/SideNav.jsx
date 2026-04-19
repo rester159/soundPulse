@@ -308,6 +308,12 @@ export default function SideNav({ navItems, onItemClick }) {
           to={meta.to}
           end={meta.to === '/'}
           onClick={() => onItemClick?.()}
+          // <a> is natively draggable in HTML5; if we don't disable it
+          // the browser steals the drag (to drag the URL) and our wrapper
+          // div's onDragStart never fires. That broke both
+          // (a) taking tabs out of folders and
+          // (b) reordering inside folders.
+          draggable={false}
           className={({ isActive }) =>
             `flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors cursor-grab active:cursor-grabbing ${
               isActive
