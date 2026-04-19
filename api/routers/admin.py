@@ -4463,6 +4463,8 @@ async def list_blueprints(
                 "id": str(r.id),
                 "genre_id": r.genre_id,
                 "primary_genre": r.primary_genre,
+                "name": r.name,
+                "is_genre_default": r.is_genre_default,
                 "status": r.status,
                 "assigned_artist_id": str(r.assigned_artist_id) if r.assigned_artist_id else None,
                 "target_themes": r.target_themes,
@@ -4490,12 +4492,18 @@ async def generate_blueprint_from_genre(
     db: AsyncSession = Depends(get_db),
     _admin: ApiKey = Depends(require_admin),
 ):
-    """Generate a smart-prompt blueprint for a given genre + persist it.
+    """Lazy base-blueprint resolver for a genre (post-#18 pivot).
 
-    Wraps `smart_prompt.generate_smart_prompt` (Layer 5 of the breakout
-    engine) so the user can produce a fresh blueprint from any genre,
-    not just the system-surfaced top opportunities. Saved blueprints
-    appear immediately in the SongLab dropdown.
+    New contract: every genre has ONE base blueprint
+    (is_genre_default=true). This endpoint:
+      1. If a base already exists for the genre, returns it (cached).
+      2. If not, runs LLM research to compose the full blueprint
+         (sonic targets, themes, audience, voice requirements, etc.)
+         and persists it as the base — then returns it.
+
+    The UI uses this when the user opens "Generate from genre". They
+    see the base prefilled and editable; saving with edits creates a
+    fork via /fork (or PATCHes the base).
     """
     from api.models.song_blueprint import SongBlueprint
     from api.services.smart_prompt import generate_smart_prompt
@@ -4504,37 +4512,73 @@ async def generate_blueprint_from_genre(
     if not genre:
         raise HTTPException(400, detail="genre is required")
 
+    # Try to return the existing base first — no LLM call, no money.
+    existing = (await db.execute(
+        select(SongBlueprint).where(
+            SongBlueprint.is_genre_default.is_(True),
+            SongBlueprint.primary_genre == genre,
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        return {
+            "id": str(existing.id),
+            "genre_id": existing.genre_id,
+            "primary_genre": existing.primary_genre,
+            "name": existing.name,
+            "is_genre_default": existing.is_genre_default,
+            "status": existing.status,
+            "created_at": existing.created_at.isoformat(),
+            "from_cache": True,
+        }
+
+    # No base yet — research it via the LLM (Layer 5 of the breakout
+    # engine). The smart_prompt service still emits the prose prompt;
+    # we no longer rely on it for composition (#17), but we DO mine its
+    # rationale for sonic / theme / audience hints to seed the base
+    # blueprint's structured fields.
     try:
         sp = await generate_smart_prompt(
             db, genre=genre, model=body.model, edge_profile=body.edge_profile,
         )
     except Exception as exc:
-        logger.exception("[blueprint-generate-from-genre] smart_prompt failed for %s", genre)
-        raise HTTPException(502, detail=f"smart_prompt failed: {exc}")
+        logger.exception("[blueprint-research-base] smart_prompt failed for %s", genre)
+        raise HTTPException(502, detail=f"research failed: {exc}")
 
     if not sp or not sp.get("prompt"):
-        # Surface the specific reason from smart_prompt instead of a generic
-        # "check llm_calls" message. Most-common failure: the genre has no
-        # breakout events in the last 30 days, so smart_prompt short-
-        # circuits before the LLM is even called. In that case, suggest
-        # the manual flow as the unblock.
         reason = (sp or {}).get("error") or (
-            "smart_prompt returned no prompt — check llm_calls for the LLM-side failure"
+            "research returned nothing — check llm_calls for the LLM-side failure"
         )
         suggestion = ""
         if "breakout events" in reason.lower() or "no breakout" in reason.lower():
             suggestion = (
-                " — try a more mainstream genre (pop, hip-hop, electronic.house) "
-                "or use 'Create manually' to write a blueprint without breakout data"
+                " — this genre has no recent breakout data; either pick a parent genre "
+                "(e.g. 'pop' instead of 'pop.k-pop.4th-gen-girl-group') or use "
+                "'Create manually' to author a base from scratch"
             )
         raise HTTPException(422, detail=f"{reason}{suggestion}")
 
+    rationale = sp.get("rationale") or {}
+    # Best-effort extraction of structured hints from the LLM rationale.
+    # Each is optional — if smart_prompt's schema evolves, we just
+    # surface less, never crash.
     row = SongBlueprint(
         genre_id=genre,
         primary_genre=genre,
-        smart_prompt_text=sp["prompt"],
-        smart_prompt_rationale=sp.get("rationale"),
-        detected_via="manual_generate_from_genre",
+        name=f"{genre} (base)",
+        is_genre_default=True,
+        target_themes=rationale.get("target_themes") or None,
+        avoid_themes=rationale.get("avoid_themes") or None,
+        vocabulary_tone=rationale.get("vocabulary_tone"),
+        target_audience_tags=rationale.get("target_audience_tags") or None,
+        target_tempo=rationale.get("target_tempo"),
+        target_energy=rationale.get("target_energy"),
+        target_danceability=rationale.get("target_danceability"),
+        target_valence=rationale.get("target_valence"),
+        production_notes=rationale.get("production_notes"),
+        reference_track_descriptors=rationale.get("reference_track_descriptors") or None,
+        smart_prompt_text=sp["prompt"],          # legacy; orchestrator ignores
+        smart_prompt_rationale=rationale,
+        detected_via="research_base_lazy",
     )
     db.add(row)
     await db.commit()
@@ -4542,14 +4586,93 @@ async def generate_blueprint_from_genre(
     return {
         "id": str(row.id),
         "genre_id": row.genre_id,
+        "primary_genre": row.primary_genre,
+        "name": row.name,
+        "is_genre_default": row.is_genre_default,
         "status": row.status,
         "created_at": row.created_at.isoformat(),
-        "smart_prompt_text": row.smart_prompt_text,
-        "smart_prompt_rationale": row.smart_prompt_rationale,
+        "from_cache": False,
         "edge_profile": sp.get("edge_profile"),
         "based_on": sp.get("based_on"),
         "confidence": sp.get("confidence"),
-        "pop_culture_refs_offered": sp.get("pop_culture_refs_offered", 0),
+    }
+
+
+class BlueprintForkRequest(BaseModel):
+    """Body for /admin/blueprints/{id}/fork. Name is optional (auto-
+    generated from source name + ' (fork)' if not provided)."""
+    name: str | None = None
+
+
+@router.post("/api/v1/admin/blueprints/{blueprint_id}/fork")
+async def fork_blueprint(
+    blueprint_id: str,
+    body: BlueprintForkRequest,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Deep-copy a blueprint into a new fork.
+
+    The fork inherits every field except: a fresh id, a new name, and
+    is_genre_default=false (a fork is never the base — only one base
+    per genre, and the partial unique index enforces it). status is
+    reset to pending_assignment so the fork goes through the normal
+    artist-assignment flow."""
+    import uuid as _uuid
+    from api.models.song_blueprint import SongBlueprint
+
+    try:
+        bp_uuid = _uuid.UUID(blueprint_id)
+    except ValueError:
+        raise HTTPException(400, detail="invalid blueprint_id")
+
+    src = (await db.execute(
+        select(SongBlueprint).where(SongBlueprint.id == bp_uuid)
+    )).scalar_one_or_none()
+    if src is None:
+        raise HTTPException(404, detail="source blueprint not found")
+
+    new_name = (body.name or "").strip() or f"{src.name or src.primary_genre} (fork)"
+
+    fork = SongBlueprint(
+        genre_id=src.genre_id,
+        primary_genre=src.primary_genre,
+        name=new_name,
+        is_genre_default=False,
+        adjacent_genres=src.adjacent_genres,
+        target_themes=src.target_themes,
+        avoid_themes=src.avoid_themes,
+        vocabulary_tone=src.vocabulary_tone,
+        target_audience_tags=src.target_audience_tags,
+        voice_requirements=src.voice_requirements,
+        target_tempo=src.target_tempo,
+        target_key=src.target_key,
+        target_mode=src.target_mode,
+        target_energy=src.target_energy,
+        target_danceability=src.target_danceability,
+        target_valence=src.target_valence,
+        target_acousticness=src.target_acousticness,
+        target_loudness=src.target_loudness,
+        structural_pattern=src.structural_pattern,
+        production_notes=src.production_notes,
+        reference_track_descriptors=src.reference_track_descriptors,
+        smart_prompt_text=src.smart_prompt_text,
+        smart_prompt_rationale=src.smart_prompt_rationale,
+        detected_via="fork",
+    )
+    db.add(fork)
+    await db.commit()
+    await db.refresh(fork)
+
+    return {
+        "id": str(fork.id),
+        "genre_id": fork.genre_id,
+        "primary_genre": fork.primary_genre,
+        "name": fork.name,
+        "is_genre_default": fork.is_genre_default,
+        "status": fork.status,
+        "created_at": fork.created_at.isoformat(),
+        "forked_from": str(src.id),
     }
 
 
@@ -4736,9 +4859,15 @@ async def synthesize_prompt_from_fields(
 
 class BlueprintManualCreateRequest(BaseModel):
     """Body for /admin/blueprints/manual — every field optional except
-    genre_id + smart_prompt_text. Mirrors the song_blueprints column
-    set so the manual editor has full coverage."""
+    genre_id. Mirrors the song_blueprints column set.
+
+    Post-#17 composition pivot: smart_prompt_text is no longer required
+    (orchestrator composes the prompt from structured fields). Name +
+    is_genre_default are new — name disambiguates forks of the same
+    genre's base blueprint, is_genre_default marks the base."""
     genre_id: str
+    name: str | None = None
+    is_genre_default: bool = False
     primary_genre: str | None = None
     adjacent_genres: list[str] = []
     target_themes: list[str] = []
@@ -4757,7 +4886,9 @@ class BlueprintManualCreateRequest(BaseModel):
     structural_pattern: dict | None = None
     production_notes: str | None = None
     reference_track_descriptors: list[str] = []
-    smart_prompt_text: str
+    # Optional and ignored by the orchestrator post-#17 — accepted for
+    # back-compat so old clients don't break.
+    smart_prompt_text: str | None = None
     smart_prompt_rationale: dict | None = None
 
 
@@ -4774,12 +4905,31 @@ async def create_blueprint_manual(
 
     if not body.genre_id.strip():
         raise HTTPException(400, detail="genre_id is required")
-    if not body.smart_prompt_text.strip():
-        raise HTTPException(400, detail="smart_prompt_text is required")
+
+    primary = (body.primary_genre or body.genre_id).strip()
+
+    # If is_genre_default=true is requested, enforce at-most-one per
+    # genre at the application layer too (the partial unique index in
+    # migration 037 backstops this with a friendly error if a race
+    # slips through).
+    if body.is_genre_default:
+        existing = (await db.execute(
+            select(SongBlueprint).where(
+                SongBlueprint.is_genre_default.is_(True),
+                SongBlueprint.primary_genre == primary,
+            )
+        )).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(
+                409,
+                detail=f"a base blueprint already exists for {primary} (id {existing.id}); fork it instead",
+            )
 
     row = SongBlueprint(
         genre_id=body.genre_id.strip(),
-        primary_genre=(body.primary_genre or body.genre_id).strip(),
+        primary_genre=primary,
+        name=(body.name or "").strip() or None,
+        is_genre_default=bool(body.is_genre_default),
         adjacent_genres=body.adjacent_genres or None,
         target_themes=body.target_themes or None,
         avoid_themes=body.avoid_themes or None,
@@ -4797,7 +4947,7 @@ async def create_blueprint_manual(
         structural_pattern=body.structural_pattern,
         production_notes=body.production_notes,
         reference_track_descriptors=body.reference_track_descriptors or None,
-        smart_prompt_text=body.smart_prompt_text,
+        smart_prompt_text=body.smart_prompt_text,  # nullable post-#17
         smart_prompt_rationale=body.smart_prompt_rationale,
         detected_via="manual_create",
     )
@@ -4808,6 +4958,8 @@ async def create_blueprint_manual(
         "id": str(row.id),
         "genre_id": row.genre_id,
         "primary_genre": row.primary_genre,
+        "name": row.name,
+        "is_genre_default": row.is_genre_default,
         "status": row.status,
         "created_at": row.created_at.isoformat(),
     }
@@ -4838,7 +4990,7 @@ async def update_blueprint(
 
     SCALAR = {
         "genre_id", "primary_genre", "vocabulary_tone",
-        "production_notes", "smart_prompt_text", "status",
+        "production_notes", "smart_prompt_text", "status", "name",
     }
     NUMERIC = {
         "target_tempo", "target_key", "target_mode", "target_energy",
@@ -4853,6 +5005,7 @@ async def update_blueprint(
         "voice_requirements", "structural_pattern",
         "smart_prompt_rationale", "quantification_snapshot",
     }
+    BOOLS = {"is_genre_default"}
 
     fields_set: list[str] = []
 
@@ -4861,14 +5014,22 @@ async def update_blueprint(
             continue
         v = body[key]
         if v is None:
-            if key in ("genre_id", "smart_prompt_text"):
-                raise HTTPException(400, detail=f"{key} cannot be cleared")
+            # genre_id stays required; smart_prompt_text is now nullable
+            # (post-#17 the orchestrator doesn't read it).
+            if key == "genre_id":
+                raise HTTPException(400, detail="genre_id cannot be cleared")
             setattr(bp, key, None)
         else:
             s = str(v).strip()
-            if not s and key in ("genre_id", "smart_prompt_text"):
-                raise HTTPException(400, detail=f"{key} cannot be empty")
+            if not s and key == "genre_id":
+                raise HTTPException(400, detail="genre_id cannot be empty")
             setattr(bp, key, s if s else None)
+        fields_set.append(key)
+
+    for key in BOOLS:
+        if key not in body:
+            continue
+        setattr(bp, key, bool(body[key]))
         fields_set.append(key)
 
     for key in NUMERIC:
@@ -6502,6 +6663,12 @@ class GenerateSongRequest(BaseModel):
     duration_seconds: int = 30
     model_variant: str | None = None
     title: str | None = None  # optional override of auto-derived working title
+    # Per-song overrides picked in the song generation window (#22):
+    #   theme — picklist value or free text. None = artist_default.
+    #   content_rating_override — 'clean'|'explicit' overrides the
+    #     artist's content_rating for THIS song only.
+    theme: str | None = None
+    content_rating_override: str | None = None
 
 
 @router.post("/api/v1/admin/blueprints/{blueprint_id}/generate-song")
@@ -6621,11 +6788,29 @@ async def generate_song_for_blueprint(
     except Exception:
         logger.exception("[orchestrator] fresh smart_prompt failed, falling back")
 
+    # Post-#17 composition pivot: pass the blueprint's structured
+    # fields directly. The orchestrator composes [STYLE] from these —
+    # no smart_prompt_text needed. The fresh smart_prompt is now only
+    # used as the legacy free-form addendum (so the edge layer's pop-
+    # culture references still land in the prompt).
     blueprint_dict = {
-        "smart_prompt_text": fresh_smart_prompt_text or blueprint.smart_prompt_text,
         "primary_genre": blueprint.primary_genre or blueprint.genre_id,
         "genre_id": blueprint.genre_id,
+        "adjacent_genres": blueprint.adjacent_genres or [],
         "target_themes": blueprint.target_themes or [],
+        "avoid_themes": blueprint.avoid_themes or [],
+        "vocabulary_tone": blueprint.vocabulary_tone,
+        "target_audience_tags": blueprint.target_audience_tags or [],
+        "voice_requirements": blueprint.voice_requirements,
+        "target_tempo": blueprint.target_tempo,
+        "target_key": blueprint.target_key,
+        "target_mode": blueprint.target_mode,
+        "target_energy": blueprint.target_energy,
+        "target_danceability": blueprint.target_danceability,
+        "target_valence": blueprint.target_valence,
+        "target_acousticness": blueprint.target_acousticness,
+        "production_notes": blueprint.production_notes,
+        "reference_track_descriptors": blueprint.reference_track_descriptors or [],
     }
     # Task #109: resolve per-genre structure (with optional artist override
     # / blend) and format as a [STRUCTURE] tag block prepended to the
@@ -6643,11 +6828,34 @@ async def generate_song_for_blueprint(
         structure_block = structure_block_for_prompt(resolved_structure)
     except Exception:
         logger.exception("[orchestrator] structure resolution failed; continuing without [STRUCTURE] block")
+
+    # #17: theme=genre_default needs the resolved genre_traits row to
+    # render. Best-effort load; failure just means the [THEME] block
+    # falls back to empty rather than breaking the whole generation.
+    genre_traits_dict: dict | None = None
+    if (body.theme or "").strip() == "genre_default":
+        try:
+            from api.services.genre_traits_service import resolve_genre_traits
+            traits = await resolve_genre_traits(
+                db, blueprint.primary_genre or blueprint.genre_id or "pop"
+            )
+            genre_traits_dict = {
+                "notes": getattr(traits, "notes", None),
+                "structural_conventions": getattr(traits, "structural_conventions", None),
+                "vocabulary_era": getattr(traits, "vocabulary_era", None),
+            }
+        except Exception:
+            logger.exception("[orchestrator] genre_traits load failed for theme=genre_default")
+
     final_prompt = assemble_generation_prompt(
         artist=artist_dict,
         blueprint=blueprint_dict,
         voice_state=voice_state_dict,
         structure_block=structure_block,
+        theme=body.theme,
+        content_rating_override=body.content_rating_override,
+        genre_traits=genre_traits_dict,
+        legacy_smart_prompt_text=fresh_smart_prompt_text,
     )
     title = body.title or derive_song_title(blueprint_dict, artist_dict)
 
@@ -6671,13 +6879,22 @@ async def generate_song_for_blueprint(
         logger.exception("[orchestrator] %s generate failed", body.provider)
         raise HTTPException(502, detail=f"provider call failed: {e}")
 
+    # Per-song rating override (if any) wins; otherwise stick with the
+    # artist's content_rating. Mild stays the default.
+    effective_rating = (
+        (body.content_rating_override or "").strip().lower()
+        or artist.content_rating
+        or "mild"
+    )
+
     # Create the songs_master row in draft status
     song = SongMaster(
         title=title,
         primary_artist_id=artist.artist_id,
         blueprint_id=blueprint.id,
         primary_genre=blueprint.primary_genre or blueprint.genre_id,
-        content_rating=artist.content_rating or "mild",
+        content_rating=effective_rating,
+        theme=body.theme,
         status="draft",
         generation_provider=body.provider,
         generation_provider_job_id=task.task_id,
@@ -9107,6 +9324,185 @@ async def update_genre_traits(
     return {
         "genre_id": row.genre_id,
         "is_system_default": row.is_system_default,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+# ── /admin/genres-taxonomy — full 950-row tree + per-genre dimensions ───
+# Backs the new "Genres" top-level tab (#19). The list endpoint LEFT
+# JOINs the full genre taxonomy with genre_traits so the UI sees every
+# genre, not just the ~20 that have explicit trait overrides. The PATCH
+# endpoint upserts a genre_traits row — inserting a fresh override for a
+# genre that previously inherited from a parent.
+
+@router.get("/api/v1/admin/genres-taxonomy")
+async def list_genres_taxonomy(
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Full taxonomy + traits for the editable Genres grid (#19).
+
+    LEFT JOINs `genres` against `genre_traits` so genres without an
+    explicit traits row still appear (with traits fields = null and a
+    `has_override=false` flag). Sort: parent_id NULLS FIRST so roots
+    come before their children, then id; the UI renders depth-based
+    indentation off the existing `depth` column.
+    """
+    from sqlalchemy import text as _text
+    rows = (await db.execute(_text(
+        """
+        SELECT
+          g.id            AS genre_id,
+          g.name          AS name,
+          g.parent_id     AS parent_id,
+          g.depth         AS depth,
+          g.root_category AS root_category,
+          g.status        AS status,
+          t.id            AS trait_id,
+          t.edginess,
+          t.meme_density,
+          t.earworm_demand,
+          t.sonic_experimentation,
+          t.lyrical_complexity,
+          t.vocal_processing,
+          t.tempo_range_bpm,
+          t.key_mood,
+          t.default_edge_profile,
+          t.vocabulary_era,
+          t.pop_culture_sources,
+          t.instrumentation_palette,
+          t.structural_conventions,
+          t.notes,
+          t.updated_by,
+          t.is_system_default,
+          t.updated_at
+        FROM genres g
+        LEFT JOIN genre_traits t ON t.genre_id = g.id
+        ORDER BY g.depth ASC, g.parent_id NULLS FIRST, g.id ASC
+        """
+    ))).fetchall()
+    out = []
+    for r in rows:
+        m = r._mapping
+        out.append({
+            "genre_id": m["genre_id"],
+            "name": m["name"],
+            "parent_id": m["parent_id"],
+            "depth": m["depth"],
+            "root_category": m["root_category"],
+            "status": m["status"],
+            "has_override": m["trait_id"] is not None and not (m["is_system_default"] is True),
+            "trait_id": str(m["trait_id"]) if m["trait_id"] else None,
+            # Numeric dimensions — null = inherited from a parent (no
+            # explicit row); the resolver walks up at runtime.
+            "edginess": m["edginess"],
+            "meme_density": m["meme_density"],
+            "earworm_demand": m["earworm_demand"],
+            "sonic_experimentation": m["sonic_experimentation"],
+            "lyrical_complexity": m["lyrical_complexity"],
+            "vocal_processing": m["vocal_processing"],
+            "tempo_range_bpm": m["tempo_range_bpm"],
+            "key_mood": m["key_mood"],
+            "default_edge_profile": m["default_edge_profile"],
+            "vocabulary_era": m["vocabulary_era"],
+            "pop_culture_sources": m["pop_culture_sources"],
+            "instrumentation_palette": m["instrumentation_palette"],
+            "structural_conventions": m["structural_conventions"],
+            "notes": m["notes"],
+            "updated_by": m["updated_by"],
+            "is_system_default": m["is_system_default"],
+            "updated_at": m["updated_at"].isoformat() if m["updated_at"] else None,
+        })
+    return {"count": len(out), "genres": out}
+
+
+@router.patch("/api/v1/admin/genres-taxonomy/{genre_id:path}")
+async def patch_genres_taxonomy(
+    genre_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _admin: ApiKey = Depends(require_admin),
+):
+    """Upsert a genre_traits row for the given genre (#19).
+
+    If a row exists, updates only the fields present in the body. If
+    not, inserts a fresh row pre-filled from sensible defaults so the
+    edit is non-destructive. Always sets is_system_default=false +
+    updated_by='ceo_ui' so seed reruns don't clobber the override.
+    """
+    from api.models.genre_traits import GenreTraits
+    from sqlalchemy import text as _text
+
+    # First confirm the genre id exists in the taxonomy — we don't
+    # accept arbitrary strings here.
+    g = (await db.execute(
+        _text("SELECT id FROM genres WHERE id = :gid"), {"gid": genre_id}
+    )).fetchone()
+    if g is None:
+        raise HTTPException(404, detail=f"genre '{genre_id}' not found in taxonomy")
+
+    row = (await db.execute(
+        select(GenreTraits).where(GenreTraits.genre_id == genre_id)
+    )).scalar_one_or_none()
+
+    if row is None:
+        # Insert with defaults; body fields override below.
+        row = GenreTraits(
+            genre_id=genre_id,
+            edginess=50, meme_density=30, earworm_demand=70,
+            sonic_experimentation=40, lyrical_complexity=50, vocal_processing=40,
+            tempo_range_bpm=[80, 130],
+            key_mood="mixed",
+            default_edge_profile="flirty_edge",
+            vocabulary_era="timeless",
+            pop_culture_sources=[],
+            instrumentation_palette=[],
+            is_system_default=False,
+        )
+        db.add(row)
+        await db.flush()  # so it has an id
+
+    # 0-100 numeric dimensions
+    for k in ("edginess", "meme_density", "earworm_demand",
+              "sonic_experimentation", "lyrical_complexity", "vocal_processing"):
+        if k in body and body[k] is not None:
+            try:
+                v = int(body[k])
+            except (TypeError, ValueError):
+                raise HTTPException(400, detail=f"{k} must be int 0-100")
+            if v < 0 or v > 100:
+                raise HTTPException(400, detail=f"{k} must be 0-100")
+            setattr(row, k, v)
+
+    if "tempo_range_bpm" in body and isinstance(body["tempo_range_bpm"], list) and len(body["tempo_range_bpm"]) == 2:
+        try:
+            row.tempo_range_bpm = [int(body["tempo_range_bpm"][0]), int(body["tempo_range_bpm"][1])]
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail="tempo_range_bpm must be [low, high] integers")
+
+    for k in ("key_mood", "default_edge_profile", "vocabulary_era",
+              "structural_conventions", "notes"):
+        if k in body and body[k] is not None:
+            setattr(row, k, str(body[k]))
+
+    for k in ("pop_culture_sources", "instrumentation_palette"):
+        if k in body and isinstance(body[k], list):
+            setattr(row, k, [str(x) for x in body[k]])
+
+    # Override semantics: any edit demotes the row from system default
+    # so subsequent migration seeds don't clobber the user's choice.
+    row.is_system_default = False
+    row.updated_by = body.get("updated_by") or "ceo_ui"
+    await db.execute(
+        _text("UPDATE genre_traits SET updated_at = NOW() WHERE id = :id"),
+        {"id": row.id},
+    )
+    await db.commit()
+    await db.refresh(row)
+    return {
+        "genre_id": row.genre_id,
+        "is_system_default": row.is_system_default,
+        "updated_by": row.updated_by,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
 

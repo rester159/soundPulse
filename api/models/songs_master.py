@@ -42,6 +42,12 @@ class SongMaster(Base):
     mood_tags: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     content_rating: Mapped[str] = mapped_column(String(10), nullable=False, default="mild")
     language: Mapped[str] = mapped_column(String(10), nullable=False, default="en")
+    # Per-song theme override picked at generation time (#17 composition
+    # pivot). Picklist values: 'artist_default' | 'genre_default' |
+    # 'love_relationships' | 'sex' | 'introspection' | 'family' | 'god'
+    # | 'partying' | <free-text>. Null = caller didn't pick (treated as
+    # artist_default by the orchestrator's theme resolver).
+    theme: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Audio analysis
     tempo_bpm: Mapped[float | None] = mapped_column(Float, nullable=True)

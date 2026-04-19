@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,8 +50,22 @@ class SongBlueprint(Base):
     predicted_success_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     quantification_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    smart_prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # DEPRECATED post-#16 (composition pivot): orchestrator no longer
+    # reads smart_prompt_text. Kept nullable for back-compat with
+    # legacy rows; new blueprints don't set it.
+    smart_prompt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     smart_prompt_rationale: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # User-facing name. Forks of the same genre's base blueprint each
+    # get a name to disambiguate them in the UI. Backfilled from
+    # primary_genre for legacy rows in migration 037.
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Marks the ONE base blueprint per genre. Partial unique index
+    # `uq_song_blueprints_genre_default` enforces at-most-one.
+    is_genre_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending_assignment")
     assigned_artist_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)

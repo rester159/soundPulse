@@ -21,16 +21,24 @@ def _artist():
 
 def _blueprint():
     return {
+        # smart_prompt_text is no longer read by the orchestrator (#17
+        # composition pivot), but we keep it on this fixture and pass it
+        # via the back-compat shim where these tests assert on it.
         "smart_prompt_text": "Write a confident pop song about overcoming doubt.",
         "primary_genre": "pop",
     }
 
 
 def test_no_structure_block_param_yields_pre_109_prompt():
-    """Backwards compat: omitting the new kwarg leaves the prompt
-    structurally identical to pre-#109 output (modulo formatting)."""
+    """Backwards compat: omitting the new structure_block kwarg leaves
+    the prompt structurally identical to pre-#109 output (modulo
+    formatting). Smart prompt text passes through the legacy shim."""
+    bp = _blueprint()
     prompt = assemble_generation_prompt(
-        artist=_artist(), blueprint=_blueprint(), voice_state=None,
+        artist=_artist(),
+        blueprint=bp,
+        voice_state=None,
+        legacy_smart_prompt_text=bp["smart_prompt_text"],
     )
     assert "[STRUCTURE]" not in prompt
     assert "Write a confident pop song" in prompt
@@ -44,11 +52,13 @@ def test_structure_block_is_prepended_first():
         {"name": "Verse", "bars": 16, "vocals": True},
         {"name": "Chorus", "bars": 8, "vocals": True},
     ])
+    bp = _blueprint()
     prompt = assemble_generation_prompt(
         artist=_artist(),
-        blueprint=_blueprint(),
+        blueprint=bp,
         voice_state=None,
         structure_block=sb,
+        legacy_smart_prompt_text=bp["smart_prompt_text"],
     )
     assert prompt.startswith("[STRUCTURE]")
     # Each section line is present
@@ -133,14 +143,17 @@ def test_persona_dna_injection_independent_of_blueprint():
     """The user's hard requirement: persona DNA appears in the prompt
     EVEN IF the blueprint mentions nothing about the artist's brand.
     The blueprint can change song-to-song; persona is a constant."""
-    bp = {"smart_prompt_text": "STYLE: punk thrash. LYRICS: scream about politics."}
+    bp_text = "STYLE: punk thrash. LYRICS: scream about politics."
     prompt = assemble_generation_prompt(
-        artist=_artist_with_dna(), blueprint=bp, voice_state=None,
+        artist=_artist_with_dna(),
+        blueprint={},
+        voice_state=None,
+        legacy_smart_prompt_text=bp_text,
     )
     assert "[PERSONA]" in prompt
     assert "[LYRICAL DNA]" in prompt
-    # Smart prompt still appears too — DNA layers ON TOP of, not in
-    # place of, the blueprint.
+    # Free-form blueprint text still appears too — DNA layers ON TOP
+    # of, not in place of, the blueprint.
     assert "punk thrash" in prompt
 
 

@@ -164,48 +164,260 @@ def _voice_state_reference_block(voice_state: dict | None, artist_song_count: in
     return "\n".join(parts)
 
 
+# ── Per-song theme resolver (#17 composition pivot) ──────────────────────
+# Per-song theme picked in the song generation window. Resolved here, not
+# stored as prompt text on the blueprint. Free-form strings pass through
+# verbatim. The two `*_default` sentinels look at artist DNA / genre
+# traits respectively so a single song can ride either rail without the
+# operator typing anything.
+
+_FIXED_THEME_FRAGMENTS: dict[str, str] = {
+    "love_relationships": (
+        "Lyrics center on a love relationship — attraction, tension, "
+        "intimacy, distance, reconciliation, or the small textures of "
+        "being with one specific person. Concrete imagery, not abstract."
+    ),
+    "sex": (
+        "Lyrics are openly sensual / sexual — desire, anticipation, "
+        "physicality. Adult and direct without being clinical or "
+        "gratuitous. Match the artist's edge profile."
+    ),
+    "introspection": (
+        "Lyrics are introspective — internal monologue, self-doubt, "
+        "self-discovery, processing an experience. First-person, "
+        "specific, restrained imagery."
+    ),
+    "family": (
+        "Lyrics are about family — parent, sibling, child, chosen "
+        "family. Specific moments, not generic gratitude. Tone can be "
+        "warm, complicated, or grieving depending on the artist."
+    ),
+    "god": (
+        "Lyrics engage spiritually — faith, doubt, prayer, the divine, "
+        "the soul. Frame consistent with the artist's persona "
+        "(devotional, searching, skeptical, etc.) — never preachy."
+    ),
+    "partying": (
+        "Lyrics are about going out, celebrating, getting loose. "
+        "Friends, the night, the room, the rush. Energetic and "
+        "specific over generic 'turn up' platitudes."
+    ),
+}
+
+
+def _theme_from_artist_default(artist: dict) -> str:
+    """Derive a theme directive from the artist's lyrical + persona DNA.
+
+    Reads `lyrical_dna.recurring_themes` first (the artist's house
+    themes), falling back to `persona_dna.recurring_motifs`. Returns
+    empty string if neither is present so the orchestrator skips the
+    block cleanly."""
+    ldna = artist.get("lyrical_dna") or {}
+    pdna = artist.get("persona_dna") or {}
+    themes = ldna.get("recurring_themes")
+    if isinstance(themes, list) and themes:
+        joined = ", ".join(str(t) for t in themes)
+        return f"Lyrics ride the artist's recurring themes: {joined}."
+    motifs = pdna.get("recurring_motifs")
+    if isinstance(motifs, list) and motifs:
+        joined = ", ".join(str(m) for m in motifs)
+        return f"Lyrics ride the artist's recurring motifs: {joined}."
+    return ""
+
+
+def _theme_from_genre_default(genre_traits: dict | None) -> str:
+    """Derive a theme directive from the genre's traits row.
+
+    Pulls `notes` (CEO-authored prose about how the genre handles
+    lyrics) and `structural_conventions` (form / length / hook
+    guidance). Falls back to the vocabulary era as a last hint."""
+    if not genre_traits:
+        return ""
+    parts: list[str] = []
+    if (notes := genre_traits.get("notes")):
+        parts.append(str(notes).strip())
+    if (struct := genre_traits.get("structural_conventions")):
+        parts.append(f"Structural conventions: {struct}")
+    if not parts:
+        if (era := genre_traits.get("vocabulary_era")):
+            parts.append(f"Lyrical vocabulary era: {era}")
+    if not parts:
+        return ""
+    return "Lyrics ride the genre's conventions. " + " ".join(parts)
+
+
+def _theme_block(
+    theme: str | None,
+    artist: dict,
+    genre_traits: dict | None,
+) -> str:
+    """
+    Resolve a per-song `theme` selection into a `[THEME]` prompt block.
+
+    Picklist values: 'artist_default' | 'genre_default' |
+    'love_relationships' | 'sex' | 'introspection' | 'family' | 'god' |
+    'partying'. Anything else is treated as free-text and passed
+    through verbatim (so the user can type a custom theme in the song
+    window and have it injected as-is). `None` is treated as
+    artist_default.
+    """
+    if theme is None or theme == "" or theme == "artist_default":
+        body = _theme_from_artist_default(artist)
+    elif theme == "genre_default":
+        body = _theme_from_genre_default(genre_traits)
+    elif theme in _FIXED_THEME_FRAGMENTS:
+        body = _FIXED_THEME_FRAGMENTS[theme]
+    else:
+        # Free-text: pass through verbatim.
+        body = str(theme).strip()
+    if not body:
+        return ""
+    return f"[THEME]\n{body}"
+
+
+# ── Blueprint sonic / lyrical / audience composer (#17) ──────────────────
+# Replaces the old `smart_prompt_text` author flow. We compose a `[STYLE]`
+# block from the blueprint's structured fields (genre, sonic targets,
+# audience, themes, production notes, references) so the operator can
+# adjust any field in the Blueprint UI and have it reflected in the
+# generated song without re-running an LLM author pass.
+
+_KEY_NAMES = ["C", "C♯/D♭", "D", "D♯/E♭", "E", "F", "F♯/G♭", "G", "G♯/A♭", "A", "A♯/B♭", "B"]
+_MODE_NAMES = {0: "minor", 1: "major"}
+
+
+def _style_block_from_blueprint(blueprint: dict) -> str:
+    """Compose a `[STYLE]` block from the blueprint's structured fields.
+
+    The blueprint is a pure recipe — sonic targets, lyrical guardrails,
+    audience, production references. We render it as a deterministic
+    prose block so what the user sees in the Blueprint UI is what the
+    music provider receives."""
+    if not blueprint:
+        return ""
+    lines: list[str] = []
+
+    # Genre identity
+    primary = blueprint.get("primary_genre") or blueprint.get("genre_id")
+    if primary:
+        adj = blueprint.get("adjacent_genres") or []
+        if isinstance(adj, list) and adj:
+            lines.append(f"Genre: {primary} (with influence from {', '.join(adj)})")
+        else:
+            lines.append(f"Genre: {primary}")
+
+    # Sonic targets
+    sonic_bits: list[str] = []
+    if (t := blueprint.get("target_tempo")) is not None:
+        sonic_bits.append(f"tempo {round(float(t))} BPM")
+    if (k := blueprint.get("target_key")) is not None:
+        try:
+            ki = int(k) % 12
+            mode = blueprint.get("target_mode")
+            mode_str = _MODE_NAMES.get(int(mode), "") if mode is not None else ""
+            sonic_bits.append(f"key {_KEY_NAMES[ki]}{(' ' + mode_str) if mode_str else ''}")
+        except Exception:
+            pass
+    for k_name, label in (
+        ("target_energy", "energy"),
+        ("target_danceability", "danceability"),
+        ("target_valence", "valence"),
+        ("target_acousticness", "acousticness"),
+    ):
+        if (v := blueprint.get(k_name)) is not None:
+            try:
+                sonic_bits.append(f"{label} {float(v):.2f}")
+            except Exception:
+                pass
+    if sonic_bits:
+        lines.append("Sonic target: " + ", ".join(sonic_bits) + ".")
+
+    # Lyrical guardrails (themes from the blueprint LAYER on top of the
+    # per-song theme — they're not the same thing. Blueprint themes are
+    # the recipe defaults; the per-song [THEME] block overrides scope.)
+    if (themes := blueprint.get("target_themes")):
+        if isinstance(themes, list) and themes:
+            lines.append(f"Recipe themes: {', '.join(str(t) for t in themes)}.")
+    if (avoid := blueprint.get("avoid_themes")):
+        if isinstance(avoid, list) and avoid:
+            lines.append(f"Avoid themes: {', '.join(str(t) for t in avoid)}.")
+    if (tone := blueprint.get("vocabulary_tone")):
+        lines.append(f"Vocabulary tone: {tone}.")
+
+    # Audience + voice requirements
+    if (aud := blueprint.get("target_audience_tags")):
+        if isinstance(aud, list) and aud:
+            lines.append(f"Target audience: {', '.join(str(a) for a in aud)}.")
+    vr = blueprint.get("voice_requirements")
+    if isinstance(vr, dict):
+        desc = vr.get("description") or vr.get("notes")
+        if desc:
+            lines.append(f"Voice requirements: {desc}.")
+        else:
+            for k, v in vr.items():
+                if isinstance(v, str) and v.strip():
+                    lines.append(f"Voice {k}: {v.strip()}.")
+    elif isinstance(vr, str) and vr.strip():
+        lines.append(f"Voice requirements: {vr.strip()}.")
+
+    # Production
+    if (notes := blueprint.get("production_notes")):
+        lines.append(f"Production notes: {notes}.")
+    if (refs := blueprint.get("reference_track_descriptors")):
+        if isinstance(refs, list) and refs:
+            lines.append(f"Reference feel: {'; '.join(str(r) for r in refs)}.")
+
+    if not lines:
+        return ""
+    return "[STYLE]\n" + "\n".join(lines)
+
+
 def assemble_generation_prompt(
     *,
     artist: dict,
     blueprint: dict,
     voice_state: dict | None,
     structure_block: str | None = None,
+    theme: str | None = None,
+    content_rating_override: str | None = None,
+    genre_traits: dict | None = None,
+    # Back-compat shim: callers from before #17 may still pass a literal
+    # smart_prompt_text. We accept it but no longer privilege it — it
+    # lands AFTER the composed [STYLE] block as a free-form addendum.
+    legacy_smart_prompt_text: str | None = None,
 ) -> str:
     """
-    Build the final text prompt the music provider receives.
+    Build the final text prompt the music provider receives (#17).
 
-    Contract (PRD §24 + task #109):
-      final_prompt =
-          structure_block +                 # task #109: prepended; empty if unset
-          artist.voice_dna_summary +
-          voice_state_reference_block +    # empty for first song
-          artist.persona_dna_summary +     # ALWAYS injected if present — keeps
-                                            #   the artist's identity stable across
-                                            #   blueprints / genres / sessions
-          artist.lyrical_dna_summary +     # ALWAYS injected if present — locks the
-                                            #   lyrical voice independent of the
-                                            #   blueprint's per-song themes
-          song_blueprint.smart_prompt_text +
-          production_constraints +
-          policy_constraints
+    Composition order:
+      structure_block             # [STRUCTURE] from genre_structures (#109)
+      voice_dna_summary           # [VOICE DNA] from artist
+      voice_reference_block       # [VOICE REFERENCE] from prior songs
+      persona_dna_summary         # [PERSONA] always injected if present
+      lyrical_dna_summary         # [LYRICAL DNA] always injected if present
+      style_block_from_blueprint  # [STYLE] composed from blueprint fields
+      theme_block                 # [THEME] from per-song picker
+      legacy_smart_prompt_text    # back-compat free-form addendum
+      production_constraints
+      policy_constraints
 
-    `structure_block` is the formatted [STRUCTURE]\\n[Section: N bars{,
-    instrumental}] block produced by `api.services.structure_prompt.
-    structure_block_for_prompt()`. It comes FIRST so Suno reads the
-    structural directive before the smart_prompt narrative — getting the
-    bar counts right is the load-bearing change for this feature.
+    No smart_prompt_text is read from the blueprint. The blueprint is a
+    pure recipe (genre + sonic + lyrical guardrails + audience), and the
+    per-song theme + content rating override are layered ON TOP of it
+    here. This is the #17 composition pivot.
 
-    Persona + lyrical DNA are injected UNCONDITIONALLY (regardless of
-    blueprint contents) so a single artist stays recognizable across
-    songs. Per-song themes from the blueprint layer ON TOP of these
-    artist-level constants — not in place of them.
+    `content_rating_override` (clean | explicit) wins over
+    `artist.content_rating` if supplied. Use this to wire up the per-song
+    clean/explicit toggle in the song window.
     """
     artist_song_count = int(artist.get("song_count") or 0)
     voice_summary = _voice_dna_summary(artist.get("voice_dna"))
     voice_ref = _voice_state_reference_block(voice_state, artist_song_count)
     persona_summary = _persona_dna_summary(artist.get("persona_dna"))
     lyrical_summary = _lyrical_dna_summary(artist.get("lyrical_dna"))
-    smart_prompt = (blueprint.get("smart_prompt_text") or "").strip()
+    style_block = _style_block_from_blueprint(blueprint or {})
+    theme_block = _theme_block(theme, artist or {}, genre_traits)
+    legacy_addendum = (legacy_smart_prompt_text or "").strip()
 
     production_constraints = [
         "[PRODUCTION]",
@@ -214,13 +426,19 @@ def assemble_generation_prompt(
         "Stereo master.",
     ]
 
-    policy_constraints = []
-    content_rating = artist.get("content_rating", "mild")
-    if content_rating == "clean":
+    # Per-song override > artist default. Mild is the artist default
+    # when nothing is set.
+    effective_rating = (
+        (content_rating_override or "").strip().lower()
+        or artist.get("content_rating", "mild")
+    )
+    policy_constraints: list[str] = []
+    if effective_rating == "clean":
         policy_constraints = ["[POLICY] No explicit language."]
-    elif content_rating == "mild":
+    elif effective_rating == "mild":
         policy_constraints = ["[POLICY] Mild language OK, no slurs."]
-    # explicit → no constraint injected
+    elif effective_rating == "explicit":
+        policy_constraints = ["[POLICY] Explicit language permitted; avoid slurs targeting protected groups."]
 
     blocks = [
         (structure_block or "").strip(),
@@ -228,7 +446,9 @@ def assemble_generation_prompt(
         voice_ref,
         persona_summary,
         lyrical_summary,
-        smart_prompt,
+        style_block,
+        theme_block,
+        legacy_addendum,
         "\n".join(production_constraints),
         "\n".join(policy_constraints),
     ]
