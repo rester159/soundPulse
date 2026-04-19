@@ -4531,36 +4531,47 @@ async def generate_blueprint_from_genre(
             "from_cache": True,
         }
 
-    # No base yet — research it via the LLM (Layer 5 of the breakout
-    # engine). The smart_prompt service still emits the prose prompt;
-    # we no longer rely on it for composition (#17), but we DO mine its
-    # rationale for sonic / theme / audience hints to seed the base
-    # blueprint's structured fields.
+    # No base yet — try the data-driven path first (smart_prompt with
+    # breakout events + culture references). If that refuses because the
+    # genre has no recent breakouts, fall through to a knowledge-only
+    # LLM research call so long-tail genres still get a base blueprint.
+    sp: dict | None = None
+    sp_failed_for_no_data = False
     try:
         sp = await generate_smart_prompt(
             db, genre=genre, model=body.model, edge_profile=body.edge_profile,
         )
     except Exception as exc:
         logger.exception("[blueprint-research-base] smart_prompt failed for %s", genre)
-        raise HTTPException(502, detail=f"research failed: {exc}")
+        sp = {"error": f"smart_prompt raised: {exc}"}
 
     if not sp or not sp.get("prompt"):
-        reason = (sp or {}).get("error") or (
-            "research returned nothing — check llm_calls for the LLM-side failure"
-        )
-        suggestion = ""
-        if "breakout events" in reason.lower() or "no breakout" in reason.lower():
-            suggestion = (
-                " — this genre has no recent breakout data; either pick a parent genre "
-                "(e.g. 'pop' instead of 'pop.k-pop.4th-gen-girl-group') or use "
-                "'Create manually' to author a base from scratch"
-            )
-        raise HTTPException(422, detail=f"{reason}{suggestion}")
+        reason = (sp or {}).get("error") or ""
+        if "breakout" in reason.lower() or "no breakout" in reason.lower() or "breakout events" in reason.lower():
+            sp_failed_for_no_data = True
+        else:
+            # A real failure (LLM outage, etc.) — surface it.
+            raise HTTPException(502, detail=f"research failed: {reason or 'unknown'}")
 
-    rationale = sp.get("rationale") or {}
-    # Best-effort extraction of structured hints from the LLM rationale.
-    # Each is optional — if smart_prompt's schema evolves, we just
-    # surface less, never crash.
+    rationale: dict[str, Any] = {}
+    composed_prompt_text: str | None = None
+    detected_via = "research_base_lazy"
+
+    if sp and sp.get("prompt"):
+        rationale = sp.get("rationale") or {}
+        composed_prompt_text = sp["prompt"]
+    else:
+        # Knowledge-only fallback. Doesn't depend on breakout data.
+        from api.services.genre_knowledge_research import research_genre_blueprint
+        kb = await research_genre_blueprint(db, genre_id=genre)
+        if kb.get("error"):
+            raise HTTPException(
+                502,
+                detail=f"both smart_prompt and knowledge-only research failed: {kb['error']}",
+            )
+        rationale = kb
+        detected_via = "research_base_knowledge_only"
+
     row = SongBlueprint(
         genre_id=genre,
         primary_genre=genre,
@@ -4570,15 +4581,17 @@ async def generate_blueprint_from_genre(
         avoid_themes=rationale.get("avoid_themes") or None,
         vocabulary_tone=rationale.get("vocabulary_tone"),
         target_audience_tags=rationale.get("target_audience_tags") or None,
+        voice_requirements=rationale.get("voice_requirements") or None,
         target_tempo=rationale.get("target_tempo"),
         target_energy=rationale.get("target_energy"),
         target_danceability=rationale.get("target_danceability"),
         target_valence=rationale.get("target_valence"),
+        target_acousticness=rationale.get("target_acousticness"),
         production_notes=rationale.get("production_notes"),
         reference_track_descriptors=rationale.get("reference_track_descriptors") or None,
-        smart_prompt_text=sp["prompt"],          # legacy; orchestrator ignores
+        smart_prompt_text=composed_prompt_text,  # legacy; orchestrator ignores
         smart_prompt_rationale=rationale,
-        detected_via="research_base_lazy",
+        detected_via=detected_via,
     )
     db.add(row)
     await db.commit()
@@ -4592,9 +4605,10 @@ async def generate_blueprint_from_genre(
         "status": row.status,
         "created_at": row.created_at.isoformat(),
         "from_cache": False,
-        "edge_profile": sp.get("edge_profile"),
-        "based_on": sp.get("based_on"),
-        "confidence": sp.get("confidence"),
+        "research_path": detected_via,
+        "edge_profile": (sp or {}).get("edge_profile"),
+        "based_on": (sp or {}).get("based_on"),
+        "confidence": (sp or {}).get("confidence"),
     }
 
 
