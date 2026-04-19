@@ -16,7 +16,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import {
   Sparkles, Plus, Edit3, Loader2, X, AlertCircle, CheckCircle2,
-  Users, Music, ChevronDown, Trash2, RefreshCw, Wand2, HelpCircle,
+  Users, Music, ChevronDown, Trash2, RefreshCw, HelpCircle,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -28,8 +28,8 @@ import {
   useAssignBlueprint,
   useGenerateSongForBlueprint,
   useGenreOpportunities,
-  useSynthesizePromptFromFields,
   useGenres,
+  useForkBlueprint,
 } from '../hooks/useSoundPulse'
 import GenreMultiPicker from '../components/GenreMultiPicker'
 
@@ -82,11 +82,12 @@ function StatusBadge({ status }) {
   )
 }
 
-function BlueprintCard({ blueprint, onEdit, onAssign, onGenerateSong, onView }) {
+function BlueprintCard({ blueprint, onEdit, onAssign, onGenerateSong, onView, onFork }) {
   const [busy, setBusy] = useState(null)
 
   const themes = blueprint.target_themes || []
   const audience = blueprint.target_audience_tags || []
+  const displayName = blueprint.name || blueprint.primary_genre || blueprint.genre_id
 
   const handleAssign = async () => {
     setBusy('assign')
@@ -96,13 +97,22 @@ function BlueprintCard({ blueprint, onEdit, onAssign, onGenerateSong, onView }) 
     setBusy('gen')
     try { await onGenerateSong(blueprint) } finally { setBusy(null) }
   }
+  const handleFork = async () => {
+    setBusy('fork')
+    try { await onFork(blueprint) } finally { setBusy(null) }
+  }
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <code className="text-sm font-semibold text-violet-300">{blueprint.primary_genre || blueprint.genre_id}</code>
+            <span className="text-sm font-semibold text-violet-200">{displayName}</span>
+            {blueprint.is_genre_default && (
+              <span className="text-[9px] uppercase tracking-wider text-violet-200 bg-violet-500/20 border border-violet-500/40 rounded px-1.5 py-0.5">
+                base
+              </span>
+            )}
             <StatusBadge status={blueprint.status} />
             {blueprint.predicted_success_score != null && (
               <span className="text-[10px] text-zinc-500 tabular-nums">
@@ -111,11 +121,21 @@ function BlueprintCard({ blueprint, onEdit, onAssign, onGenerateSong, onView }) 
             )}
           </div>
           <div className="text-[10px] text-zinc-600 mt-0.5">
-            id {blueprint.id.slice(0, 8)} · created {new Date(blueprint.created_at).toLocaleDateString()}
+            <code className="text-zinc-500">{blueprint.primary_genre || blueprint.genre_id}</code>
+            {' · '}id {blueprint.id.slice(0, 8)} · created {new Date(blueprint.created_at).toLocaleDateString()}
             {blueprint.assigned_artist_id && ` · artist ${blueprint.assigned_artist_id.slice(0, 8)}`}
           </div>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
+          <button
+            onClick={handleFork}
+            disabled={busy === 'fork'}
+            className="flex items-center gap-1 px-2 py-1 text-zinc-400 hover:text-cyan-300 hover:bg-cyan-500/10 rounded text-xs disabled:opacity-50"
+            title="Fork — duplicate this blueprint into a new editable copy"
+          >
+            {busy === 'fork' ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+            Fork
+          </button>
           <button
             onClick={() => onEdit(blueprint)}
             className="flex items-center gap-1 px-2 py-1 text-zinc-400 hover:text-violet-300 hover:bg-violet-500/10 rounded text-xs"
@@ -459,18 +479,16 @@ function GenerateFromGenreModal({ onClose, onCreated }) {
 function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
   const create = useCreateBlueprintManual()
   const update = useUpdateBlueprint()
-  const synthesize = useSynthesizePromptFromFields()
   const qc = useQueryClient()
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
-  const [synthError, setSynthError] = useState(null)
 
   const isEdit = Boolean(existingBlueprint)
   const e = existingBlueprint || {}
 
-  // Identity — primary + adjacent are now both multi-select. The first
-  // primary entry maps to the schema's single primary_genre column; the
-  // rest spill into adjacent_genres on save (deduplicated).
+  // Identity — name + primary + adjacent. Name is the user-facing label
+  // for forks of the same genre's base blueprint (#21).
+  const [name, setName] = useState(e.name || '')
   const initialPrimary = (() => {
     const seed = []
     if (e.primary_genre) seed.push(e.primary_genre)
@@ -520,14 +538,13 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
   const [productionNotes, setProductionNotes] = useState(e.production_notes || '')
   const [referenceTracks, setReferenceTracks] = useState(arr(e.reference_track_descriptors))
 
-  // Smart prompt body
-  const [smartPromptText, setSmartPromptText] = useState(e.smart_prompt_text || '')
-
   const mut = isEdit ? update : create
 
   // Resolve "primary genre" from the multi-select. First entry is the
   // canonical primary; everything else (plus the adjacent picker's
-  // contents) becomes adjacent_genres on save.
+  // contents) becomes adjacent_genres on save. Post-#17 the orchestrator
+  // composes the prompt from these structured fields — no
+  // smart_prompt_text needed.
   const buildBodyShape = () => {
     const primary = primaryGenres[0] || ''
     const restFromPrimary = primaryGenres.slice(1)
@@ -537,6 +554,7 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
     return {
       genre_id: primary,
       primary_genre: primary || undefined,
+      name: name.trim() || undefined,
       adjacent_genres: adjacentMerged,
       target_themes: csvSplit(targetThemes),
       avoid_themes: csvSplit(avoidThemes),
@@ -555,34 +573,14 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
     }
   }
 
-  const handleSynthesize = async () => {
-    setSynthError(null)
-    if (primaryGenres.length === 0) {
-      setSynthError('Pick at least one primary genre first')
-      return
-    }
-    try {
-      const body = buildBodyShape()
-      const res = await synthesize.mutateAsync({ body })
-      const promptText = res?.data?.prompt
-      if (promptText) {
-        setSmartPromptText(promptText)
-      } else {
-        setSynthError('LLM returned an empty prompt')
-      }
-    } catch (e2) {
-      setSynthError(e2?.response?.data?.detail || e2?.message || 'synthesis failed')
-    }
-  }
-
   const handleSubmit = async () => {
     setError(null)
     setResult(null)
-    if (primaryGenres.length === 0 || !smartPromptText.trim()) {
-      setError('At least one primary genre AND smart prompt text are required')
+    if (primaryGenres.length === 0) {
+      setError('Pick at least one primary genre')
       return
     }
-    const body = { ...buildBodyShape(), smart_prompt_text: smartPromptText.trim() }
+    const body = buildBodyShape()
     try {
       const res = isEdit
         ? await update.mutateAsync({ blueprintId: existingBlueprint.id, body })
@@ -646,6 +644,17 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
           <section>
             <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold mb-3">Identity</div>
             <div className="space-y-3">
+              <label className="block text-xs text-zinc-400">
+                Name
+                <FieldTooltip text="User-facing name for this blueprint. Useful when forking the same genre's base into multiple variants — e.g. 'pop.k-pop (base)', 'pop.k-pop — winter ballad', 'pop.k-pop — summer hype'. Optional; if blank, listings show the genre id." />
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(ev) => setName(ev.target.value)}
+                  placeholder={isEdit ? '(optional)' : 'e.g. pop.k-pop — summer hype'}
+                  className="mt-1 w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600"
+                />
+              </label>
               <label className="block text-xs text-zinc-400">
                 Primary genre(s) *
                 <FieldTooltip text="Pick one or more from the 959-genre taxonomy. The first selected becomes the canonical primary genre on the blueprint (used by genre_structures + genre_traits resolution); the rest are auto-merged into Adjacent genres. This does NOT add a new genre to the system taxonomy — it just references an existing one." />
@@ -737,30 +746,14 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
             </div>
           </section>
 
-          <section>
-            <div className="flex items-center justify-between mb-3">
-              <div className="text-[11px] uppercase tracking-wider text-violet-400 font-semibold">Smart prompt *</div>
-              <button
-                type="button"
-                onClick={handleSynthesize}
-                disabled={synthesize.isPending || primaryGenres.length === 0}
-                className="flex items-center gap-1.5 px-3 py-1 bg-violet-600/20 hover:bg-violet-600/40 border border-violet-500/40 disabled:opacity-50 text-violet-200 text-xs font-medium rounded transition-colors"
-                title="Generate the smart prompt from all the fields above using the LLM"
-              >
-                {synthesize.isPending ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
-                {synthesize.isPending ? 'Composing…' : 'Generate from fields'}
-              </button>
-            </div>
-            <div className="text-[11px] text-zinc-500 mb-2 leading-relaxed">
-              The actual text the orchestrator sends to Suno (after prepending [STRUCTURE] from §70 + voice DNA from the assigned artist). Click <strong>Generate from fields</strong> to have an LLM compose this from everything above, or paste/write directly. Edit freely — the textarea is the source of truth for what gets saved.
-            </div>
-            {ta(smartPromptText, setSmartPromptText, 'STYLE: …\nLYRICS:\n[Verse 1] …\n[Chorus] …', 12)}
-            {synthError && (
-              <div className="mt-2 bg-rose-500/10 border border-rose-500/30 rounded p-2 text-xs text-rose-300 flex items-center gap-2">
-                <AlertCircle size={12} /> {synthError}
-              </div>
-            )}
-          </section>
+          <div className="px-4 py-3 bg-violet-500/5 border border-violet-500/20 rounded-lg text-[11px] text-violet-200/80 leading-relaxed">
+            <strong className="text-violet-300">Note (#17 composition pivot):</strong> the song
+            prompt is now composed at generation time from the structured fields above
+            (genre + sonic + lyrical + audience + production) plus the assigned artist's
+            DNA, the per-genre [Section: N bars] structure, and the per-song theme +
+            clean/explicit picked in the Song Lab. Blueprints no longer carry a free-form
+            smart-prompt text — they're pure recipes.
+          </div>
 
           {error && (
             <div className="bg-rose-500/10 border border-rose-500/30 rounded p-2 text-xs text-rose-300 flex items-center gap-2">
@@ -782,11 +775,129 @@ function ManualBlueprintModal({ onClose, onSaved, existingBlueprint = null }) {
           <button onClick={onClose} className="px-4 py-2 text-zinc-400 text-xs hover:text-zinc-200">Cancel</button>
           <button
             onClick={handleSubmit}
-            disabled={mut.isPending || primaryGenres.length === 0 || !smartPromptText.trim()}
+            disabled={mut.isPending || primaryGenres.length === 0}
             className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium rounded flex items-center gap-2"
           >
             {mut.isPending ? <Loader2 size={14} className="animate-spin" /> : <Edit3 size={14} />}
             {mut.isPending ? (isEdit ? 'Saving…' : 'Creating…') : (isEdit ? 'Save changes' : 'Create blueprint')}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Modal: per-song theme + clean/explicit picker (#22) ────────────────
+// Opens when the user clicks "Generate song" on a blueprint card.
+// Picker output is forwarded to the orchestrator as theme +
+// content_rating_override so the prompt composes appropriately.
+
+const THEME_OPTIONS = [
+  { value: 'artist_default',     label: 'Artist default — pull from artist persona/lyrical DNA' },
+  { value: 'genre_default',      label: 'Genre default — pull from genre traits' },
+  { value: 'love_relationships', label: 'Love relationships' },
+  { value: 'sex',                label: 'Sex' },
+  { value: 'introspection',      label: 'Introspection' },
+  { value: 'family',             label: 'Family' },
+  { value: 'god',                label: 'God / spirituality' },
+  { value: 'partying',           label: 'Partying / having fun' },
+  { value: 'free_text',          label: 'Free text — type my own' },
+]
+
+function GenerateSongPickerModal({ blueprint, onClose, onSubmit, busy }) {
+  const [themeChoice, setThemeChoice] = useState('artist_default')
+  const [freeText, setFreeText] = useState('')
+  const [rating, setRating] = useState('')  // '' = use artist default
+
+  const canSubmit = themeChoice !== 'free_text' || freeText.trim().length > 0
+
+  const handleSubmit = () => {
+    const themePayload = themeChoice === 'free_text' ? freeText.trim() : themeChoice
+    onSubmit({
+      blueprint,
+      theme: themePayload,
+      contentRating: rating || null,
+    })
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-zinc-950 border border-zinc-800 rounded-xl max-w-lg w-full" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+            <Music size={14} className="text-violet-400" />
+            Generate song
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300"><X size={16} /></button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div className="text-xs text-zinc-500 leading-relaxed">
+            Using blueprint{' '}
+            <code className="text-violet-300 font-mono">{blueprint.name || blueprint.primary_genre || blueprint.genre_id}</code>.
+            The orchestrator composes the prompt from this blueprint + the
+            assigned artist's DNA + the per-genre structure + your picks below.
+          </div>
+
+          <label className="block text-xs text-zinc-400">
+            Lyrical theme
+            <select
+              value={themeChoice}
+              onChange={(e) => setThemeChoice(e.target.value)}
+              className="mt-1 w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100"
+            >
+              {THEME_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </label>
+
+          {themeChoice === 'free_text' && (
+            <label className="block text-xs text-zinc-400">
+              Custom theme
+              <textarea
+                value={freeText}
+                onChange={(e) => setFreeText(e.target.value)}
+                rows={3}
+                placeholder="e.g. Lyrics about driving back from a wedding at 4am, processing an old friendship"
+                className="mt-1 w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600"
+              />
+            </label>
+          )}
+
+          <div>
+            <label className="block text-xs text-zinc-400 mb-1.5">Content rating (this song only)</label>
+            <div className="flex gap-2">
+              {[
+                { v: '',         label: 'Artist default' },
+                { v: 'clean',    label: 'Clean' },
+                { v: 'explicit', label: 'Explicit' },
+              ].map((opt) => (
+                <button
+                  key={opt.v}
+                  onClick={() => setRating(opt.v)}
+                  className={`flex-1 px-3 py-2 text-xs rounded border transition-colors ${
+                    rating === opt.v
+                      ? 'bg-violet-600/20 border-violet-500/50 text-violet-100'
+                      : 'border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 p-4 border-t border-zinc-800">
+          <button onClick={onClose} className="px-4 py-2 text-zinc-400 text-xs hover:text-zinc-200">Cancel</button>
+          <button
+            onClick={handleSubmit}
+            disabled={busy || !canSubmit}
+            className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium rounded flex items-center gap-2"
+          >
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <Music size={14} />}
+            {busy ? 'Submitting…' : 'Generate'}
           </button>
         </div>
       </div>
@@ -844,7 +955,36 @@ export default function Blueprints() {
 
   const assign = useAssignBlueprint()
   const generateSong = useGenerateSongForBlueprint()
+  const fork = useForkBlueprint()
   const [actionStatus, setActionStatus] = useState(null)  // {kind, msg}
+
+  // Per-song picker — opens before the Generate song API call (#22).
+  const [generatingFor, setGeneratingFor] = useState(null)
+
+  const handleFork = async (blueprint) => {
+    setActionStatus(null)
+    const suggested = blueprint.name
+      ? `${blueprint.name} (fork)`
+      : `${blueprint.primary_genre || blueprint.genre_id} (fork)`
+    const name = prompt('Name for the new fork:', suggested)
+    if (name === null) return  // user cancelled
+    try {
+      const res = await fork.mutateAsync({
+        blueprintId: blueprint.id,
+        body: { name: name.trim() || undefined },
+      })
+      setActionStatus({
+        kind: 'success',
+        msg: `Forked → "${res?.data?.name}" (id ${res?.data?.id?.slice(0, 8)}). Edit it to diverge from the source.`,
+      })
+      qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] })
+    } catch (e) {
+      setActionStatus({
+        kind: 'error',
+        msg: e?.response?.data?.detail || e?.message || 'fork failed',
+      })
+    }
+  }
 
   const handleAssign = async (blueprint) => {
     setActionStatus(null)
@@ -864,14 +1004,25 @@ export default function Blueprints() {
     }
   }
 
+  // Click on the card opens the picker; picker confirms → fires the API
+  // call with the per-song theme + clean/explicit selections.
   const handleGenerateSong = async (blueprint) => {
     setActionStatus(null)
+    setGeneratingFor(blueprint)
+  }
+
+  const submitGenerateSong = async ({ blueprint, theme, contentRating }) => {
+    setActionStatus(null)
     try {
-      const res = await generateSong.mutateAsync({ blueprintId: blueprint.id, body: {} })
+      const body = {}
+      if (theme) body.theme = theme
+      if (contentRating) body.content_rating_override = contentRating
+      const res = await generateSong.mutateAsync({ blueprintId: blueprint.id, body })
       setActionStatus({
         kind: 'success',
         msg: `Song generation kicked off — song id ${res?.data?.song_id?.slice(0, 8) || ''}. Check Songs tab in ~60s.`,
       })
+      setGeneratingFor(null)
       qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] })
       qc.invalidateQueries({ queryKey: ['admin', 'songs'] })
     } catch (e) {
@@ -987,6 +1138,7 @@ export default function Blueprints() {
             onEdit={(b) => setEditing(b)}
             onAssign={handleAssign}
             onGenerateSong={handleGenerateSong}
+            onFork={handleFork}
             onView={(b) => setViewing(b.id)}
           />
         ))}
@@ -1013,6 +1165,14 @@ export default function Blueprints() {
       )}
       {viewing && (
         <BlueprintViewModal blueprintId={viewing} onClose={() => setViewing(null)} />
+      )}
+      {generatingFor && (
+        <GenerateSongPickerModal
+          blueprint={generatingFor}
+          onClose={() => setGeneratingFor(null)}
+          onSubmit={submitGenerateSong}
+          busy={generateSong.isPending}
+        />
       )}
     </div>
   )
