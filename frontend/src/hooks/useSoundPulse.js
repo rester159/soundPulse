@@ -905,6 +905,38 @@ export function useVersion() {
   })
 }
 
+// -------- Genres taxonomy (#19, #23) --------
+// Full 950-row taxonomy LEFT-JOINed with genre_traits. Used by the
+// Genres → Taxonomy editable grid.
+
+export function useGenresTaxonomy() {
+  return useQuery({
+    queryKey: ['admin', 'genres-taxonomy'],
+    queryFn: () => makeRequest('GET', '/admin/genres-taxonomy'),
+    staleTime: 60_000,
+  })
+}
+
+export function usePatchGenreTaxonomy() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ genreId, body }) =>
+      makeRequest('PATCH', `/admin/genres-taxonomy/${encodeURIComponent(genreId)}`, {}, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'genres-taxonomy'] }),
+  })
+}
+
+// -------- Blueprint forking (#18) --------
+
+export function useForkBlueprint() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ blueprintId, body }) =>
+      makeRequest('POST', `/admin/blueprints/${blueprintId}/fork`, {}, body || {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'blueprints'] }),
+  })
+}
+
 // -------- Genre structures (task #109) --------
 
 export function useGenreStructures() {

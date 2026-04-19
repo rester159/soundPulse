@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { Outlet } from 'react-router-dom'
 import {
   BarChart3, Search, Terminal, FlaskConical, Music, Settings as SettingsIcon, AudioLines,
   GitBranch, Database, MessageSquare, ChevronRight, Disc3, Users, Package, Sliders, Send,
-  Menu, X, AlertTriangle, Sparkles, Briefcase,
+  Menu, X, AlertTriangle, Sparkles, Briefcase, ListTree,
+  ChevronDown, ChevronUp, Folder, FolderPlus, Pencil, Trash2, Check,
 } from 'lucide-react'
 import AssistantPanel from './AssistantPanel'
 import SettingsDrawer from './SettingsDrawer'
+import SideNav from './SideNav'
 import { useAssistantVisibility } from '../contexts/AssistantVisibilityContext'
 import { useVersion } from '../hooks/useSoundPulse'
 
@@ -40,6 +42,7 @@ const NAV_ITEMS = [
   { to: '/explore',         label: 'Explore',         icon: Search },
   { to: '/song-lab',        label: 'Song Lab',        icon: Music },
   { to: '/blueprints',      label: 'Blueprints',      icon: Sparkles },
+  { to: '/genres',          label: 'Genres',          icon: ListTree },
   { to: '/songs',           label: 'Songs',           icon: Disc3 },
   { to: '/artists',         label: 'Artists',         icon: Users },
   { to: '/releases',        label: 'Releases',        icon: Package },
@@ -119,27 +122,8 @@ export default function Layout() {
         <span className="text-base font-semibold text-zinc-100 tracking-tight">SoundPulse</span>
       </div>
 
-      {/* Nav links */}
-      <nav className="flex-1 flex flex-col gap-0.5 px-2 py-3 overflow-y-auto">
-        {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            onClick={closeNav}
-            className={({ isActive }) =>
-              `flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                isActive
-                  ? 'bg-violet-500/10 text-violet-400'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
-              }`
-            }
-          >
-            <Icon className="w-4 h-4 flex-shrink-0" />
-            {label}
-          </NavLink>
-        ))}
-      </nav>
+      {/* Nav links — reorderable + folderable, persisted to localStorage */}
+      <SideNav navItems={NAV_ITEMS} onItemClick={closeNav} />
 
       {/* Settings */}
       <div className="px-2 py-3 border-t border-zinc-800">

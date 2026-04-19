@@ -19,6 +19,7 @@ import Assistant from './pages/Assistant'
 import DataFlow from './pages/DataFlow'
 import DbStats from './pages/DbStats'
 import Settings from './pages/Settings'
+import Genres from './pages/Genres'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -74,6 +75,7 @@ function App() {
             <Route path="/data-flow" element={<ErrorBoundary><DataFlow /></ErrorBoundary>} />
             <Route path="/db-stats" element={<ErrorBoundary><DbStats /></ErrorBoundary>} />
             <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
+            <Route path="/genres" element={<ErrorBoundary><Genres /></ErrorBoundary>} />
           </Route>
         </Routes>
       </BrowserRouter>
